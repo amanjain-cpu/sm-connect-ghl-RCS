@@ -1,0 +1,97 @@
+name: Bug Report
+description: Report a bug or regression
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. The more precise the repro and context, the faster it gets fixed.
+        A maintainer will set the `sev:*` and `area:*` labels during triage.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences — what's broken?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that make it happen.
+      placeholder: |
+        1. Go to ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      description: Which messaging channel is involved? Choose N/A if the bug isn't message-related.
+      options:
+        - "N/A"
+        - RCS
+        - WhatsApp
+        - MMS
+        - SMS
+        - Voice
+        - Email
+        - Web
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      description: Where did you see it?
+      options:
+        - local
+        - dev
+        - staging
+        - prod
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: Your assessment — a maintainer may adjust the label.
+      options:
+        - "critical — production down / data loss / security"
+        - "high — major feature broken, no workaround"
+        - "medium — broken but has a workaround"
+        - "low — minor or cosmetic"
+    validations:
+      required: true
+  - type: input
+    id: tenant
+    attributes:
+      label: Org / Tenant / Customer
+      description: Which customer account, tenant, or project were you testing in? Optional.
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots / console / network
+      description: Drag images here to attach them. Paste any console errors or relevant network details.
+    validations:
+      required: false
+
