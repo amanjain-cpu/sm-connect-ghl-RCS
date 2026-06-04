@@ -1,0 +1,77 @@
+name: Project / Work Request
+description: Request a feature, refactor, implementation slice, or project follow-up
+title: "[Project]: "
+labels: ["project"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when the work is more than a narrow bug fix. The goal is to capture enough context for Sam, Claude Code, Codex, or a human engineer to turn it into a focused PR plan.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What outcome do we want?
+      placeholder: "Example: Let account managers create a Hilton demo from a website URL and send a test RCS flow."
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What background, customer, conversation, repo, spec, or prior PR matters?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What must be true before this is done?
+      placeholder: |
+        - User can ...
+        - Tests cover ...
+        - Deployed to ...
+    validations:
+      required: true
+  - type: dropdown
+    id: work_type
+    attributes:
+      label: Work type
+      options:
+        - feature
+        - refactor
+        - docs
+        - security
+        - deps
+        - performance
+        - deploy
+        - research/spec
+    validations:
+      required: true
+  - type: dropdown
+    id: target_env
+    attributes:
+      label: Target environment
+      options:
+        - local
+        - dev
+        - staging
+        - prod
+        - not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints / non-goals
+      description: What should not change? Any security, customer, branch, or deploy constraints?
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / links
+      description: Link related PRs, issues, Slack/Telegram context, screenshots, logs, specs, or docs.
+    validations:
+      required: false
+
