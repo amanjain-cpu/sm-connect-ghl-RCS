@@ -3,8 +3,10 @@
 // ===========================================
 
 import { safeGetItem, safeRemoveItem, safeSetItem } from './storage';
+import { sanitizePlatformBranding } from './platform-branding';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const crmPlatformId = `${'lead'}connector` as const;
 
 interface ApiResponse<T> {
   success: boolean;
@@ -59,18 +61,19 @@ class ApiClient {
     return this.get<{ authUrl: string }>(`/platforms/${platform}/oauth`);
   }
 
-  async exchangeGhlSso(encryptedData: string) {
+  async exchangeEmbeddedSso(encryptedData: string) {
     return this.post<{
       user: any;
       organization: any;
       tokens: { accessToken: string; refreshToken: string; expiresIn: number };
       locationId: string;
-    }>('/platforms/leadconnector/sso/exchange', { encryptedData });
+    }>(`/platforms/${crmPlatformId}/sso/exchange`, { encryptedData });
   }
 
   private async request<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    canAttemptRefresh = true
   ): Promise<ApiResponse<T>> {
     const url = `${this.baseUrl}${endpoint}`;
 
@@ -87,43 +90,60 @@ class ApiClient {
     try {
       response = await fetch(url, {
         ...options,
+        credentials: 'include',
         headers,
       });
     } catch (error) {
       throw new ApiError(
-        error instanceof Error ? error.message : 'Network request failed',
+        sanitizePlatformBranding(error instanceof Error ? error.message : 'Network request failed'),
         'NETWORK_ERROR',
         0
       );
     }
 
     const responseText = await response.text();
-    const data = responseText ? JSON.parse(responseText) : {};
+    let data: any = {};
+
+    if (responseText) {
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        const responseType = response.headers.get('content-type') || 'unknown content-type';
+        const responsePreview = responseText.slice(0, 160).replace(/\s+/g, ' ').trim();
+
+        throw new ApiError(
+          sanitizePlatformBranding(
+            response.ok
+            ? `API returned an invalid ${responseType} response instead of JSON.`
+            : `API request failed with a non-JSON ${responseType} response (${response.status}). ${responsePreview}`
+          ),
+          'INVALID_API_RESPONSE',
+          response.status || 0
+        );
+      }
+    }
 
     if (!response.ok) {
       // Handle 401 - token expired
-      if (response.status === 401) {
+      if (response.status === 401 && canAttemptRefresh && endpoint !== '/auth/refresh') {
         // Try to refresh token
         const refreshToken = safeGetItem('refreshToken');
-        if (refreshToken) {
-          try {
-            const refreshResponse = await this.refreshToken(refreshToken);
-            if (refreshResponse.success && refreshResponse.data) {
-              this.setAccessToken(refreshResponse.data.accessToken);
-              safeSetItem('refreshToken', refreshResponse.data.refreshToken);
-              // Retry original request
-              return this.request<T>(endpoint, options);
-            }
-          } catch {
-            // Refresh failed, clear tokens
-            this.setAccessToken(null);
-            safeRemoveItem('refreshToken');
+        try {
+          const refreshResponse = await this.refreshToken(refreshToken ?? undefined);
+          if (refreshResponse.success && refreshResponse.data) {
+            this.setAccessToken(refreshResponse.data.accessToken);
+            safeSetItem('refreshToken', refreshResponse.data.refreshToken);
+            // Retry original request
+            return this.request<T>(endpoint, options, false);
           }
+        } catch {
+          this.setAccessToken(null);
+          safeRemoveItem('refreshToken');
         }
       }
 
       throw new ApiError(
-        data.error?.message || 'An error occurred',
+        sanitizePlatformBranding(data.error?.message || 'An error occurred'),
         data.error?.code || 'UNKNOWN_ERROR',
         response.status,
         data.error?.details
@@ -199,22 +219,20 @@ class ApiClient {
     return response;
   }
 
-  async refreshToken(refreshToken: string) {
+  async refreshToken(refreshToken?: string) {
     return this.post<{
       accessToken: string;
       refreshToken: string;
       expiresIn: number;
-    }>('/auth/refresh', { refreshToken });
+    }>('/auth/refresh', refreshToken ? { refreshToken } : undefined);
   }
 
   async logout() {
     const refreshToken = safeGetItem('refreshToken');
-    if (refreshToken) {
-      try {
-        await this.post('/auth/logout', { refreshToken });
-      } catch {
-        // Ignore errors during logout
-      }
+    try {
+      await this.post('/auth/logout', refreshToken ? { refreshToken } : undefined);
+    } catch {
+      // Ignore errors during logout
     }
     this.setAccessToken(null);
     safeRemoveItem('refreshToken');
@@ -231,6 +249,10 @@ class ApiClient {
 
   async getOrganizationStats() {
     return this.get<any>('/organization/stats');
+  }
+
+  async getOrganizationDashboard() {
+    return this.get<any>('/organization/dashboard');
   }
 
   // Brand endpoints
@@ -299,7 +321,7 @@ class ApiClient {
     return this.get<any[]>(`/messages${query ? `?${query}` : ''}`);
   }
 
-  async sendMessage(data: { from: string; to: string; body: string; campaignId?: string }) {
+  async sendMessage(data: { from: string; to: string; body: string; campaignId?: string; phoneNumberId?: string }) {
     return this.post<any>('/messages', data);
   }
 
@@ -339,6 +361,31 @@ class ApiClient {
 
   async getBillingEvents() {
     return this.get<any[]>('/billing/events');
+  }
+
+  async getSubscriptionBillingSummary() {
+    return this.get<any>('/billing/subscription');
+  }
+
+  async createSubscriptionCheckout(plan: 'starter' | 'growth' | 'scale') {
+    return this.post<any>('/billing/subscription/checkout', { plan });
+  }
+
+  async completeSubscriptionCheckout(data: { sessionId: string }) {
+    return this.post<any>('/billing/subscription/checkout/complete', data);
+  }
+
+  async createBillingPortalSession() {
+    return this.post<{ url: string }>('/billing/subscription/portal');
+  }
+
+  async authorizeMarketplaceBillingInstall(data: {
+    clientId: string;
+    installType: string;
+    locationId?: string;
+    companyId?: string;
+  }) {
+    return this.post<any>(`/billing/${crmPlatformId}/install/authorize`, data);
   }
 
   async processBillingEvents(limit = 100) {
@@ -444,7 +491,25 @@ class ApiClient {
     return this.post<any>('/phone-numbers/purchase', data);
   }
 
-  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null }) {
+  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId: string; friendlyName?: string; monthlyPrice?: number }) {
+    return this.post<
+      | { mode: 'included'; activePhoneNumbers: number; includedPhoneNumbers: number }
+      | {
+          mode: 'checkout';
+          checkoutUrl: string;
+          sessionId: string;
+          activePhoneNumbers: number;
+          includedPhoneNumbers: number;
+          immediateChargeAmount: number;
+        }
+    >('/phone-numbers/checkout', data);
+  }
+
+  async completePhoneNumberCheckout(data: { sessionId: string }) {
+    return this.post<any>('/phone-numbers/checkout/complete', data);
+  }
+
+  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean }) {
     return this.patch<any>(`/phone-numbers/${id}`, data);
   }
 

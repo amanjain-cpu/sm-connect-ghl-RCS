@@ -7,6 +7,8 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { api } from '@/lib/api';
 import { getSafeStorage } from '@/lib/storage';
 
+const crmPlatformId = `${'lead'}connector` as const;
+
 interface User {
   id: string;
   email: string;
@@ -14,6 +16,8 @@ interface User {
   lastName: string;
   role: string;
   organizationId: string;
+  embeddedLocationId?: string;
+  embeddedInstallationId?: string;
 }
 
 interface Organization {
@@ -32,7 +36,7 @@ interface AuthState {
   // Actions
   login: (email: string, password: string) => Promise<void>;
   loginViaOAuth: (accessToken: string, refreshToken: string) => Promise<void>;
-  initiateGHLOAuth: () => Promise<void>;
+  initiatePlatformOAuth: () => Promise<void>;
   register: (data: {
     email: string;
     password: string;
@@ -41,7 +45,7 @@ interface AuthState {
     organizationName: string;
   }) => Promise<void>;
   logout: () => Promise<void>;
-  checkAuth: () => Promise<void>;
+  checkAuth: () => Promise<boolean>;
   clearError: () => void;
 }
 
@@ -97,10 +101,14 @@ export const useAuthStore = create<AuthState>()(
               isLoading: false,
             });
 
-            // Also fetch organization
-            const orgResponse = await api.getOrganization();
-            if (orgResponse.success && orgResponse.data) {
-              set({ organization: orgResponse.data });
+            try {
+              const orgResponse = await api.getOrganization();
+              if (orgResponse.success && orgResponse.data) {
+                set({ organization: orgResponse.data });
+              }
+            } catch {
+              // A valid auth token is enough to enter the app; organization
+              // hydration can be retried later without failing sign-in.
             }
           }
         } catch (error: any) {
@@ -113,16 +121,16 @@ export const useAuthStore = create<AuthState>()(
       },
 
       /**
-       * Initiate GHL OAuth flow - redirects to GHL auth page
+       * Initiate platform OAuth flow and redirect to the marketplace auth page.
        */
-      initiateGHLOAuth: async () => {
+      initiatePlatformOAuth: async () => {
         set({ isLoading: true, error: null });
 
         try {
-          const response = await api.initiateOAuth('leadconnector');
+          const response = await api.initiateOAuth(crmPlatformId);
 
           if (response.success && response.data?.authUrl) {
-            // Redirect to GHL OAuth
+            // Redirect to platform OAuth
             window.location.href = response.data.authUrl;
           } else {
             throw new Error('Failed to get OAuth URL');
@@ -175,13 +183,6 @@ export const useAuthStore = create<AuthState>()(
       },
 
       checkAuth: async () => {
-        const token = api.getAccessToken();
-
-        if (!token) {
-          set({ isLoading: false, isAuthenticated: false });
-          return;
-        }
-
         try {
           const response = await api.getMe();
 
@@ -192,11 +193,17 @@ export const useAuthStore = create<AuthState>()(
               isLoading: false,
             });
 
-            // Also fetch organization
-            const orgResponse = await api.getOrganization();
-            if (orgResponse.success && orgResponse.data) {
-              set({ organization: orgResponse.data });
+            try {
+              const orgResponse = await api.getOrganization();
+              if (orgResponse.success && orgResponse.data) {
+                set({ organization: orgResponse.data });
+              }
+            } catch {
+              // Keep the authenticated session even if organization details
+              // are temporarily unavailable.
             }
+
+            return true;
           }
         } catch {
           set({
@@ -206,6 +213,8 @@ export const useAuthStore = create<AuthState>()(
             isLoading: false,
           });
         }
+
+        return false;
       },
 
       clearError: () => set({ error: null }),

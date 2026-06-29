@@ -5,7 +5,7 @@
 
 ## Project Summary
 
-**Signalmash Connect** is a GHL (GoHighLevel) marketplace app that integrates Signalmash SMS/MMS APIs with GHL sub-accounts for A2P 10DLC compliant messaging.
+**Signalmash Connect** is a CRM (CRM platform) marketplace app that integrates Signalmash SMS/MMS APIs with CRM sub-accounts for A2P 10DLC compliant messaging.
 
 ## Quick Start
 
@@ -28,7 +28,7 @@ packages/
 │   ├── src/
 │   │   ├── routes/      # API endpoints
 │   │   ├── services/    # Business logic
-│   │   ├── adapters/    # External API adapters (GHL, etc.)
+│   │   ├── adapters/    # External API adapters (CRM, etc.)
 │   │   └── middleware/  # Auth, validation, errors
 │   └── prisma/          # Database schema
 │
@@ -46,19 +46,19 @@ packages/
 
 - **Backend:** Node.js, Express, TypeScript, Prisma, PostgreSQL, Redis
 - **Frontend:** React, TypeScript, Vite, Tailwind CSS, Zustand
-- **Auth:** GHL OAuth SSO, JWT tokens
-- **External APIs:** GoHighLevel, Signalmash, TCR (10DLC)
+- **Auth:** CRM OAuth SSO, JWT tokens
+- **External APIs:** CRM platform, Signalmash, TCR (10DLC)
 
 ## Key Concepts
 
 ### Authentication
-- Users authenticate via GHL SSO OAuth flow
-- Each GHL location = one organization
+- Users authenticate via CRM SSO OAuth flow
+- Each CRM location = one organization
 - JWT tokens for API auth (7 day expiry)
 - Admin panel has separate auth
 
 ### Core Entities
-1. **Organization** - Represents a GHL location/sub-account
+1. **Organization** - Represents a CRM location/sub-account
 2. **Brand** - 10DLC brand registration for business identity
 3. **Campaign** - 10DLC campaign for message use case
 4. **PhoneNumber** - DID purchased from Signalmash
@@ -66,7 +66,7 @@ packages/
 
 ### Data Flow
 ```
-GHL User → OAuth → Organization created → Register Brand →
+CRM User → OAuth → Organization created → Register Brand →
 Create Campaign → Buy Phone Numbers → Send Messages
 ```
 
@@ -119,12 +119,12 @@ API_URL=http://localhost:3001
 VITE_API_URL=http://localhost:3001/api
 ```
 
-**Note:** GHL Client ID/Secret are configured at runtime via admin panel, not env files.
+**Note:** CRM Client ID/Secret are configured at runtime via admin panel, not env files.
 
 ## Admin Panel
 
 - **Setup:** `/admin/setup` - First-time admin password creation
-- **Settings:** `/admin/settings` - Configure GHL credentials
+- **Settings:** `/admin/settings` - Configure CRM credentials
 - **Dashboard:** `/admin/dashboard` - System overview
 
 ## API Patterns
@@ -146,7 +146,7 @@ VITE_API_URL=http://localhost:3001/api
 ## Current State
 
 ### Implemented
-- GHL OAuth SSO authentication
+- CRM OAuth SSO authentication
 - Organization management
 - Brand registration UI
 - Campaign management
@@ -172,14 +172,14 @@ Quick deploy:
 
 ## Gotchas
 
-1. **GHL OAuth:** Redirect URI must be real domain (not localhost) in production
+1. **CRM OAuth:** Redirect URI must be real domain (not localhost) in production
 2. **Encryption:** All secrets stored encrypted, need ENCRYPTION_KEY
-3. **Tokens:** GHL tokens stored encrypted in PlatformConnection
+3. **Tokens:** CRM tokens stored encrypted in PlatformConnection
 4. **UI Components:** Custom shadcn-style components in `components/ui/`
 
 ## External Documentation
 
-- GHL API: https://highlevel.stoplight.io/docs/
+- CRM API: CRM platform developer documentation
 - Signalmash: https://docs.signalmash.com/
 - 10DLC/TCR: https://www.campaignregistry.com/
 

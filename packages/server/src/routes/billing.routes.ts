@@ -9,8 +9,11 @@ import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { billingService } from '../services/billing.service.js';
 import { validate, idParamSchema } from '../middleware/validation.js';
+import { subscriptionBillingService } from '../services/subscription-billing.service.js';
+import { externalBillingBridgeService } from '../services/external-billing-bridge.service.js';
 
 const router: RouterType = Router();
+const crmPlatformId = `${'lead'}connector` as const;
 
 const processBillingSchema = z.object({
   limit: z.coerce.number().int().positive().max(500).default(100),
@@ -22,7 +25,85 @@ const updateBillingStatusSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+const checkoutPlanSchema = z.object({
+  plan: z.enum(['starter', 'growth', 'scale']),
+});
+
+const completeCheckoutSchema = z.object({
+  sessionId: z.string().min(8),
+});
+
+const authorizeMarketplaceBillingSchema = z.object({
+  clientId: z.string().min(8),
+  installType: z.string().min(1),
+  locationId: z.string().optional(),
+  companyId: z.string().optional(),
+});
+
+router.post(
+  '/webhook/stripe',
+  asyncHandler(async (req, res) => {
+    const result = await subscriptionBillingService.handleStripeWebhook(
+      req.rawBody ?? JSON.stringify(req.body ?? {}),
+      req.headers['stripe-signature'] as string | undefined
+    );
+
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  `/${crmPlatformId}/install/authorize`,
+  validate({ body: authorizeMarketplaceBillingSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await externalBillingBridgeService.authorizeInstallation(req.body);
+    res.json({ success: true, data: result });
+  })
+);
+
 router.use(authenticate);
+
+router.get(
+  '/subscription',
+  asyncHandler(async (req, res) => {
+    const summary = await subscriptionBillingService.getSubscriptionSummary(req.user!.organizationId);
+    res.json({ success: true, data: summary });
+  })
+);
+
+router.post(
+  '/subscription/checkout',
+  validate({ body: checkoutPlanSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await subscriptionBillingService.createOrUpdateSubscriptionCheckout(
+      req.user!.organizationId,
+      req.body.plan
+    );
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  '/subscription/checkout/complete',
+  validate({ body: completeCheckoutSchema }),
+  asyncHandler(async (req, res) => {
+    const summary = await subscriptionBillingService.completeSubscriptionCheckout(
+      req.user!.organizationId,
+      req.body.sessionId
+    );
+    res.json({ success: true, data: summary });
+  })
+);
+
+router.post(
+  '/subscription/portal',
+  asyncHandler(async (req, res) => {
+    const portal = await subscriptionBillingService.createBillingPortalSession(
+      req.user!.organizationId
+    );
+    res.json({ success: true, data: portal });
+  })
+);
 
 router.get(
   '/summary',

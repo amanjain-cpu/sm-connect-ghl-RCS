@@ -3,11 +3,11 @@
 // ===========================================
 
 import type { IntegrationPlatform, PlatformAdapter } from '@signalmash-connect/shared';
-import { ghlAdapter } from '../adapters/ghl.adapter.js';
+import { crmPlatformAdapter } from '../adapters/crm-platform.adapter.js';
 
 class PlatformAdapterRegistryService {
   private readonly adapters = new Map<IntegrationPlatform, PlatformAdapter>([
-    [ghlAdapter.platform, ghlAdapter],
+    [crmPlatformAdapter.platform, crmPlatformAdapter],
   ]);
 
   get(platform: IntegrationPlatform): PlatformAdapter {

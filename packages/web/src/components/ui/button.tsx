@@ -5,26 +5,28 @@ import { cn } from '@/lib/utils';
 import { Loader2 } from 'lucide-react';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium tracking-tight transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
   {
     variants: {
       variant: {
         default:
-          'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 active:scale-[0.98]',
+          'bg-primary text-primary-foreground shadow-card hover:bg-primary/90 active:scale-[0.99]',
         destructive:
-          'bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90 active:scale-[0.98]',
+          'bg-destructive text-destructive-foreground shadow-card hover:bg-destructive/90 active:scale-[0.99]',
         outline:
-          'border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground active:scale-[0.98]',
+          'border border-input bg-card text-foreground shadow-card hover:bg-accent hover:text-accent-foreground active:scale-[0.99]',
         secondary:
-          'bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80 active:scale-[0.98]',
+          'bg-secondary text-secondary-foreground border border-border hover:bg-muted active:scale-[0.99]',
         ghost: 'hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
         glass:
-          'glass-button active:scale-[0.98]',
+          'border border-input bg-card text-foreground shadow-card hover:bg-accent hover:text-accent-foreground active:scale-[0.99]',
         gradient:
-          'bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-md hover:from-blue-700 hover:to-purple-700 active:scale-[0.98]',
+          'bg-primary text-primary-foreground shadow-card hover:bg-primary/90 active:scale-[0.99]',
+        'brand-outline':
+          'border border-primary/30 bg-primary/5 text-primary hover:bg-primary/10 active:scale-[0.99]',
         success:
-          'bg-green-600 text-white shadow-sm hover:bg-green-700 active:scale-[0.98]',
+          'bg-success text-success-foreground shadow-card hover:bg-success/90 active:scale-[0.99]',
       },
       size: {
         default: 'h-10 px-4 py-2',
@@ -48,6 +50,7 @@ export interface ButtonProps
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
   isLoading?: boolean;
+  loadingText?: string;
   leftIcon?: React.ReactNode;
   rightIcon?: React.ReactNode;
 }
@@ -60,6 +63,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       size,
       asChild = false,
       isLoading = false,
+      loadingText,
       leftIcon,
       rightIcon,
       children,
@@ -80,7 +84,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         {isLoading ? (
           <>
             <Loader2 className="animate-spin" />
-            <span>Loading...</span>
+            <span>{loadingText ?? (typeof children === 'string' ? children : 'Working...')}</span>
           </>
         ) : (
           <>

@@ -83,9 +83,13 @@ export class PhoneNumberService {
     } catch (error) {
       if (error instanceof ExternalServiceError) {
         throw new AppError(
-          'Provider connection not yet verified. Ask an admin to run the Signalmash connection test in Runtime Settings before searching numbers.',
-          'PROVIDER_CONNECTION_BLOCKED',
-          503,
+          options.state || options.areaCode
+            ? 'The provider search failed for the selected criteria. Check the Signalmash runtime configuration and try again.'
+            : 'Enter a state or area code before searching for numbers.',
+          options.state || options.areaCode
+            ? 'PROVIDER_CONNECTION_BLOCKED'
+            : 'SEARCH_CRITERIA_REQUIRED',
+          options.state || options.areaCode ? 503 : 400,
           true,
           {
             provider: 'signalmash',
@@ -116,10 +120,11 @@ export class PhoneNumberService {
     } = {}
   ) {
     logger.info({ organizationId, phoneNumber }, 'Purchasing phone number');
+    const normalizedPhoneNumber = formatPhoneE164(phoneNumber);
 
     // Check if number is already owned
     const existing = await prisma.phoneNumber.findUnique({
-      where: { phoneNumber },
+      where: { phoneNumber: normalizedPhoneNumber },
     });
 
     if (existing) {
@@ -153,13 +158,21 @@ export class PhoneNumberService {
       );
     }
 
+    if (!campaign.signalmashCampaignId) {
+      throw new AppError(
+        'Campaign is approved locally but is missing its Signalmash campaign ID',
+        'CAMPAIGN_PROVIDER_ID_MISSING',
+        400
+      );
+    }
+
     let providerNumberId: string | null = null;
 
     try {
       // Purchase from Signalmash
       const result = await signalmashService.purchaseNumber(
         phoneNumber,
-        options.campaignId
+        campaign.signalmashCampaignId
       );
       providerNumberId = result.numberId;
 
@@ -170,13 +183,11 @@ export class PhoneNumberService {
 
       // Extract area code
       const areaCode = this.extractAreaCode(phoneNumber);
-      // Extract area code
-
       // Store in database
       const number = await prisma.phoneNumber.create({
         data: {
-          phoneNumber,
-          formattedNumber: this.formatPhoneNumber(phoneNumber),
+          phoneNumber: normalizedPhoneNumber,
+          formattedNumber: this.formatPhoneNumber(normalizedPhoneNumber),
           friendlyName: options.friendlyName,
           areaCode,
           signalmashNumberId: result.numberId,
@@ -198,7 +209,7 @@ export class PhoneNumberService {
         },
       });
 
-      logger.info({ numberId: number.id, phoneNumber }, 'Phone number purchased');
+      logger.info({ numberId: number.id, phoneNumber: normalizedPhoneNumber }, 'Phone number purchased');
 
       await integrationService.syncPhoneNumberMapping(number);
 
@@ -215,7 +226,7 @@ export class PhoneNumberService {
             organizationId,
             payload: {
               organizationId,
-              phoneNumber,
+              phoneNumber: normalizedPhoneNumber,
               providerNumberId,
               campaignId: options.campaignId,
             },
@@ -229,8 +240,8 @@ export class PhoneNumberService {
 
       if (error instanceof ExternalServiceError) {
         throw new AppError(
-          'Provider connection not yet verified. Ask an admin to run the Signalmash connection test in Runtime Settings before purchasing numbers.',
-          'PROVIDER_CONNECTION_BLOCKED',
+          'Signalmash phone-number provisioning failed. The DID may be unavailable, or SMS enablement for the selected campaign may have been rejected.',
+          'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE',
           503,
           true,
           {
@@ -509,6 +520,7 @@ export class PhoneNumberService {
     options: {
       status?: PhoneNumberStatus;
       campaignId?: string;
+      installationId?: string | null;
       page?: number;
       limit?: number;
     } = {}
@@ -533,6 +545,16 @@ export class PhoneNumberService {
         skip,
         take: limit,
         include: {
+          senderProfiles: {
+            where: {
+              platform: 'leadconnector',
+              isDefault: true,
+            },
+            select: {
+              id: true,
+              installationId: true,
+            },
+          },
           campaign: {
             select: {
               id: true,
@@ -552,7 +574,14 @@ export class PhoneNumberService {
     ]);
 
     return {
-      data: numbers,
+      data: numbers.map((number) => ({
+        ...number,
+        isDefaultSender: number.senderProfiles.some((profile) =>
+          options.installationId
+            ? profile.installationId === options.installationId
+            : true
+        ),
+      })),
       meta: {
         page,
         limit,
@@ -617,7 +646,11 @@ export class PhoneNumberService {
     data: {
       friendlyName?: string;
       campaignId?: string | null;
-    }
+      makeDefault?: boolean;
+    },
+    options: {
+      installationId?: string | null;
+    } = {}
   ) {
     const number = await this.getNumber(organizationId, numberId);
 
@@ -663,6 +696,7 @@ export class PhoneNumberService {
     logger.info({ numberId }, 'Phone number updated');
 
     await integrationService.syncPhoneNumberMapping(updated);
+    await this.ensureDefaultSenderProfiles(updated, data.makeDefault === true, options.installationId);
 
     return updated;
   }
@@ -691,6 +725,18 @@ export class PhoneNumberService {
           campaignId: null,
         },
       });
+
+      await prisma.senderProfile.updateMany({
+        where: {
+          organizationId,
+          phoneNumberId: numberId,
+        },
+        data: {
+          isDefault: false,
+        },
+      });
+
+      await this.ensureFallbackDefaultSenders(organizationId, numberId);
 
       logger.info({ numberId, phoneNumber: number.phoneNumber }, 'Phone number released');
 
@@ -762,17 +808,14 @@ export class PhoneNumberService {
   // Helpers
   // ===========================================
 
-  private async ensureDefaultSenderProfiles(number: PhoneNumber, makeDefault: boolean) {
-    const installations = await prisma.platformInstallation.findMany({
-      where: {
-        organizationId: number.organizationId,
-        platform: 'leadconnector',
-      },
-      select: { id: true },
-    });
-
-    const installationIds = installations.map((installation) => installation.id);
-    const targets = installationIds.length > 0 ? installationIds : [null];
+  private async ensureDefaultSenderProfiles(
+    number: PhoneNumber,
+    makeDefault: boolean,
+    installationId?: string | null
+  ) {
+    const targets = installationId
+      ? [installationId]
+      : await this.resolveSenderProfileTargets(number.organizationId);
 
     for (const installationId of targets) {
       if (makeDefault) {
@@ -834,6 +877,103 @@ export class PhoneNumberService {
           metadata: {
             signalmashNumberId: number.signalmashNumberId,
             campaignId: number.campaignId,
+            linkedExisting: true,
+          },
+        },
+      });
+    }
+  }
+
+  private async resolveSenderProfileTargets(organizationId: string) {
+    const installations = await prisma.platformInstallation.findMany({
+      where: {
+        organizationId,
+        platform: 'leadconnector',
+      },
+      select: { id: true },
+    });
+
+    const installationIds = installations.map((installation) => installation.id);
+    return installationIds.length > 0 ? installationIds : [null];
+  }
+
+  private async ensureFallbackDefaultSenders(organizationId: string, releasedNumberId: string) {
+    const installations = await prisma.platformInstallation.findMany({
+      where: {
+        organizationId,
+        platform: 'leadconnector',
+      },
+      select: { id: true },
+    });
+
+    const targetInstallationIds = installations.length > 0
+      ? installations.map((installation) => installation.id)
+      : [null];
+
+    const fallbackNumber = await prisma.phoneNumber.findFirst({
+      where: {
+        organizationId,
+        status: 'active',
+        id: { not: releasedNumberId },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    for (const installationId of targetInstallationIds) {
+      const existingDefault = await prisma.senderProfile.findFirst({
+        where: {
+          organizationId,
+          platform: 'leadconnector',
+          installationId,
+          isDefault: true,
+          phoneNumber: {
+            status: 'active',
+          },
+        },
+      });
+
+      if (existingDefault || !fallbackNumber) {
+        continue;
+      }
+
+      const fallbackProfile = await prisma.senderProfile.findFirst({
+        where: {
+          organizationId,
+          platform: 'leadconnector',
+          installationId,
+          phoneNumberId: fallbackNumber.id,
+        },
+      });
+
+      if (fallbackProfile) {
+        await prisma.senderProfile.update({
+          where: { id: fallbackProfile.id },
+          data: {
+            isDefault: true,
+            senderKey: fallbackNumber.phoneNumber,
+            senderLabel: fallbackNumber.friendlyName ?? fallbackNumber.formattedNumber,
+            metadata: {
+              signalmashNumberId: fallbackNumber.signalmashNumberId,
+              campaignId: fallbackNumber.campaignId,
+              linkedExisting: true,
+            },
+          },
+        });
+        continue;
+      }
+
+      await prisma.senderProfile.create({
+        data: {
+          organizationId,
+          installationId,
+          phoneNumberId: fallbackNumber.id,
+          platform: 'leadconnector',
+          senderKey: fallbackNumber.phoneNumber,
+          senderLabel: fallbackNumber.friendlyName ?? fallbackNumber.formattedNumber,
+          isDefault: true,
+          metadata: {
+            signalmashNumberId: fallbackNumber.signalmashNumberId,
+            campaignId: fallbackNumber.campaignId,
             linkedExisting: true,
           },
         },

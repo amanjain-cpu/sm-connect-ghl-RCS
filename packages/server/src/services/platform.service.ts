@@ -18,6 +18,7 @@ interface CreateConnectionInput {
   refreshToken?: string;
   tokenExpiresAt?: Date;
   scopes: string[];
+  status?: PlatformStatus;
   metadata?: Record<string, unknown>;
 }
 
@@ -32,6 +33,52 @@ interface UpdateConnectionInput {
 }
 
 export class PlatformService {
+  private async findLeadconnectorConnectionsForUninstall(input: {
+    locationId?: string;
+    companyId?: string;
+  }) {
+    if (input.locationId) {
+      return prisma.platformConnection.findMany({
+        where: {
+          platform: 'leadconnector',
+          platformAccountId: input.locationId,
+        },
+        select: {
+          id: true,
+          organizationId: true,
+          installationId: true,
+          platformAccountId: true,
+          metadata: true,
+        },
+      });
+    }
+
+    if (!input.companyId) {
+      return [];
+    }
+
+    const connections = await prisma.platformConnection.findMany({
+      where: {
+        platform: 'leadconnector',
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        installationId: true,
+        platformAccountId: true,
+        metadata: true,
+      },
+    });
+
+    return connections.filter((connection) => {
+      if (!connection.metadata || typeof connection.metadata !== 'object' || Array.isArray(connection.metadata)) {
+        return false;
+      }
+
+      return (connection.metadata as Record<string, unknown>).companyId === input.companyId;
+    });
+  }
+
   /**
    * Create a new platform connection
    */
@@ -52,7 +99,7 @@ export class PlatformService {
         refreshToken: data.refreshToken,
         tokenExpiresAt: data.tokenExpiresAt,
         scopes: data.scopes,
-        status: 'connected',
+        status: data.status ?? 'connected',
         metadata: data.metadata,
       });
     }
@@ -71,7 +118,7 @@ export class PlatformService {
         refreshToken: encryptedRefreshToken,
         tokenExpiresAt: data.tokenExpiresAt,
         scopes: data.scopes,
-        status: 'connected',
+        status: data.status ?? 'connected',
         metadata: (data.metadata ?? {}) as any,
       },
     });
@@ -145,6 +192,41 @@ export class PlatformService {
       },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  async getLeadconnectorAgencyConnectionByCompanyId(
+    companyId: string
+  ): Promise<PlatformConnection | null> {
+    const exactMatch = await prisma.platformConnection.findFirst({
+      where: {
+        platform: 'leadconnector',
+        platformAccountId: companyId,
+      },
+      orderBy: [
+        { updatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
+    });
+
+    if (!exactMatch) {
+      return null;
+    }
+
+    if (!exactMatch.metadata || typeof exactMatch.metadata !== 'object' || Array.isArray(exactMatch.metadata)) {
+      return null;
+    }
+
+    const metadata = exactMatch.metadata as Record<string, unknown>;
+    const metadataCompanyId =
+      typeof metadata.companyId === 'string' ? metadata.companyId : null;
+    const authClass =
+      typeof metadata.ghlAuthClass === 'string' ? metadata.ghlAuthClass.toLowerCase() : null;
+    const tokenLocationId =
+      typeof metadata.ghlTokenLocationId === 'string' ? metadata.ghlTokenLocationId : null;
+
+    return metadataCompanyId === companyId && authClass === 'company' && !tokenLocationId
+      ? exactMatch
+      : null;
   }
 
   async getConnectionSummaries(
@@ -276,6 +358,152 @@ export class PlatformService {
     });
 
     logger.info({ connectionId: id }, 'Platform disconnected');
+  }
+
+  async handleLeadconnectorUninstall(input: {
+    locationId?: string;
+    companyId?: string;
+    appId?: string;
+  }): Promise<{
+    disconnectedConnections: number;
+    removedInstallations: number;
+    revokedRefreshTokens: number;
+    purgedOAuthStates: number;
+    unlinkedMessages: number;
+    locationId?: string;
+    companyId?: string;
+  }> {
+    const matches = await this.findLeadconnectorConnectionsForUninstall({
+      locationId: input.locationId,
+      companyId: input.companyId,
+    });
+
+    if (matches.length === 0) {
+      logger.info(
+        { locationId: input.locationId, companyId: input.companyId, appId: input.appId },
+        'Received marketplace uninstall webhook with no matching connection'
+      );
+
+      return {
+        disconnectedConnections: 0,
+        removedInstallations: 0,
+        revokedRefreshTokens: 0,
+        purgedOAuthStates: 0,
+        unlinkedMessages: 0,
+        ...(input.locationId ? { locationId: input.locationId } : {}),
+        ...(input.companyId ? { companyId: input.companyId } : {}),
+      };
+    }
+
+    const connectionIds = matches.map((connection) => connection.id);
+    const organizationIds = Array.from(new Set(matches.map((connection) => connection.organizationId)));
+    const installationIds = Array.from(
+      new Set(
+        matches
+          .map((connection) => connection.installationId)
+          .filter((value): value is string => Boolean(value))
+      )
+    );
+
+    const cleanupSummary = await prisma.$transaction(async (tx) => {
+      let unlinkedMessages = 0;
+      let revokedRefreshTokens = 0;
+      let purgedOAuthStates = 0;
+
+      if (connectionIds.length > 0) {
+        const unlinkResult = await tx.message.updateMany({
+          where: {
+            platformConnectionId: { in: connectionIds },
+          },
+          data: {
+            platformConnectionId: null,
+            platformMessageId: null,
+            platformConversationId: null,
+          },
+        });
+        unlinkedMessages = unlinkResult.count;
+      }
+
+      if (installationIds.length > 0) {
+        await tx.senderProfile.deleteMany({
+          where: {
+            installationId: { in: installationIds },
+          },
+        });
+
+        await tx.externalResourceMapping.deleteMany({
+          where: {
+            installationId: { in: installationIds },
+          },
+        });
+      }
+
+      if (organizationIds.length > 0) {
+        const refreshTokenDeleteResult = await tx.refreshToken.deleteMany({
+          where: {
+            user: {
+              organizationId: {
+                in: organizationIds,
+              },
+            },
+          },
+        });
+        revokedRefreshTokens = refreshTokenDeleteResult.count;
+
+        const oauthStateDeleteResult = await tx.oAuthState.deleteMany({
+          where: {
+            platform: 'leadconnector',
+            organizationId: {
+              in: organizationIds,
+            },
+          },
+        });
+        purgedOAuthStates = oauthStateDeleteResult.count;
+      }
+
+      await tx.platformConnection.deleteMany({
+        where: {
+          id: { in: connectionIds },
+        },
+      });
+
+      if (installationIds.length > 0) {
+        await tx.platformInstallation.deleteMany({
+          where: {
+            id: { in: installationIds },
+          },
+        });
+      }
+
+      return {
+        unlinkedMessages,
+        revokedRefreshTokens,
+        purgedOAuthStates,
+      };
+    });
+
+    logger.info(
+      {
+        locationId: input.locationId,
+        companyId: input.companyId,
+        appId: input.appId,
+        connectionIds,
+        installationIds,
+        organizationIds,
+        cleanupSummary,
+      },
+      'Disconnected CRM marketplace installation after uninstall webhook'
+    );
+
+    return {
+      disconnectedConnections: connectionIds.length,
+      removedInstallations: installationIds.length,
+      revokedRefreshTokens: cleanupSummary.revokedRefreshTokens,
+      purgedOAuthStates: cleanupSummary.purgedOAuthStates,
+      unlinkedMessages: cleanupSummary.unlinkedMessages,
+      ...(input.locationId ? { locationId: input.locationId } : {}),
+      ...(input.companyId ? { companyId: input.companyId } : {}),
+    };
   }
 
   /**

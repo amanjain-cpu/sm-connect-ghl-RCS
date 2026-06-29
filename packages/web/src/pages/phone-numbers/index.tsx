@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -38,6 +39,7 @@ interface PhoneNumber {
   mmsCapable: boolean;
   voiceCapable: boolean;
   status: 'active' | 'pending' | 'suspended' | 'released';
+  isDefaultSender?: boolean;
   campaign: {
     id: string;
     name: string;
@@ -93,6 +95,19 @@ export function PhoneNumbersPage() {
     const loadData = async () => {
       try {
         setError(null);
+        const params = new URLSearchParams(window.location.search);
+        const checkoutStatus = params.get('checkout');
+        const sessionId = params.get('session_id');
+
+        if (checkoutStatus === 'success' && sessionId) {
+          await api.completePhoneNumberCheckout({ sessionId });
+          notify.success('Number purchased', 'The selected phone number was added to your inventory.');
+          window.history.replaceState({}, '', '/phone-numbers');
+        } else if (checkoutStatus === 'cancelled') {
+          notify.error('Checkout cancelled', 'The phone number purchase was not completed.');
+          window.history.replaceState({}, '', '/phone-numbers');
+        }
+
         const [numbersRes, statsRes] = await Promise.all([
           api.getPhoneNumbers(),
           api.getPhoneNumberStats(),
@@ -156,10 +171,10 @@ export function PhoneNumbersPage() {
       await reloadData();
       setShowReleaseDialog(false);
       setSelectedNumber(null);
-      notify.success('Number released', 'The phone number was removed from active inventory.');
+      notify.success('Number deprovisioned', 'The phone number was released from the provider and removed from active sending inventory.');
     } catch (releaseError) {
       console.error('Failed to release number:', releaseError);
-      notify.error('Release failed', 'The selected phone number could not be released.');
+      notify.error('Deprovision failed', 'The selected phone number could not be released from the provider.');
       setError('Failed to release the selected phone number.');
     } finally {
       setIsReleasing(false);
@@ -199,6 +214,24 @@ export function PhoneNumbersPage() {
     }
   };
 
+  const handleMakeDefaultSender = async (number: PhoneNumber) => {
+    try {
+      const response = await api.updatePhoneNumber(number.id, {
+        friendlyName: number.friendlyName || undefined,
+        campaignId: number.campaign?.id || null,
+        makeDefault: true,
+      });
+
+      if (response.success) {
+        await reloadData();
+        notify.success('Default sender updated', `${number.formattedNumber} is now the default sender for outbound traffic in the embedded app.`);
+      }
+    } catch (saveError) {
+      console.error('Failed to update default sender:', saveError);
+      notify.error('Default sender update failed', 'The selected number could not be set as the outbound default.');
+    }
+  };
+
   const filteredNumbers = phoneNumbers.filter((number) => {
     const query = searchQuery.toLowerCase();
     return (
@@ -229,8 +262,8 @@ export function PhoneNumbersPage() {
         }}
       />
 
-      <div className="space-y-6 p-4 sm:p-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+      <PageShell>
+        <PageSection className="px-6 py-6">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-2">
               <Badge variant="outline" className="w-fit border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300">
@@ -264,17 +297,17 @@ export function PhoneNumbersPage() {
               </div>
             </div>
           </div>
-        </section>
+        </PageSection>
 
         {!hasApprovedCampaigns && (
-          <Card className="border-amber-200 bg-amber-50 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/10">
+          <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
                 <Badge variant="warning" className="w-fit">Blocked</Badge>
-                <h3 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
+                <h3 className="text-lg font-semibold text-foreground">
                   Number provisioning is blocked until a campaign is approved
                 </h3>
-                <p className="max-w-2xl text-sm leading-6 text-amber-900/80 dark:text-amber-100/80">
+                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
                   The embedded onboarding flow needs at least one approved campaign before a number
                   can be bought and assigned for compliant traffic. Finish campaign approval first.
                 </p>
@@ -291,7 +324,7 @@ export function PhoneNumbersPage() {
           </Card>
         )}
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+        <PageSection className="p-4">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="w-full max-w-md">
               <Input
@@ -303,12 +336,12 @@ export function PhoneNumbersPage() {
               />
             </div>
             {error && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+              <div className="rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {error}
               </div>
             )}
           </div>
-        </section>
+        </PageSection>
 
         {isLoading ? (
           <div className="space-y-4">
@@ -378,6 +411,11 @@ export function PhoneNumbersPage() {
                               <StatusIcon className="h-3 w-3" />
                               {status.label}
                             </Badge>
+                            {number.isDefaultSender ? (
+                              <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">
+                                Default Sender
+                              </Badge>
+                            ) : null}
                           </div>
                           <p className="text-sm text-slate-600 dark:text-slate-400">
                             {number.friendlyName || 'No friendly name assigned'}
@@ -421,6 +459,14 @@ export function PhoneNumbersPage() {
 
                     <div className="mt-5 flex justify-end">
                       <div className="flex gap-2">
+                        {!number.isDefaultSender && number.status === 'active' ? (
+                          <Button
+                            variant="outline"
+                            onClick={() => handleMakeDefaultSender(number)}
+                          >
+                            Make Default Sender
+                          </Button>
+                        ) : null}
                         <Button
                           variant="outline"
                           onClick={() => openEditDialog(number)}
@@ -436,7 +482,7 @@ export function PhoneNumbersPage() {
                           }}
                           leftIcon={<Trash2 className="h-4 w-4" />}
                         >
-                          Release Number
+                          Deprovision Number
                         </Button>
                       </div>
                     </div>
@@ -448,7 +494,7 @@ export function PhoneNumbersPage() {
         )}
 
         {stats?.byAreaCode && stats.byAreaCode.length > 0 && (
-          <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+          <PageSection className="p-6">
             <div className="mb-4 flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-slate-400" />
               <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Top Area Codes</h3>
@@ -462,9 +508,9 @@ export function PhoneNumbersPage() {
                 </div>
               ))}
             </div>
-          </section>
+          </PageSection>
         )}
-      </div>
+      </PageShell>
 
       <SearchNumbersDialog
         open={showSearchDialog}
@@ -475,9 +521,9 @@ export function PhoneNumbersPage() {
       <Dialog open={showReleaseDialog} onOpenChange={setShowReleaseDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Release Phone Number</DialogTitle>
+            <DialogTitle>Deprovision Phone Number</DialogTitle>
             <DialogDescription>
-              This will release {selectedNumber?.formattedNumber} and remove it from your active inventory.
+              This releases {selectedNumber?.formattedNumber} at the provider level and marks it inactive in Signalmash Connect. It will no longer be available for outbound sending.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -485,7 +531,7 @@ export function PhoneNumbersPage() {
               Cancel
             </Button>
             <Button variant="destructive" onClick={handleReleaseNumber} isLoading={isReleasing}>
-              Release Number
+              Deprovision Number
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -496,7 +542,7 @@ export function PhoneNumbersPage() {
           <DialogHeader>
             <DialogTitle>Edit Phone Number</DialogTitle>
             <DialogDescription>
-              Update the friendly name or assign this number to an approved campaign.
+              Update the friendly name, assign this number to an approved campaign, or make it the embedded app's default outbound sender from the list view.
             </DialogDescription>
           </DialogHeader>
 

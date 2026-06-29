@@ -12,6 +12,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,6 +26,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { api, ApiError } from '@/lib/api';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { formatPhoneNumber, formatDateTime, normalizePhoneNumber } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
 
@@ -51,6 +53,7 @@ interface SenderNumber {
   formattedNumber: string;
   friendlyName: string | null;
   status: 'active' | 'pending' | 'suspended' | 'released';
+  isDefaultSender?: boolean;
   campaign: {
     id: string;
     name: string;
@@ -86,13 +89,13 @@ const getSendErrorMessage = (error: unknown) => {
         if (!Array.isArray(messages)) return [];
         return messages
           .filter((message): message is string => typeof message === 'string')
-          .map((message) => `${field}: ${message}`);
+          .map((message) => sanitizePlatformBranding(`${field}: ${message}`));
       })[0];
 
     if (firstError) return firstError;
   }
 
-  return error.message || 'The test message could not be sent.';
+  return sanitizePlatformBranding(error.message || 'The test message could not be sent.');
 };
 
 export function MessagesPage() {
@@ -108,6 +111,7 @@ export function MessagesPage() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [directionFilter, setDirectionFilter] = useState('all');
   const [composeForm, setComposeForm] = useState({
+    phoneNumberId: '',
     from: '',
     to: '',
     campaignId: '',
@@ -166,6 +170,7 @@ export function MessagesPage() {
     const defaultNumber = senderNumbers[0];
 
     setComposeForm({
+      phoneNumberId: defaultNumber?.id || '',
       from: defaultNumber?.phoneNumber || '',
       to: '',
       campaignId: defaultNumber?.campaign?.status === 'approved' ? defaultNumber.campaign.id : '',
@@ -179,6 +184,7 @@ export function MessagesPage() {
 
     try {
       const response = await api.sendMessage({
+        phoneNumberId: composeForm.phoneNumberId || undefined,
         from: normalizePhoneNumber(composeForm.from),
         to: normalizePhoneNumber(composeForm.to),
         body: composeForm.body,
@@ -236,8 +242,8 @@ export function MessagesPage() {
         }}
       />
 
-      <div className="space-y-6 p-4 sm:p-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+      <PageShell>
+        <PageSection className="px-6 py-6">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-2">
               <Badge variant="outline" className="w-fit border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300">
@@ -271,17 +277,17 @@ export function MessagesPage() {
               </div>
             </div>
           </div>
-        </section>
+        </PageSection>
 
         {!canRunTestSend && (
-          <Card className="border-amber-200 bg-amber-50 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/10">
+          <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
                 <Badge variant="warning" className="w-fit">Embedded Test Send Blocked</Badge>
-                <h3 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
+                <h3 className="text-lg font-semibold text-foreground">
                   Complete sender and campaign setup before sending test traffic
                 </h3>
-                <p className="max-w-2xl text-sm leading-6 text-amber-900/80 dark:text-amber-100/80">
+                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
                   {!hasActiveSenders
                     ? 'There are no active sender numbers yet. Finish number purchase or assignment first.'
                     : 'There is no approved campaign available for the embedded test-send flow yet. Finish campaign approval or assign a number to an approved campaign first.'}
@@ -301,7 +307,7 @@ export function MessagesPage() {
           </Card>
         )}
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+        <PageSection className="p-4">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div className="w-full max-w-md">
               <Input
@@ -353,7 +359,7 @@ export function MessagesPage() {
               </Button>
             </div>
           </div>
-        </section>
+        </PageSection>
 
         {isLoading ? (
           <div className="space-y-3">
@@ -420,9 +426,9 @@ export function MessagesPage() {
                           <p className="max-w-3xl text-sm leading-6 text-slate-700 dark:text-slate-300">
                             {message.body}
                           </p>
-                          {message.errorMessage && (
-                            <p className="text-sm text-red-600 dark:text-red-300">
-                              Error: {message.errorMessage}
+                          {message.errorMessage && (message.status === 'failed' || message.status === 'undelivered') && (
+                            <p className="text-sm text-destructive">
+                              Error: {sanitizePlatformBranding(message.errorMessage)}
                             </p>
                           )}
                         </div>
@@ -465,7 +471,7 @@ export function MessagesPage() {
             })}
           </div>
         )}
-      </div>
+      </PageShell>
 
       <Dialog open={showComposeDialog} onOpenChange={setShowComposeDialog}>
         <DialogContent className="max-w-2xl">
@@ -486,27 +492,32 @@ export function MessagesPage() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium">From Number</label>
                   <select
-                    value={composeForm.from}
+                    value={composeForm.phoneNumberId}
                     onChange={(e) => {
-                      const nextFrom = e.target.value;
-                      const selectedNumber = senderNumbers.find((number) => number.phoneNumber === nextFrom);
+                      const nextPhoneNumberId = e.target.value;
+                      const selectedNumber = senderNumbers.find((number) => number.id === nextPhoneNumberId);
 
                       setComposeForm((current) => ({
                         ...current,
-                        from: nextFrom,
+                        phoneNumberId: nextPhoneNumberId,
+                        from: selectedNumber?.phoneNumber || '',
                         campaignId: selectedNumber?.campaign?.status === 'approved'
                           ? selectedNumber.campaign.id
-                          : current.campaignId,
+                          : '',
                       }));
                     }}
                     className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
                   >
                     {senderNumbers.map((number) => (
-                      <option key={number.id} value={number.phoneNumber}>
+                      <option key={number.id} value={number.id}>
+                        {number.isDefaultSender ? '[Default] ' : ''}
                         {number.friendlyName ? `${number.friendlyName} • ` : ''}{number.formattedNumber}
                       </option>
                     ))}
                   </select>
+                  <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
+                    The default sender for outbound traffic in the embedded app is managed from the Phone Numbers screen.
+                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -540,7 +551,7 @@ export function MessagesPage() {
               </div>
 
               {!hasApprovedCampaigns && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                <div className="rounded-2xl border border-border bg-accent px-4 py-4 text-sm text-foreground">
                   No approved campaigns are available yet. Return to the campaign flow, complete approval, and then retry the embedded test send.
                 </div>
               )}

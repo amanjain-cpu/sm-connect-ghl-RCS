@@ -16,6 +16,7 @@ import {
   Users,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -100,8 +101,8 @@ export function BrandsPage() {
         }}
       />
 
-      <div className="space-y-6 p-4 sm:p-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+      <PageShell>
+        <PageSection className="px-6 py-6">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-2">
               <Badge variant="outline" className="w-fit border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300">
@@ -131,17 +132,17 @@ export function BrandsPage() {
               </div>
             </div>
           </div>
-        </section>
+        </PageSection>
 
         {summary.verified === 0 && (
-          <Card className="border-amber-200 bg-amber-50 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/10">
+          <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
                 <Badge variant="warning" className="w-fit">Onboarding blocker</Badge>
-                <h3 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
+                <h3 className="text-lg font-semibold text-foreground">
                   No verified brand is available yet
                 </h3>
-                <p className="max-w-2xl text-sm leading-6 text-amber-900/80 dark:text-amber-100/80">
+                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
                   The embedded rollout cannot proceed into campaign approval or number provisioning
                   until at least one business brand is verified. Create a draft, submit it, and return
                   here to monitor approval.
@@ -161,7 +162,7 @@ export function BrandsPage() {
           </Card>
         )}
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+        <PageSection className="p-4">
           <div className="max-w-md">
             <Input
               placeholder="Search brands by legal name, display name, vertical, relationship, or reference"
@@ -171,7 +172,7 @@ export function BrandsPage() {
               className="border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-900"
             />
           </div>
-        </section>
+        </PageSection>
 
         {isLoading ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -310,7 +311,7 @@ export function BrandsPage() {
             })}
           </div>
         )}
-      </div>
+      </PageShell>
     </div>
   );
 }

@@ -12,6 +12,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -226,7 +227,7 @@ export function NewCampaignPage() {
         subtitle="Set up a campaign using the actual backend approval schema."
       />
 
-      <div className="mx-auto max-w-5xl space-y-6 p-4 sm:p-6">
+      <PageShell contentClassName="max-w-5xl gap-6">
         <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-2">
@@ -249,14 +250,14 @@ export function NewCampaignPage() {
         </section>
 
         {brands.length === 0 && (
-          <Card className="border-amber-200 bg-amber-50 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/10">
+          <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
                 <Badge variant="warning" className="w-fit">Blocked</Badge>
-                <h3 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
+                <h3 className="text-lg font-semibold text-foreground">
                   Campaign creation is blocked until a brand is verified
                 </h3>
-                <p className="max-w-2xl text-sm leading-6 text-amber-900/80 dark:text-amber-100/80">
+                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
                   The embedded rollout cannot continue from brand setup into campaign setup until at least
                   one business brand is verified. Register the brand first, submit it, and return here after approval.
                 </p>
@@ -276,7 +277,7 @@ export function NewCampaignPage() {
         <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
           <CardContent className="p-6 sm:p-8">
             {submitError && (
-              <div className="mb-6 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+              <div className="mb-6 flex items-start gap-3 rounded-2xl border border-destructive/20 bg-destructive/10 px-4 py-4 text-sm text-destructive">
                 <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
                 <span>{submitError}</span>
               </div>
@@ -306,7 +307,7 @@ export function NewCampaignPage() {
                         </option>
                       ))}
                     </select>
-                    {errors.brandId && <p className="text-sm text-red-600 dark:text-red-300">{errors.brandId.message}</p>}
+                    {errors.brandId && <p className="text-sm text-destructive">{errors.brandId.message}</p>}
                     {brands.length === 0 && (
                       <p className="text-sm text-slate-600 dark:text-slate-400">
                         No verified brands are available yet. Register and verify a brand first.
@@ -338,7 +339,7 @@ export function NewCampaignPage() {
                       </label>
                     ))}
                   </div>
-                  {errors.useCase && <p className="text-sm text-red-600 dark:text-red-300">{errors.useCase.message}</p>}
+                  {errors.useCase && <p className="text-sm text-destructive">{errors.useCase.message}</p>}
                 </div>
 
                 <div className="space-y-2">
@@ -348,7 +349,7 @@ export function NewCampaignPage() {
                     className="min-h-[110px] w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
                     placeholder="Describe the messaging purpose, subscriber relationship, and expected campaign behavior."
                   />
-                  {errors.description && <p className="text-sm text-red-600 dark:text-red-300">{errors.description.message}</p>}
+                  {errors.description && <p className="text-sm text-destructive">{errors.description.message}</p>}
                 </div>
 
                 <div className="space-y-2">
@@ -358,7 +359,7 @@ export function NewCampaignPage() {
                     className="min-h-[110px] w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 shadow-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
                     placeholder="Describe how users opt in, where consent is captured, and how messages are triggered."
                   />
-                  {errors.messageFlow && <p className="text-sm text-red-600 dark:text-red-300">{errors.messageFlow.message}</p>}
+                  {errors.messageFlow && <p className="text-sm text-destructive">{errors.messageFlow.message}</p>}
                 </div>
               </section>
 
@@ -390,7 +391,7 @@ export function NewCampaignPage() {
                     </div>
                   ))}
                   {errors.sampleMessages && (
-                    <p className="text-sm text-red-600 dark:text-red-300">
+                    <p className="text-sm text-destructive">
                       {errors.sampleMessages.message}
                     </p>
                   )}
@@ -431,12 +432,12 @@ export function NewCampaignPage() {
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Privacy Policy Link</label>
                     <Input {...register('privacyPolicyLink')} placeholder="https://example.com/privacy" />
-                    {errors.privacyPolicyLink && <p className="text-sm text-red-600 dark:text-red-300">{errors.privacyPolicyLink.message}</p>}
+                    {errors.privacyPolicyLink && <p className="text-sm text-destructive">{errors.privacyPolicyLink.message}</p>}
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Terms & Conditions Link</label>
                     <Input {...register('termsAndConditionsLink')} placeholder="https://example.com/terms" />
-                    {errors.termsAndConditionsLink && <p className="text-sm text-red-600 dark:text-red-300">{errors.termsAndConditionsLink.message}</p>}
+                    {errors.termsAndConditionsLink && <p className="text-sm text-destructive">{errors.termsAndConditionsLink.message}</p>}
                   </div>
                 </div>
 
@@ -525,7 +526,7 @@ export function NewCampaignPage() {
             </form>
           </CardContent>
         </Card>
-      </div>
+      </PageShell>
     </div>
   );
 }

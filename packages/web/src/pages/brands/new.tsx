@@ -17,6 +17,7 @@ import {
   Users,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -216,7 +217,7 @@ const selectClassName =
 function requiredLabel(label: string) {
   return (
     <>
-      {label} <span className="text-red-500">*</span>
+      {label} <span className="text-destructive">*</span>
     </>
   );
 }
@@ -316,7 +317,7 @@ export function NewBrandPage() {
         subtitle="Capture the new brand wizard fields while keeping draft creation aligned with the current backend."
       />
 
-      <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
+      <PageShell contentClassName="max-w-6xl gap-6">
         <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-3xl space-y-2">
@@ -377,7 +378,7 @@ export function NewBrandPage() {
             </div>
 
             {submitError && (
-              <div className="mb-6 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+              <div className="mb-6 flex items-start gap-3 rounded-2xl border border-destructive/20 bg-destructive/10 px-4 py-4 text-sm text-destructive">
                 <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
                 <span>{submitError}</span>
               </div>
@@ -408,7 +409,7 @@ export function NewBrandPage() {
                             </option>
                           ))}
                         </select>
-                        {errors.legalForm && <p className="text-sm text-red-600 dark:text-red-300">{errors.legalForm.message}</p>}
+                        {errors.legalForm && <p className="text-sm text-destructive">{errors.legalForm.message}</p>}
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">{requiredLabel('Country of registration')}</label>
@@ -419,7 +420,7 @@ export function NewBrandPage() {
                             </option>
                           ))}
                         </select>
-                        {errors.registrationCountry && <p className="text-sm text-red-600 dark:text-red-300">{errors.registrationCountry.message}</p>}
+                        {errors.registrationCountry && <p className="text-sm text-destructive">{errors.registrationCountry.message}</p>}
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">{requiredLabel('Tax Number/ID/EIN')}</label>
@@ -445,7 +446,7 @@ export function NewBrandPage() {
                           ))}
                         </select>
                         {errors.businessIdentifierType && (
-                          <p className="text-sm text-red-600 dark:text-red-300">{errors.businessIdentifierType.message}</p>
+                          <p className="text-sm text-destructive">{errors.businessIdentifierType.message}</p>
                         )}
                       </div>
                       <div className="space-y-2">
@@ -499,7 +500,7 @@ export function NewBrandPage() {
                             </option>
                           ))}
                         </select>
-                        {errors.country && <p className="text-sm text-red-600 dark:text-red-300">{errors.country.message}</p>}
+                        {errors.country && <p className="text-sm text-destructive">{errors.country.message}</p>}
                       </div>
                       <div className="space-y-2 md:col-span-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">{requiredLabel('Website/Online Presence')}</label>
@@ -519,7 +520,7 @@ export function NewBrandPage() {
                             </option>
                           ))}
                         </select>
-                        {errors.verticalType && <p className="text-sm text-red-600 dark:text-red-300">{errors.verticalType.message}</p>}
+                        {errors.verticalType && <p className="text-sm text-destructive">{errors.verticalType.message}</p>}
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Reference ID</label>
@@ -583,7 +584,7 @@ export function NewBrandPage() {
                     </div>
 
                     {errors.brandRelationship && (
-                      <p className="text-sm text-red-600 dark:text-red-300">{errors.brandRelationship.message}</p>
+                      <p className="text-sm text-destructive">{errors.brandRelationship.message}</p>
                     )}
                   </section>
                 </div>
@@ -670,7 +671,7 @@ export function NewBrandPage() {
             </form>
           </CardContent>
         </Card>
-      </div>
+      </PageShell>
     </div>
   );
 }

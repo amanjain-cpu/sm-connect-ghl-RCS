@@ -35,6 +35,8 @@ model Organization {
   senderProfiles      SenderProfile[]
   suppressionEvents   SuppressionEvent[]
   billingEvents       BillingEvent[]
+  billingCharges      BillingCharge[]
+  subscription        OrganizationSubscription?
   portOrders          PortOrder[]
   deadLetterJobs      DeadLetterJob[]
   phoneNumbers        PhoneNumber[]
@@ -397,6 +399,41 @@ enum BillingStatus {
   failed
 }
 
+enum SubscriptionPlan {
+  starter
+  growth
+  scale
+}
+
+enum SubscriptionStatus {
+  pending
+  active
+  trialing
+  past_due
+  unpaid
+  canceled
+  incomplete
+  incomplete_expired
+  paused
+}
+
+enum BillingChargeKind {
+  subscription_checkout
+  message_overage
+  phone_number_activation
+  phone_number_mrc
+  invoice_adjustment
+}
+
+enum BillingChargeStatus {
+  pending
+  succeeded
+  failed
+  requires_action
+  canceled
+  blocked
+}
+
 enum PortOrderStatus {
   draft
   submitted
@@ -536,11 +573,80 @@ model BillingEvent {
 
   messageId String?   @map("message_id")
   message   Message?  @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  charges   BillingCharge[]
 
   @@index([organizationId])
   @@index([cycleMonth])
   @@index([status])
   @@map("billing_events")
+}
+
+model OrganizationSubscription {
+  id                           String             @id @default(uuid())
+  plan                         SubscriptionPlan?
+  status                       SubscriptionStatus @default(pending)
+  stripeCustomerId             String?            @unique @map("stripe_customer_id")
+  stripeSubscriptionId         String?            @unique @map("stripe_subscription_id")
+  stripeDefaultPaymentMethodId String?            @map("stripe_default_payment_method_id")
+  stripeLatestInvoiceId        String?            @map("stripe_latest_invoice_id")
+  currentPeriodStart           DateTime?          @map("current_period_start")
+  currentPeriodEnd             DateTime?          @map("current_period_end")
+  smsIncluded                  Int                @default(0) @map("sms_included")
+  mmsIncluded                  Int                @default(0) @map("mms_included")
+  phoneNumbersIncluded         Int                @default(0) @map("phone_numbers_included")
+  smsUsed                      Int                @default(0) @map("sms_used")
+  mmsUsed                      Int                @default(0) @map("mms_used")
+  pendingOverageBalance        Decimal            @default(0) @map("pending_overage_balance") @db.Decimal(12, 4)
+  billingBlockedAt             DateTime?          @map("billing_blocked_at")
+  billingBlockedReason         String?            @map("billing_blocked_reason")
+  activatedAt                  DateTime?          @map("activated_at")
+  canceledAt                   DateTime?          @map("canceled_at")
+  metadata                     Json?
+  createdAt                    DateTime           @default(now()) @map("created_at")
+  updatedAt                    DateTime           @updatedAt @map("updated_at")
+
+  organizationId String       @unique @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  charges BillingCharge[]
+
+  @@index([status])
+  @@map("organization_subscriptions")
+}
+
+model BillingCharge {
+  id                    String              @id @default(uuid())
+  chargeKey             String              @unique @map("charge_key")
+  kind                  BillingChargeKind
+  status                BillingChargeStatus @default(pending)
+  amount                Decimal             @db.Decimal(12, 4)
+  currency              String              @default("usd")
+  description           String
+  stripePaymentIntentId String?             @unique @map("stripe_payment_intent_id")
+  stripeCheckoutSessionId String?           @unique @map("stripe_checkout_session_id")
+  stripeInvoiceId       String?             @map("stripe_invoice_id")
+  stripeInvoiceItemId   String?             @unique @map("stripe_invoice_item_id")
+  failureReason         String?             @map("failure_reason")
+  metadata              Json?
+  processedAt           DateTime?           @map("processed_at")
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt @map("updated_at")
+
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?                   @map("subscription_id")
+  subscription   OrganizationSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  billingEventId String?       @map("billing_event_id")
+  billingEvent   BillingEvent? @relation(fields: [billingEventId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([subscriptionId])
+  @@index([kind])
+  @@index([status])
+  @@index([stripeInvoiceId])
+  @@map("billing_charges")
 }
 
 model PortOrder {

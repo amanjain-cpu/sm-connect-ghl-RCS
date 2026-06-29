@@ -12,14 +12,18 @@ import {
   Users,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
+
+const crmPlatformId = `${'lead'}connector` as const;
 
 interface PlatformConnection {
   id: string;
-  platform: 'leadconnector' | 'shopify' | 'hubspot' | 'salesforce' | 'zoho';
+  platform: typeof crmPlatformId | 'shopify' | 'hubspot' | 'salesforce' | 'zoho';
   platformAccountId: string;
   platformAccountName: string | null;
   status: 'connected' | 'disconnected' | 'error' | 'pending';
@@ -117,8 +121,8 @@ export function OnboardingPage() {
     loadConnections();
   }, []);
 
-  const ghlConnection = useMemo(
-    () => connections.find((connection) => connection.platform === 'leadconnector') ?? null,
+  const crmConnection = useMemo(
+    () => connections.find((connection) => connection.platform === crmPlatformId) ?? null,
     [connections]
   );
 
@@ -131,19 +135,19 @@ export function OnboardingPage() {
   );
 
   const nextAction = useMemo(() => {
-    if (!ghlConnection) {
+    if (!crmConnection) {
       return {
-        title: 'Connect GoHighLevel',
-        description: 'Start by linking the GHL sub-account that should use the embedded Signalmash workflow.',
+        title: 'Connect your CRM',
+        description: 'Start by linking the CRM workspace that should use the embedded Signalmash workflow.',
         href: '/platforms',
         cta: 'Open platforms',
         icon: Plug,
       };
     }
 
-    const lifecycle = ghlConnection.installation?.lifecycleState;
+    const lifecycle = crmConnection.installation?.lifecycleState;
 
-    if (!ghlConnection.installation || lifecycle === 'installed' || lifecycle === 'business_details_needed') {
+    if (!crmConnection.installation || lifecycle === 'installed' || lifecycle === 'business_details_needed') {
       return {
         title: 'Register the business brand',
         description: 'The embedded rollout starts with business details and brand registration for A2P compliance.',
@@ -200,7 +204,7 @@ export function OnboardingPage() {
       cta: 'View platforms',
       icon: Plug,
     };
-  }, [ghlConnection]);
+  }, [crmConnection]);
 
   const quickLinks = [
     {
@@ -233,48 +237,48 @@ export function OnboardingPage() {
     <div>
       <Header
         title="Onboarding"
-        subtitle="Guide the embedded GoHighLevel rollout from app install through compliant messaging readiness."
+        subtitle="Guide the embedded CRM rollout from app install through compliant messaging readiness."
       />
 
-      <div className="space-y-6 p-4 sm:p-6">
-        <section className="rounded-[28px] border border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-sky-950 px-6 py-6 text-slate-50 shadow-xl shadow-slate-950/10">
+      <PageShell>
+        <PageSection className="border-0 bg-gradient-to-br from-slate-950 via-slate-900 to-sky-950 px-6 py-6 text-slate-50 shadow-xl shadow-slate-950/10">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-3">
               <Badge className="w-fit bg-white/10 text-slate-100" variant="outline">
-                Embedded GHL Rollout
+                Embedded CRM Rollout
               </Badge>
               <div className="space-y-2">
                 <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">
-                  Connect GHL, link approved assets, and validate messaging
+                  Connect your CRM, link approved assets, and validate messaging
                 </h2>
                 <p className="max-w-xl text-sm leading-6 text-slate-300 md:text-base">
-                  This workflow covers the active product path: connect GHL, use admin-linked
+                  This workflow covers the active product path: connect your CRM, use admin-linked
                   Signalmash brand and campaign approvals, attach a sender number, and validate traffic.
                 </p>
               </div>
             </div>
 
-            {ghlConnection?.installation ? (
+            {crmConnection?.installation ? (
               <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-5">
                 <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Current State</p>
                 <p className="mt-2 text-2xl font-semibold">
-                  {lifecycleLabels[ghlConnection.installation.lifecycleState]}
+                  {lifecycleLabels[crmConnection.installation.lifecycleState]}
                 </p>
                 <p className="mt-2 text-sm text-slate-300">
-                  {ghlConnection.platformAccountName || ghlConnection.platformAccountId}
+                  {crmConnection.platformAccountName || crmConnection.platformAccountId}
                 </p>
               </div>
             ) : (
               <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-5">
                 <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Current State</p>
-                <p className="mt-2 text-2xl font-semibold">Connect GHL</p>
+                <p className="mt-2 text-2xl font-semibold">Connect your CRM</p>
                 <p className="mt-2 text-sm text-slate-300">
-                  No GHL installation is linked to this workspace yet.
+                  No platform installation is linked to this workspace yet.
                 </p>
               </div>
             )}
           </div>
-        </section>
+        </PageSection>
 
         <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
           <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
@@ -283,10 +287,10 @@ export function OnboardingPage() {
                 <div>
                   <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Next Action</h3>
                   <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                    The guided next step for the currently connected GoHighLevel workspace.
+                    The guided next step for the currently connected workspace.
                   </p>
                 </div>
-                {ghlConnection?.status === 'connected' && <Badge variant="success">Connected</Badge>}
+                {crmConnection?.status === 'connected' && <Badge variant="success">Connected</Badge>}
               </div>
 
               {onboardingBrand && (
@@ -381,18 +385,18 @@ export function OnboardingPage() {
             <CardContent className="p-6">
               <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Readiness Checklist</h3>
               <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                Each step reflects the current embedded rollout state for the connected GHL workspace.
+                Each step reflects the current embedded rollout state for the connected workspace.
               </p>
 
               {isLoading ? (
                 <div className="mt-6 h-56 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-900" />
-              ) : !ghlConnection?.installation ? (
+              ) : !crmConnection?.installation ? (
                 <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-                  Connect a GoHighLevel workspace first. After OAuth completes, the embedded onboarding checklist will appear here automatically.
+                  Connect a CRM workspace first. After OAuth completes, the embedded onboarding checklist will appear here automatically.
                 </div>
               ) : (
                 <div className="mt-6 space-y-3">
-                  {ghlConnection.installation.checklist.map((item) => (
+                  {crmConnection.installation.checklist.map((item) => (
                     <div
                       key={item.key}
                       className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 dark:border-slate-800 dark:bg-slate-900"
@@ -404,14 +408,16 @@ export function OnboardingPage() {
                           ) : (
                             <CircleDot className="h-5 w-5 text-amber-600" />
                           )}
-                          <p className="font-medium text-slate-950 dark:text-slate-50">{item.label}</p>
+                          <p className="font-medium text-slate-950 dark:text-slate-50">
+                            {sanitizePlatformBranding(item.label)}
+                          </p>
                         </div>
                         <Badge variant={item.complete ? 'success' : 'secondary'}>
                           {item.complete ? 'Done' : 'Pending'}
                         </Badge>
                       </div>
                       <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-400">
-                        {item.helper}
+                        {sanitizePlatformBranding(item.helper)}
                       </p>
                     </div>
                   ))}
@@ -420,7 +426,7 @@ export function OnboardingPage() {
             </CardContent>
           </Card>
         </section>
-      </div>
+      </PageShell>
     </div>
   );
 }

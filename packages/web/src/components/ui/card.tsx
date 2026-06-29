@@ -4,17 +4,17 @@ import { cn } from '@/lib/utils';
 const Card = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement> & {
-    variant?: 'default' | 'glass' | 'elevated';
+    variant?: 'default' | 'glass' | 'outline' | 'elevated';
   }
 >(({ className, variant = 'default', ...props }, ref) => (
   <div
     ref={ref}
     className={cn(
-      'rounded-2xl border text-card-foreground',
+      'rounded-2xl border border-border bg-card text-card-foreground',
       {
-        'bg-card shadow-sm': variant === 'default',
-        'glass-card': variant === 'glass',
-        'bg-card shadow-lg hover:shadow-xl transition-shadow duration-300': variant === 'elevated',
+        'shadow-card': variant === 'default' || variant === 'glass',
+        '': variant === 'outline',
+        'shadow-card-lg transition-shadow duration-200 hover:shadow-pop': variant === 'elevated',
       },
       className
     )}
@@ -41,7 +41,7 @@ const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h3
     ref={ref}
-    className={cn('font-semibold leading-none tracking-tight', className)}
+    className={cn('text-base font-semibold leading-none tracking-tight', className)}
     {...props}
   />
 ));
@@ -73,7 +73,7 @@ const CardFooter = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn('flex items-center p-6 pt-0', className)}
+    className={cn('flex items-center p-6 pt-0 border-t border-border/60 [&:not(:has(+*))]:border-t-0', className)}
     {...props}
   />
 ));

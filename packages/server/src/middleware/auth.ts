@@ -7,6 +7,7 @@ import { verifyAccessToken } from '../utils/jwt.js';
 import { UnauthorizedError, ForbiddenError } from '../utils/errors.js';
 import { prisma } from '../config/database.js';
 import type { UserRole } from '@prisma/client';
+import { getAccessTokenFromRequest } from '../utils/auth-cookies.js';
 
 // User info attached to authenticated requests
 export interface AuthenticatedUser {
@@ -16,6 +17,8 @@ export interface AuthenticatedUser {
   lastName: string;
   role: UserRole;
   organizationId: string;
+  embeddedLocationId?: string;
+  embeddedInstallationId?: string;
 }
 
 // Authenticated request type
@@ -42,14 +45,55 @@ export async function authenticate(
   next: NextFunction
 ): Promise<void> {
   try {
-    const authHeader = req.headers.authorization;
+    const token = getAccessTokenFromRequest(req);
 
-    if (!authHeader?.startsWith('Bearer ')) {
+    if (!token) {
       throw new UnauthorizedError('No token provided');
     }
-
-    const token = authHeader.slice(7);
     const decoded = await verifyAccessToken(token);
+
+    if (
+      typeof decoded.embeddedInstallationId === 'string' ||
+      typeof decoded.embeddedLocationId === 'string'
+    ) {
+      const installation = typeof decoded.embeddedInstallationId === 'string'
+        ? await prisma.platformInstallation.findFirst({
+            where: {
+              id: decoded.embeddedInstallationId,
+              organizationId: decoded.organizationId,
+            },
+            select: {
+              id: true,
+              externalAccountId: true,
+              status: true,
+            },
+          })
+        : await prisma.platformInstallation.findFirst({
+            where: {
+              organizationId: decoded.organizationId,
+              platform: 'leadconnector',
+              externalAccountId: decoded.embeddedLocationId as string,
+            },
+            select: {
+              id: true,
+              externalAccountId: true,
+              status: true,
+            },
+          });
+
+      if (
+        !installation ||
+        installation.status !== 'connected' ||
+        (
+          typeof decoded.embeddedLocationId === 'string' &&
+          installation.externalAccountId !== decoded.embeddedLocationId
+        )
+      ) {
+        throw new UnauthorizedError(
+          'Embedded app session is no longer active for this connected workspace'
+        );
+      }
+    }
 
     // Verify user still exists
     const user = await prisma.user.findUnique({
@@ -68,7 +112,15 @@ export async function authenticate(
       throw new UnauthorizedError('User not found');
     }
 
-    req.user = user;
+    req.user = {
+      ...user,
+      ...(typeof decoded.embeddedLocationId === 'string'
+        ? { embeddedLocationId: decoded.embeddedLocationId }
+        : {}),
+      ...(typeof decoded.embeddedInstallationId === 'string'
+        ? { embeddedInstallationId: decoded.embeddedInstallationId }
+        : {}),
+    };
     next();
   } catch (error) {
     next(error);
@@ -101,14 +153,53 @@ export async function optionalAuth(
   next: NextFunction
 ): Promise<void> {
   try {
-    const authHeader = req.headers.authorization;
+    const token = getAccessTokenFromRequest(req);
 
-    if (!authHeader?.startsWith('Bearer ')) {
+    if (!token) {
       return next();
     }
-
-    const token = authHeader.slice(7);
     const decoded = await verifyAccessToken(token);
+
+    if (
+      typeof decoded.embeddedInstallationId === 'string' ||
+      typeof decoded.embeddedLocationId === 'string'
+    ) {
+      const installation = typeof decoded.embeddedInstallationId === 'string'
+        ? await prisma.platformInstallation.findFirst({
+            where: {
+              id: decoded.embeddedInstallationId,
+              organizationId: decoded.organizationId,
+            },
+            select: {
+              id: true,
+              externalAccountId: true,
+              status: true,
+            },
+          })
+        : await prisma.platformInstallation.findFirst({
+            where: {
+              organizationId: decoded.organizationId,
+              platform: 'leadconnector',
+              externalAccountId: decoded.embeddedLocationId as string,
+            },
+            select: {
+              id: true,
+              externalAccountId: true,
+              status: true,
+            },
+          });
+
+      if (
+        !installation ||
+        installation.status !== 'connected' ||
+        (
+          typeof decoded.embeddedLocationId === 'string' &&
+          installation.externalAccountId !== decoded.embeddedLocationId
+        )
+      ) {
+        return next();
+      }
+    }
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
@@ -123,7 +214,15 @@ export async function optionalAuth(
     });
 
     if (user) {
-      req.user = user;
+      req.user = {
+        ...user,
+        ...(typeof decoded.embeddedLocationId === 'string'
+          ? { embeddedLocationId: decoded.embeddedLocationId }
+          : {}),
+        ...(typeof decoded.embeddedInstallationId === 'string'
+          ? { embeddedInstallationId: decoded.embeddedInstallationId }
+          : {}),
+      };
     }
 
     next();

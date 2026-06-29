@@ -162,12 +162,12 @@ pm2 status
 pm2 logs signalmash-server
 ```
 
-## Step 9: Configure GHL OAuth
+## Step 9: Configure CRM OAuth
 
 Now that you have a real domain:
 
-1. Go to your GHL Marketplace App settings
-2. Add Redirect URI: `https://api.yourdomain.com/api/v1/platforms/ghl/callback`
+1. Go to your CRM Marketplace App settings
+2. Add Redirect URI: `https://api.yourdomain.com/api/platforms/:platform/callback`
 3. Save the changes
 
 ## Verification

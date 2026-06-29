@@ -8,8 +8,9 @@ import { AppLayout } from '@/components/layout/app-layout';
 // Auth pages (SSO-based)
 import { ConnectPage } from '@/pages/auth/connect';
 import { AuthCallbackPage } from '@/pages/auth/callback';
-import { GhlSsoPage } from '@/pages/auth/ghl-sso';
+import { EmbeddedSsoPage } from '@/pages/auth/embedded-sso';
 import { InstallCompletePage } from '@/pages/auth/install-complete';
+import { BillingEntryPage } from '@/pages/billing/entry';
 // App pages
 import { OnboardingPage } from '@/pages/onboarding';
 import { DashboardPage } from '@/pages/dashboard';
@@ -23,6 +24,8 @@ import { PhoneNumbersPage } from '@/pages/phone-numbers';
 import { MessagesPage } from '@/pages/messages';
 import { PlatformsPage } from '@/pages/platforms';
 import { SettingsPage } from '@/pages/settings';
+import { HelpPage } from '@/pages/help';
+import { SubscriptionsPage } from '@/pages/subscriptions';
 // Admin pages
 import { AdminLoginPage } from '@/pages/admin/login';
 import { AdminSetupPage } from '@/pages/admin/setup';
@@ -39,9 +42,9 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-900 dark:to-gray-950">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <div className="h-12 w-12 rounded-full border-4 border-primary/25 border-t-primary animate-spin" />
           <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
@@ -64,9 +67,9 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-900 dark:to-gray-950">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <div className="h-12 w-12 rounded-full border-4 border-primary/25 border-t-primary animate-spin" />
           <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
@@ -95,10 +98,10 @@ function AdminProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-gray-400">Loading...</p>
+          <div className="h-12 w-12 rounded-full border-4 border-primary/25 border-t-primary animate-spin" />
+          <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
     );
@@ -121,10 +124,10 @@ function AdminPublicRoute({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-orange-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-gray-400">Loading...</p>
+          <div className="h-12 w-12 rounded-full border-4 border-primary/25 border-t-primary animate-spin" />
+          <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
     );
@@ -149,7 +152,7 @@ export default function App() {
   return (
     <AnimatePresence mode="wait">
       <Routes location={location} key={location.pathname}>
-        {/* Public Routes - GHL SSO based auth */}
+        {/* Public routes for embedded OAuth and sign-in */}
         <Route
           path="/connect"
           element={
@@ -179,13 +182,17 @@ export default function App() {
           path="/auth/embed"
           element={
             <NoAuthCheckRoute>
-              <GhlSsoPage />
+              <EmbeddedSsoPage />
             </NoAuthCheckRoute>
           }
         />
         <Route
-          path="/auth/ghl-sso"
-          element={<Navigate to="/auth/embed" replace />}
+          path="/billing"
+          element={
+            <NoAuthCheckRoute>
+              <BillingEntryPage />
+            </NoAuthCheckRoute>
+          }
         />
         {/* Legacy login redirect to connect */}
         <Route path="/login" element={<Navigate to="/connect" replace />} />
@@ -212,7 +219,9 @@ export default function App() {
           <Route path="phone-numbers" element={<PhoneNumbersPage />} />
           <Route path="messages" element={<MessagesPage />} />
           <Route path="platforms" element={<PlatformsPage />} />
+          <Route path="subscriptions" element={<SubscriptionsPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="help" element={<HelpPage />} />
         </Route>
 
         {/* Admin Routes */}

@@ -9,6 +9,12 @@ import { authService } from '../services/auth.service.js';
 import { validate, passwordSchema, emailSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import {
+  clearAuthCookies,
+  getRefreshTokenFromRequest,
+  setAuthCookies,
+} from '../utils/auth-cookies.js';
+import { UnauthorizedError } from '../utils/errors.js';
 
 const router: RouterType = Router();
 
@@ -29,7 +35,7 @@ const loginSchema = z.object({
 });
 
 const refreshTokenSchema = z.object({
-  refreshToken: z.string().min(1, 'Refresh token is required'),
+  refreshToken: z.string().min(1, 'Refresh token is required').optional(),
 });
 
 const changePasswordSchema = z.object({
@@ -46,6 +52,7 @@ router.post(
   validate({ body: registerSchema }),
   asyncHandler(async (req, res) => {
     const result = await authService.register(req.body);
+    setAuthCookies(req, res, result.tokens);
 
     res.status(201).json({
       success: true,
@@ -63,6 +70,7 @@ router.post(
   validate({ body: loginSchema }),
   asyncHandler(async (req, res) => {
     const result = await authService.login(req.body);
+    setAuthCookies(req, res, result.tokens);
 
     res.json({
       success: true,
@@ -79,7 +87,13 @@ router.post(
   '/refresh',
   validate({ body: refreshTokenSchema }),
   asyncHandler(async (req, res) => {
-    const tokens = await authService.refreshToken(req.body.refreshToken);
+    const refreshToken = req.body.refreshToken ?? getRefreshTokenFromRequest(req);
+    if (!refreshToken) {
+      throw new UnauthorizedError('Refresh token is required');
+    }
+
+    const tokens = await authService.refreshToken(refreshToken);
+    setAuthCookies(req, res, tokens);
 
     res.json({
       success: true,
@@ -96,7 +110,13 @@ router.post(
   '/logout',
   validate({ body: refreshTokenSchema }),
   asyncHandler(async (req, res) => {
-    await authService.logout(req.body.refreshToken);
+    const refreshToken = req.body.refreshToken ?? getRefreshTokenFromRequest(req);
+    if (!refreshToken) {
+      throw new UnauthorizedError('Refresh token is required');
+    }
+
+    await authService.logout(refreshToken);
+    clearAuthCookies(req, res);
 
     res.json({
       success: true,
@@ -114,6 +134,7 @@ router.post(
   authenticate,
   asyncHandler(async (req, res) => {
     await authService.logoutAll(req.user!.id);
+    clearAuthCookies(req, res);
 
     res.json({
       success: true,

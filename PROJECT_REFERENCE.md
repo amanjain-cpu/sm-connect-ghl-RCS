@@ -27,18 +27,18 @@
 
 ## Project Overview
 
-**Signalmash Connect** is a multi-platform marketplace application that integrates with GoHighLevel (GHL) and Signalmash APIs to provide SMS/MMS messaging capabilities for GHL sub-accounts.
+**Signalmash Connect** is a multi-platform marketplace application that integrates with CRM marketplace platform and Signalmash APIs to provide SMS/MMS messaging capabilities for CRM sub-accounts.
 
 ### Core Value Proposition
-- GHL users can connect their sub-accounts to Signalmash for A2P 10DLC compliant messaging
+- CRM users can connect their sub-accounts to Signalmash for A2P 10DLC compliant messaging
 - Users can register brands, create campaigns, purchase phone numbers (DIDs)
-- Messages sent through GHL are routed via Signalmash for delivery
+- Messages sent through CRM are routed via Signalmash for delivery
 - Provides a unified dashboard for managing all messaging operations
 
 ### Business Flow
-1. User installs the app from GHL marketplace
-2. User authenticates via GHL SSO (OAuth)
-3. System creates/links organization from GHL location data
+1. User installs the app from CRM marketplace
+2. User authenticates via CRM SSO (OAuth)
+3. System creates/links organization from CRM location data
 4. User registers their brand for 10DLC compliance
 5. User creates campaigns and gets them approved
 6. User purchases phone numbers and assigns to campaigns
@@ -53,7 +53,7 @@
 - **Framework:** Express.js
 - **Database:** PostgreSQL with Prisma ORM
 - **Cache:** Redis (ioredis)
-- **Authentication:** JWT tokens, GHL OAuth
+- **Authentication:** JWT tokens, CRM OAuth
 - **Validation:** Zod schemas
 - **Logging:** Pino logger
 - **Build:** TSX for development, TSC for production
@@ -106,7 +106,7 @@
                            ┌─────────────────────┼─────────────────────┐
                            ▼                     ▼                     ▼
                     ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-                    │     GHL     │       │  Signalmash │       │   TCR API   │
+                    │     CRM     │       │  Signalmash │       │   TCR API   │
                     │    OAuth    │       │   SMS API   │       │  (10DLC)    │
                     └─────────────┘       └─────────────┘       └─────────────┘
 ```
@@ -122,7 +122,7 @@ signalmash-connect/
 │   │   ├── src/
 │   │   │   ├── adapters/           # External API adapters
 │   │   │   │   ├── base.adapter.ts
-│   │   │   │   ├── ghl.adapter.ts  # GoHighLevel API
+│   │   │   │   ├── crm-platform.adapter.ts  # CRM platform API
 │   │   │   │   └── index.ts
 │   │   │   ├── config/             # Configuration
 │   │   │   │   ├── database.ts     # Prisma client
@@ -182,7 +182,7 @@ signalmash-connect/
 │   │   │   │       └── theme-toggle.tsx
 │   │   │   ├── pages/
 │   │   │   │   ├── auth/
-│   │   │   │   │   ├── connect.tsx     # GHL SSO login
+│   │   │   │   │   ├── connect.tsx     # CRM SSO login
 │   │   │   │   │   └── callback.tsx    # OAuth callback
 │   │   │   │   ├── dashboard/
 │   │   │   │   │   └── index.tsx
@@ -277,7 +277,7 @@ model User {
   role           UserRole  @default(member)
   organizationId String
 
-  // GHL-specific fields
+  // CRM-specific fields
   ghlUserId      String?   @unique
   ghlLocationId  String?
 }
@@ -387,8 +387,8 @@ model Message {
 model PlatformConnection {
   id              String    @id @default(uuid())
   organizationId  String
-  platform        Platform  // GHL, etc.
-  platformAccountId String  // GHL location ID
+  platform        Platform  // CRM, etc.
+  platformAccountId String  // CRM location ID
   accessToken     String    // Encrypted
   refreshToken    String?   // Encrypted
   tokenExpiresAt  DateTime?
@@ -430,7 +430,7 @@ model AppSettings {
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/` | List connected platforms |
-| GET | `/:platform/oauth` | Get OAuth URL (GHL) |
+| GET | `/:platform/oauth` | Get OAuth URL (CRM) |
 | GET | `/:platform/callback` | OAuth callback handler |
 | DELETE | `/:platform` | Disconnect platform |
 
@@ -477,7 +477,7 @@ model AppSettings {
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/signalmash` | Signalmash webhook receiver |
-| POST | `/ghl` | GHL webhook receiver |
+| POST | `/webhook` | CRM webhook receiver |
 
 ### Admin (`/api/admin`)
 | Method | Endpoint | Description |
@@ -501,7 +501,7 @@ model AppSettings {
 ### Public Routes
 | Path | Component | Description |
 |------|-----------|-------------|
-| `/connect` | ConnectPage | GHL SSO login page |
+| `/connect` | ConnectPage | CRM SSO login page |
 | `/auth/callback` | AuthCallbackPage | OAuth callback handler |
 
 ### Protected Routes (User)
@@ -525,32 +525,32 @@ model AppSettings {
 | `/admin/login` | AdminLoginPage | Admin login |
 | `/admin/setup` | AdminSetupPage | Initial setup wizard |
 | `/admin/dashboard` | AdminDashboardPage | Admin dashboard |
-| `/admin/settings` | AdminSettingsPage | App settings (GHL creds) |
+| `/admin/settings` | AdminSettingsPage | App settings (CRM creds) |
 | `/admin/organizations` | AdminOrganizationsPage | Manage orgs |
 
 ---
 
 ## Authentication Flow
 
-### GHL SSO Flow
+### CRM SSO Flow
 ```
-1. User clicks "Connect with GoHighLevel" on /connect
-2. Frontend calls GET /api/platforms/ghl/oauth
+1. User clicks "Connect with CRM platform" on /connect
+2. Frontend calls GET /api/platforms/:platform/oauth
 3. Backend:
    - Generates state token (UUID)
    - Stores state in oauth_states table with expiry
-   - Returns GHL OAuth URL with:
+   - Returns CRM OAuth URL with:
      - client_id (from AppSettings)
      - redirect_uri
      - scope (contacts.readonly conversations/message.write locations.readonly)
      - state token
-4. User redirects to GHL OAuth consent screen
-5. User approves, GHL redirects to /auth/callback?code=xxx&state=xxx
-6. Frontend sends code+state to GET /api/platforms/ghl/callback
+4. User redirects to CRM OAuth consent screen
+5. User approves, CRM redirects to /auth/callback?code=xxx&state=xxx
+6. Frontend sends code+state to GET /api/platforms/:platform/callback
 7. Backend:
    - Validates state token
-   - Exchanges code for tokens with GHL
-   - Fetches location info from GHL
+   - Exchanges code for tokens with CRM
+   - Fetches location info from CRM
    - Creates/updates organization
    - Creates/updates user
    - Creates PlatformConnection
@@ -578,14 +578,14 @@ model AppSettings {
 
 ## Platform Integrations
 
-### GoHighLevel (GHL)
+### CRM marketplace platform
 
 #### OAuth Configuration
 - **Client ID & Secret:** Stored in AppSettings (runtime configurable)
 - **Scopes:** contacts.readonly, conversations/message.write, locations.readonly
 - **Redirect URI:** `{APP_URL}/auth/callback`
 
-#### GHL Adapter (`packages/server/src/adapters/ghl.adapter.ts`)
+#### CRM Adapter (`packages/server/src/adapters/crm-platform.adapter.ts`)
 ```typescript
 class GHLAdapter extends BasePlatformAdapter {
   // Auth
@@ -636,15 +636,15 @@ class SignalmashService {
 
 ## Key Features
 
-### 1. Runtime GHL Credentials Configuration
-- Admin can configure GHL Client ID/Secret at runtime
+### 1. Runtime CRM Credentials Configuration
+- Admin can configure CRM Client ID/Secret at runtime
 - No hardcoded credentials in env files
 - Credentials stored encrypted in database
 - Admin panel at `/admin/settings` for configuration
 
 ### 2. Multi-tenant Organization Support
-- Each GHL location = one organization
-- Users linked to organizations via GHL location
+- Each CRM location = one organization
+- Users linked to organizations via CRM location
 - Full data isolation between organizations
 
 ### 3. 10DLC Compliance
@@ -668,7 +668,7 @@ class SignalmashService {
 
 ### 6. Admin Panel
 - Initial setup wizard
-- GHL credentials management
+- CRM credentials management
 - Organization overview
 - System statistics
 
@@ -703,7 +703,7 @@ API_URL="http://localhost:3001"
 SIGNALMASH_API_URL="https://api.signalmash.com"
 SIGNALMASH_API_KEY="your-signalmash-key"
 
-# Note: GHL credentials are stored in AppSettings, not env
+# Note: CRM credentials are stored in AppSettings, not env
 ```
 
 ### Frontend (.env)
@@ -765,7 +765,7 @@ pnpm dev
 1. Navigate to `http://localhost:5173/admin/setup`
 2. Create admin password
 3. Navigate to `/admin/settings`
-4. Configure GHL Client ID and Client Secret
+4. Configure CRM Client ID and Client Secret
 5. Configure Signalmash API Key (optional)
 
 ### Build for Production
@@ -876,7 +876,7 @@ See `deploy/nginx.conf` for reverse proxy template.
 
 1. **Webhook Implementation**
    - Signalmash delivery status webhooks
-   - GHL inbound message webhooks
+   - CRM inbound message webhooks
    - Message status sync
 
 2. **Full 10DLC Flow**
@@ -901,8 +901,8 @@ See `deploy/nginx.conf` for reverse proxy template.
 
 ### Configuration Notes
 
-- **GHL Marketplace:** App needs to be registered in GHL marketplace
-- **GHL Redirect URI:** Must be real domain (no localhost in production)
+- **CRM Marketplace:** App needs to be registered in CRM marketplace
+- **CRM Redirect URI:** Must be real domain (no localhost in production)
 - **Signalmash Account:** Need active account with API access
 - **10DLC:** TCR integration requires Signalmash account setup
 
@@ -957,7 +957,7 @@ pm2 monit
 This project is built for Signalmash Connect marketplace integration.
 
 For questions about:
-- **GHL Integration:** Refer to https://highlevel.stoplight.io/docs/
+- **CRM Integration:** Refer to CRM platform developer documentation
 - **Signalmash API:** Refer to https://docs.signalmash.com/
 - **10DLC/TCR:** Refer to https://www.campaignregistry.com/
 

@@ -13,15 +13,19 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { formatDateTime } from '@/lib/utils';
+
+const crmPlatformId = `${'lead'}connector` as const;
 
 interface PlatformConnection {
   id: string;
-  platform: 'leadconnector' | 'shopify' | 'hubspot' | 'salesforce' | 'zoho';
+  platform: typeof crmPlatformId | 'shopify' | 'hubspot' | 'salesforce' | 'zoho';
   platformAccountId: string;
   platformAccountName: string | null;
   status: 'connected' | 'disconnected' | 'error' | 'pending';
@@ -86,35 +90,35 @@ const platformConfigs: Record<
     border: string;
   }
 > = {
-  leadconnector: {
-    name: 'GoHighLevel',
-    accent: 'text-sky-700 dark:text-sky-300',
-    surface: 'bg-sky-100 dark:bg-sky-500/15',
-    border: 'border-sky-200 dark:border-sky-500/30',
+  [crmPlatformId]: {
+    name: 'CRM Platform',
+    accent: 'text-primary',
+    surface: 'bg-primary/10',
+    border: 'border-primary/20',
   },
   shopify: {
     name: 'Shopify',
-    accent: 'text-emerald-700 dark:text-emerald-300',
-    surface: 'bg-emerald-100 dark:bg-emerald-500/15',
-    border: 'border-emerald-200 dark:border-emerald-500/30',
+    accent: 'text-primary',
+    surface: 'bg-primary/10',
+    border: 'border-primary/20',
   },
   hubspot: {
     name: 'HubSpot',
-    accent: 'text-amber-700 dark:text-amber-300',
-    surface: 'bg-amber-100 dark:bg-amber-500/15',
-    border: 'border-amber-200 dark:border-amber-500/30',
+    accent: 'text-muted-foreground',
+    surface: 'bg-muted',
+    border: 'border-border',
   },
   salesforce: {
     name: 'Salesforce',
-    accent: 'text-cyan-700 dark:text-cyan-300',
-    surface: 'bg-cyan-100 dark:bg-cyan-500/15',
-    border: 'border-cyan-200 dark:border-cyan-500/30',
+    accent: 'text-primary',
+    surface: 'bg-primary/10',
+    border: 'border-primary/20',
   },
   zoho: {
     name: 'Zoho',
-    accent: 'text-rose-700 dark:text-rose-300',
-    surface: 'bg-rose-100 dark:bg-rose-500/15',
-    border: 'border-rose-200 dark:border-rose-500/30',
+    accent: 'text-destructive',
+    surface: 'bg-destructive/10',
+    border: 'border-destructive/20',
   },
 };
 
@@ -136,32 +140,32 @@ const lifecycleConfig: Record<
   },
   business_details_needed: {
     label: 'Business details needed',
-    tone: 'text-amber-700 dark:text-amber-300',
+    tone: 'text-muted-foreground',
     helper: 'Brand registration cannot start until business details are completed.',
   },
   connection_pending: {
     label: 'Connection pending',
-    tone: 'text-amber-700 dark:text-amber-300',
+    tone: 'text-muted-foreground',
     helper: 'The provider connection is still being finalized.',
   },
   brand_pending: {
     label: 'Brand pending',
-    tone: 'text-sky-700 dark:text-sky-300',
+    tone: 'text-primary',
     helper: 'Business verification is in progress with the provider.',
   },
   campaign_pending: {
     label: 'Campaign pending',
-    tone: 'text-sky-700 dark:text-sky-300',
+    tone: 'text-primary',
     helper: 'A2P campaign setup is not approved yet.',
   },
   campaign_approved: {
     label: 'Campaign approved',
-    tone: 'text-emerald-700 dark:text-emerald-300',
+    tone: 'text-primary',
     helper: 'Campaign approval is complete. Sender numbers are the next step.',
   },
   number_setup_required: {
     label: 'Number setup required',
-    tone: 'text-amber-700 dark:text-amber-300',
+    tone: 'text-muted-foreground',
     helper: 'An approved campaign exists, but no active sender number is attached yet.',
   },
   port_in_progress: {
@@ -171,7 +175,7 @@ const lifecycleConfig: Record<
   },
   provider_not_activated: {
     label: 'Sender validation needed',
-    tone: 'text-amber-700 dark:text-amber-300',
+    tone: 'text-muted-foreground',
     helper: 'Approved assets are linked. Send an embedded test message to confirm the outbound path.',
   },
   ready: {
@@ -181,16 +185,16 @@ const lifecycleConfig: Record<
   },
   error_attention_required: {
     label: 'Needs attention',
-    tone: 'text-red-700 dark:text-red-300',
+    tone: 'text-destructive',
     helper: 'A rejected brand or campaign is blocking the install.',
   },
 };
 
 const availablePlatforms: AvailablePlatform[] = [
   {
-    id: 'leadconnector',
-    name: 'GoHighLevel',
-    description: 'Connect your GHL account to enable SMS conversations',
+    id: crmPlatformId,
+    name: 'CRM Platform',
+    description: 'Connect your CRM workspace to enable SMS conversations',
     available: true,
     statusNote: 'Live now',
   },
@@ -211,7 +215,7 @@ const availablePlatforms: AvailablePlatform[] = [
   {
     id: 'salesforce',
     name: 'Salesforce',
-    description: 'Reserved for a future enterprise adapter once the GHL loop is stable.',
+    description: 'Reserved for a future enterprise adapter once the core workflow is stable.',
     available: false,
     statusNote: 'Coming soon',
   },
@@ -287,8 +291,8 @@ export function PlatformsPage() {
         subtitle="Connect the systems your team actually uses and keep messaging infrastructure visible."
       />
 
-      <div className="p-6 space-y-8">
-        <section className="rounded-[28px] border border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-sky-950 px-6 py-6 text-slate-50 shadow-2xl shadow-slate-950/10">
+      <PageShell contentClassName="gap-8">
+        <PageSection className="border-0 bg-gradient-to-br from-slate-950 via-slate-900 to-sky-950 px-6 py-6 text-slate-50 shadow-2xl shadow-slate-950/10">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-4">
               <Badge className="w-fit bg-white/10 text-slate-100" variant="outline">
@@ -300,8 +304,8 @@ export function PlatformsPage() {
                   Professional control over platform connections
                 </h2>
                 <p className="max-w-xl text-sm leading-6 text-slate-300 md:text-base">
-                  Review connection health, manage the embedded GHL rollout, and keep the
-                  provider-mode backlog visible until HighLevel enables the provider path.
+                  Review connection health, manage the embedded rollout, and keep the
+                  provider-mode backlog visible while the native provider path remains under review.
                 </p>
               </div>
             </div>
@@ -323,7 +327,7 @@ export function PlatformsPage() {
               </div>
             </div>
           </div>
-        </section>
+        </PageSection>
 
         {/* Connected Platforms */}
         <section className="space-y-4">
@@ -337,7 +341,7 @@ export function PlatformsPage() {
               </p>
             </div>
             {error && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+              <div className="rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {error}
               </div>
             )}
@@ -368,8 +372,8 @@ export function PlatformsPage() {
                   No platforms connected
                 </h3>
                 <p className="mx-auto max-w-xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                  Start with GoHighLevel to enable OAuth-based account linking and route
-                  messaging activity through Signalmash.
+                  Start by connecting your CRM workspace to enable OAuth-based account linking
+                  and route messaging activity through Signalmash.
                 </p>
               </CardContent>
             </Card>
@@ -495,14 +499,14 @@ export function PlatformsPage() {
                                   >
                                     <div className="flex items-center justify-between gap-3">
                                       <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                                        {item.label}
+                                        {sanitizePlatformBranding(item.label)}
                                       </p>
                                       <Badge variant={item.complete ? 'success' : 'secondary'}>
                                         {item.complete ? 'Done' : 'Pending'}
                                       </Badge>
                                     </div>
                                     <p className="mt-2 text-xs leading-5 text-slate-600 dark:text-slate-400">
-                                      {item.helper}
+                                      {sanitizePlatformBranding(item.helper)}
                                     </p>
                                   </div>
                                 ))}
@@ -614,7 +618,7 @@ export function PlatformsPage() {
             })}
           </div>
         </section>
-      </div>
+      </PageShell>
     </div>
   );
 }

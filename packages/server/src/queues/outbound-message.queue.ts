@@ -2,7 +2,7 @@
 // Outbound Message Queue
 // ===========================================
 
-import { Queue, Worker } from 'bullmq';
+import { Queue, UnrecoverableError, Worker } from 'bullmq';
 import type { JobsOptions } from 'bullmq';
 import { createRedisConnection } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
@@ -45,9 +45,9 @@ export const outboundMessageQueue = new Queue<GhlOutboundJobData>(OUTBOUND_QUEUE
 let outboundMessageWorker: Worker<GhlOutboundJobData> | null = null;
 
 export async function enqueueGhlOutboundMessage(data: GhlOutboundJobData) {
-  const jobId = `ghl:${data.connectionId}:${data.providerMessageId}`;
+  const jobId = `crm:${data.connectionId}:${data.providerMessageId}`;
 
-  return outboundMessageQueue.add('ghl-outbound', data, {
+  return outboundMessageQueue.add('platform-outbound', data, {
     jobId,
   });
 }
@@ -66,8 +66,52 @@ function isTerminalOutboundError(error: unknown): boolean {
     normalizedMessage.includes('opted out') ||
     normalizedMessage.includes('missing sender') ||
     normalizedMessage.includes('destination number') ||
-    normalizedMessage.includes('not configured')
+    normalizedMessage.includes('not configured') ||
+    normalizedMessage.includes('connection is not connected') ||
+    normalizedMessage.includes('authclass type is not allowed to access this scope') ||
+    normalizedMessage.includes('location-scoped token required')
   );
+}
+
+function isAuthClassScopeMismatchError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const normalizedMessage = error.message.toLowerCase();
+  return (
+    normalizedMessage.includes('authclass type is not allowed to access this scope') ||
+    normalizedMessage.includes('location-scoped token required')
+  );
+}
+
+function getConnectionMetadata(connection: Awaited<ReturnType<typeof platformService.getByIdUnsafe>>) {
+  if (
+    connection.metadata &&
+    typeof connection.metadata === 'object' &&
+    !Array.isArray(connection.metadata)
+  ) {
+    return connection.metadata as Record<string, unknown>;
+  }
+
+  return {};
+}
+
+async function markConnectionAuthClassError(connectionId: string, error: unknown) {
+  const connection = await platformService.getByIdUnsafe(connectionId);
+  const existingMetadata = getConnectionMetadata(connection);
+  const errorMessage = error instanceof Error ? error.message : 'Platform auth class scope mismatch';
+
+  await platformService.updateConnection(connection.id, {
+    status: 'error',
+    metadata: {
+      ...existingMetadata,
+      lastAuthClassScopeErrorAt: new Date().toISOString(),
+      lastAuthClassScopeError: errorMessage,
+      lastAuthClassScopeStage: 'outbound',
+      lastAuthClassScopeMismatch: true,
+    },
+  });
 }
 
 export function startOutboundMessageWorker() {
@@ -83,6 +127,12 @@ export function startOutboundMessageWorker() {
 
       if (!connection) {
         throw new Error(`Platform connection not found for job ${job.id}`);
+      }
+
+      if (connection.status !== 'connected') {
+        throw new UnrecoverableError(
+          `Platform connection is not connected (status=${connection.status})`
+        );
       }
 
       const existingMessage = await messageService.getByPlatformMessageId(
@@ -118,11 +168,22 @@ export function startOutboundMessageWorker() {
 
       const sentMessage = await messageService.dispatchQueuedMessage(queuedMessage.id);
 
-      await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
-        toPlatformAdapterConnection(connection),
-        data.providerMessageId,
-        'sent'
-      );
+      try {
+        await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
+          toPlatformAdapterConnection(connection),
+          data.providerMessageId,
+          'sent'
+        );
+      } catch (error) {
+        if (isAuthClassScopeMismatchError(error)) {
+          await markConnectionAuthClassError(connection.id, error);
+          throw new UnrecoverableError(
+            error instanceof Error ? error.message : 'Platform auth class scope mismatch'
+          );
+        }
+
+        throw error;
+      }
 
       return sentMessage;
     },
@@ -137,7 +198,15 @@ export function startOutboundMessageWorker() {
   });
 
   outboundMessageWorker.on('failed', async (job, error) => {
-    logger.error({ jobId: job?.id, error }, 'Outbound message job failed');
+    logger.error(
+      {
+        jobId: job?.id,
+        jobName: job?.name,
+        attemptsMade: job?.attemptsMade,
+        err: error,
+      },
+      'Outbound message job failed'
+    );
 
     const data = job?.data;
     if (!data) {
@@ -154,18 +223,27 @@ export function startOutboundMessageWorker() {
 
        await deadLetterService.record({
         queueName: OUTBOUND_QUEUE_NAME,
-        jobName: job?.name ?? 'ghl-outbound',
+        jobName: job?.name ?? 'platform-outbound',
         jobKey: String(job?.id ?? data.providerMessageId),
         payload: data as unknown as Record<string, unknown>,
         error: error instanceof Error ? error.message : 'Outbound queue failure',
         organizationId: connection.organizationId,
         metadata: {
           platformConnectionId: connection.id,
+          attemptsMade: job?.attemptsMade ?? 0,
         },
       });
 
       if (existingMessage && isTerminalOutboundError(error)) {
         await messageService.markFailed(existingMessage.id, error instanceof Error ? error.message : 'Outbound send failed');
+      }
+
+      if (connection.status !== 'connected') {
+        logger.warn(
+          { connectionId: connection.id, status: connection.status, jobId: job?.id },
+          'Skipping failed status push to platform because connection is not connected'
+        );
+        return;
       }
 
       await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
@@ -174,7 +252,7 @@ export function startOutboundMessageWorker() {
         'failed'
       );
     } catch (statusError) {
-      logger.error({ error: statusError, jobId: job?.id }, 'Failed to push failed status back to GHL');
+      logger.error({ err: statusError, jobId: job?.id }, 'Failed to push failed status back to the CRM platform');
     }
   });
 

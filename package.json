@@ -1,7 +1,7 @@
 {
   "name": "signalmash-connect",
   "version": "1.0.0",
-  "description": "Multi-platform SMS integration platform with Signalmash - GHL, Shopify, HubSpot, Salesforce, Zoho",
+  "description": "Multi-platform SMS integration platform with Signalmash for CRM and commerce workflows",
   "private": true,
   "workspaces": [
     "packages/*"

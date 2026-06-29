@@ -58,7 +58,7 @@ export function AdminDashboardPage() {
   const quickActions = [
     {
       title: 'Runtime Settings',
-      description: 'Manage Signalmash and GHL configuration stored in app settings.',
+      description: 'Manage Signalmash and platform OAuth configuration stored in app settings.',
       href: '/admin/settings',
       icon: Key,
     },

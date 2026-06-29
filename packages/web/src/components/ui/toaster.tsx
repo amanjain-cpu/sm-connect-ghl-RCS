@@ -3,22 +3,23 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 import { Button } from './button';
 import { useNotificationStore } from '@/stores/notification.store';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
 
 const variantConfig = {
   success: {
     icon: CheckCircle2,
-    card: 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-100',
-    iconColor: 'text-emerald-600 dark:text-emerald-300',
+    card: 'border-primary/20 bg-primary/10 text-foreground',
+    iconColor: 'text-primary',
   },
   error: {
     icon: AlertCircle,
-    card: 'border-red-200 bg-red-50 text-red-900 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-100',
-    iconColor: 'text-red-600 dark:text-red-300',
+    card: 'border-destructive/20 bg-destructive/10 text-foreground',
+    iconColor: 'text-destructive',
   },
   info: {
     icon: Info,
-    card: 'border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-100',
-    iconColor: 'text-sky-600 dark:text-sky-300',
+    card: 'border-border bg-card text-foreground',
+    iconColor: 'text-primary',
   },
 } as const;
 
@@ -41,6 +42,10 @@ export function Toaster() {
         {notifications.map((notification) => {
           const config = variantConfig[notification.variant];
           const Icon = config.icon;
+          const title = sanitizePlatformBranding(notification.title);
+          const description = notification.description
+            ? sanitizePlatformBranding(notification.description)
+            : null;
 
           return (
             <motion.div
@@ -48,14 +53,14 @@ export function Toaster() {
               initial={{ opacity: 0, y: -12, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -12, scale: 0.98 }}
-              className={`pointer-events-auto rounded-2xl border shadow-lg ${config.card}`}
+              className={`pointer-events-auto rounded-2xl border shadow-card ${config.card}`}
             >
               <div className="flex items-start gap-3 p-4">
                 <Icon className={`mt-0.5 h-5 w-5 shrink-0 ${config.iconColor}`} />
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium">{notification.title}</p>
-                  {notification.description && (
-                    <p className="mt-1 text-sm opacity-90">{notification.description}</p>
+                  <p className="font-medium">{title}</p>
+                  {description && (
+                    <p className="mt-1 text-sm opacity-90">{description}</p>
                   )}
                 </div>
                 <Button

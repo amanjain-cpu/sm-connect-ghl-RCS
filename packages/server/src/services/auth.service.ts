@@ -38,6 +38,8 @@ interface AuthResult {
     lastName: string;
     role: string;
     organizationId: string;
+    embeddedLocationId?: string;
+    embeddedInstallationId?: string | null;
   };
   organization: {
     id: string;
@@ -50,7 +52,61 @@ interface AuthResult {
   };
 }
 
+interface EmbeddedSessionContext {
+  locationId?: string;
+  installationId?: string | null;
+}
+
 export class AuthService {
+  private async ensureEmbeddedSessionStillLinked(input: {
+    organizationId: string;
+    embeddedInstallationId?: unknown;
+    embeddedLocationId?: unknown;
+  }) {
+    if (
+      typeof input.embeddedInstallationId !== 'string' &&
+      typeof input.embeddedLocationId !== 'string'
+    ) {
+      return;
+    }
+
+    const installation = typeof input.embeddedInstallationId === 'string'
+      ? await prisma.platformInstallation.findFirst({
+          where: {
+            id: input.embeddedInstallationId,
+            organizationId: input.organizationId,
+          },
+          select: {
+            externalAccountId: true,
+            status: true,
+          },
+        })
+      : await prisma.platformInstallation.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            platform: 'leadconnector',
+            externalAccountId: input.embeddedLocationId as string,
+          },
+          select: {
+            externalAccountId: true,
+            status: true,
+          },
+        });
+
+    if (
+      !installation ||
+      installation.status !== 'connected' ||
+      (
+        typeof input.embeddedLocationId === 'string' &&
+        installation.externalAccountId !== input.embeddedLocationId
+      )
+    ) {
+      throw new UnauthorizedError(
+        'Embedded app session is no longer active for this connected workspace'
+      );
+    }
+  }
+
   /**
    * Register a new user and organization
    */
@@ -225,6 +281,17 @@ export class AuthService {
       throw new UnauthorizedError('Refresh token has expired');
     }
 
+    try {
+      await this.ensureEmbeddedSessionStillLinked({
+        organizationId: storedToken.user.organizationId,
+        embeddedInstallationId: decoded.embeddedInstallationId,
+        embeddedLocationId: decoded.embeddedLocationId,
+      });
+    } catch (error) {
+      await prisma.refreshToken.delete({ where: { id: storedToken.id } });
+      throw error;
+    }
+
     // Delete old token
     await prisma.refreshToken.delete({ where: { id: storedToken.id } });
 
@@ -234,6 +301,12 @@ export class AuthService {
       organizationId: storedToken.user.organizationId,
       email: storedToken.user.email,
       role: storedToken.user.role,
+      ...(typeof decoded.embeddedLocationId === 'string'
+        ? { embeddedLocationId: decoded.embeddedLocationId }
+        : {}),
+      ...(typeof decoded.embeddedInstallationId === 'string'
+        ? { embeddedInstallationId: decoded.embeddedInstallationId }
+        : {}),
     });
 
     // Store new refresh token
@@ -307,9 +380,12 @@ export class AuthService {
 
   /**
    * Login via OAuth/SSO (no password required)
-   * Used when user authenticates via GHL OAuth
+   * Used when a user authenticates via the embedded CRM OAuth flow
    */
-  async loginViaOAuth(organizationId: string): Promise<AuthResult> {
+  async loginViaOAuth(
+    organizationId: string,
+    context: EmbeddedSessionContext = {}
+  ): Promise<AuthResult> {
     // Find or create a default user for this organization
     let user = await prisma.user.findFirst({
       where: { organizationId },
@@ -354,6 +430,8 @@ export class AuthService {
       organizationId: user.organizationId,
       email: user.email,
       role: user.role,
+      ...(context.locationId ? { embeddedLocationId: context.locationId } : {}),
+      ...(context.installationId ? { embeddedInstallationId: context.installationId } : {}),
     });
 
     // Store refresh token
@@ -381,6 +459,8 @@ export class AuthService {
         lastName: user.lastName,
         role: user.role,
         organizationId: user.organizationId,
+        ...(context.locationId ? { embeddedLocationId: context.locationId } : {}),
+        ...(context.installationId ? { embeddedInstallationId: context.installationId } : {}),
       },
       organization: {
         id: user.organization.id,

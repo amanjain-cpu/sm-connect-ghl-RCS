@@ -23,6 +23,20 @@ interface AddUserInput {
 }
 
 export class OrganizationService {
+  private createUtcDayStart(date: Date) {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  }
+
+  private addUtcDays(date: Date, days: number) {
+    const next = new Date(date);
+    next.setUTCDate(next.getUTCDate() + days);
+    return next;
+  }
+
+  private formatUtcDay(date: Date) {
+    return date.toISOString().slice(0, 10);
+  }
+
   /**
    * Get organization by ID
    */
@@ -282,6 +296,179 @@ export class OrganizationService {
     }
 
     return stats;
+  }
+
+  async getDashboardSummary(organizationId: string) {
+    const today = this.createUtcDayStart(new Date());
+    const tomorrow = this.addUtcDays(today, 1);
+    const sevenDaysAgo = this.addUtcDays(today, -6);
+    const fourteenDaysAgo = this.addUtcDays(today, -13);
+    const thirtyDaysAgo = this.addUtcDays(today, -29);
+
+    const [recentMessages, connectedPlatforms, activeCampaigns, verifiedBrands] = await Promise.all([
+      prisma.message.findMany({
+        where: {
+          organizationId,
+          createdAt: {
+            gte: thirtyDaysAgo,
+            lt: tomorrow,
+          },
+        },
+        select: {
+          createdAt: true,
+          direction: true,
+          status: true,
+        },
+      }),
+      prisma.platformConnection.count({
+        where: {
+          organizationId,
+          status: 'connected',
+        },
+      }),
+      prisma.campaign.count({
+        where: {
+          organizationId,
+          status: 'approved',
+        },
+      }),
+      prisma.brand.count({
+        where: {
+          organizationId,
+          status: 'verified',
+        },
+      }),
+    ]);
+
+    const createWindowStats = () => ({
+      sent: 0,
+      delivered: 0,
+      failed: 0,
+      inbound: 0,
+    });
+
+    const currentWindow = createWindowStats();
+    const previousWindow = createWindowStats();
+    const seriesMap = new Map<string, { date: string; sent: number; delivered: number; failed: number; inbound: number }>();
+
+    for (let offset = 0; offset < 30; offset += 1) {
+      const day = this.addUtcDays(thirtyDaysAgo, offset);
+      const key = this.formatUtcDay(day);
+      seriesMap.set(key, {
+        date: key,
+        sent: 0,
+        delivered: 0,
+        failed: 0,
+        inbound: 0,
+      });
+    }
+
+    for (const message of recentMessages) {
+      const createdAt = new Date(message.createdAt);
+      const dayKey = this.formatUtcDay(this.createUtcDayStart(createdAt));
+      const point = seriesMap.get(dayKey);
+
+      const isOutbound = message.direction === 'outbound';
+      const isCurrentWindow = createdAt >= sevenDaysAgo;
+      const isPreviousWindow = createdAt >= fourteenDaysAgo && createdAt < sevenDaysAgo;
+
+      const applyToWindow = (windowStats: ReturnType<typeof createWindowStats>) => {
+        if (!isOutbound) {
+          windowStats.inbound += 1;
+          return;
+        }
+
+        if (message.status === 'sent' || message.status === 'delivered') {
+          windowStats.sent += 1;
+        }
+        if (message.status === 'delivered') {
+          windowStats.delivered += 1;
+        }
+        if (message.status === 'failed' || message.status === 'undelivered') {
+          windowStats.failed += 1;
+        }
+      };
+
+      if (isCurrentWindow) {
+        applyToWindow(currentWindow);
+      } else if (isPreviousWindow) {
+        applyToWindow(previousWindow);
+      }
+
+      if (!point) {
+        continue;
+      }
+
+      if (!isOutbound) {
+        point.inbound += 1;
+        continue;
+      }
+
+      if (message.status === 'sent' || message.status === 'delivered') {
+        point.sent += 1;
+      }
+      if (message.status === 'delivered') {
+        point.delivered += 1;
+      }
+      if (message.status === 'failed' || message.status === 'undelivered') {
+        point.failed += 1;
+      }
+    }
+
+    const percentChange = (current: number, previous: number) => {
+      if (previous === 0) {
+        return current === 0 ? 0 : 100;
+      }
+
+      return Number((((current - previous) / previous) * 100).toFixed(1));
+    };
+
+    const deliveryRate = currentWindow.sent > 0
+      ? Number(((currentWindow.delivered / currentWindow.sent) * 100).toFixed(2))
+      : 0;
+    const previousDeliveryRate = previousWindow.sent > 0
+      ? Number(((previousWindow.delivered / previousWindow.sent) * 100).toFixed(2))
+      : 0;
+
+    return {
+      range: {
+        currentStart: sevenDaysAgo.toISOString(),
+        currentEnd: tomorrow.toISOString(),
+        previousStart: fourteenDaysAgo.toISOString(),
+        previousEnd: sevenDaysAgo.toISOString(),
+        seriesStart: thirtyDaysAgo.toISOString(),
+        seriesEnd: tomorrow.toISOString(),
+      },
+      kpis: {
+        sent: {
+          value: currentWindow.sent,
+          previous: previousWindow.sent,
+          changePercent: percentChange(currentWindow.sent, previousWindow.sent),
+        },
+        delivered: {
+          value: currentWindow.delivered,
+          previous: previousWindow.delivered,
+          changePercent: percentChange(currentWindow.delivered, previousWindow.delivered),
+        },
+        failed: {
+          value: currentWindow.failed,
+          previous: previousWindow.failed,
+          changePercent: percentChange(currentWindow.failed, previousWindow.failed),
+        },
+        deliveryRate: {
+          value: deliveryRate,
+          previous: previousDeliveryRate,
+          changePercent: Number((deliveryRate - previousDeliveryRate).toFixed(2)),
+        },
+      },
+      totals: {
+        connectedPlatforms,
+        activeCampaigns,
+        verifiedBrands,
+        inbound: currentWindow.inbound,
+      },
+      series: Array.from(seriesMap.values()),
+    };
   }
 }
 

@@ -1,6 +1,6 @@
 // ===========================================
 // OAuth Callback Page
-// Handles tokens from GHL OAuth and auto-logs user in
+// Handles OAuth tokens and signs the user in
 // ===========================================
 
 import { useEffect, useState } from 'react';
@@ -8,6 +8,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth.store';
+import { finishMarketplaceInstallTab } from '@/lib/marketplace-install';
 
 export function AuthCallbackPage() {
   const navigate = useNavigate();
@@ -15,6 +16,7 @@ export function AuthCallbackPage() {
   const { loginViaOAuth } = useAuthStore();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
+  const [showCloseHint, setShowCloseHint] = useState(false);
 
   useEffect(() => {
     const handleCallback = async () => {
@@ -22,6 +24,7 @@ export function AuthCallbackPage() {
       const refreshToken = searchParams.get('refreshToken');
       const success = searchParams.get('success');
       const isNew = searchParams.get('isNew');
+      const isMarketplaceInstall = searchParams.get('marketplaceInstall') === 'true';
 
       if (success !== 'true' || !accessToken || !refreshToken) {
         setStatus('error');
@@ -33,12 +36,19 @@ export function AuthCallbackPage() {
         await loginViaOAuth(accessToken, refreshToken);
         setStatus('success');
 
-        // Redirect to dashboard after a short delay
         setTimeout(() => {
+          if (isMarketplaceInstall) {
+            finishMarketplaceInstallTab({
+              explicitReturnUrl: searchParams.get('returnTo'),
+              onStayOpen: () => setShowCloseHint(true),
+            });
+            return;
+          }
+
           if (isNew === 'true') {
-            navigate('/onboarding');
+            navigate('/onboarding', { replace: true });
           } else {
-            navigate('/dashboard');
+            navigate('/dashboard', { replace: true });
           }
         }, 1500);
       } catch (err: any) {
@@ -51,11 +61,10 @@ export function AuthCallbackPage() {
   }, [searchParams, loginViaOAuth, navigate]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-900 dark:to-gray-950">
-      {/* Decorative background */}
+    <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-96 h-96 bg-purple-500/20 rounded-full blur-3xl" />
+        <div className="absolute -top-40 -right-40 h-96 w-96 rounded-full bg-primary/12 blur-3xl" />
+        <div className="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-accent blur-3xl" />
       </div>
 
       <motion.div
@@ -66,31 +75,65 @@ export function AuthCallbackPage() {
         {status === 'loading' && (
           <div className="space-y-4">
             <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto" />
-            <h2 className="text-xl font-semibold">Completing authentication...</h2>
-            <p className="text-muted-foreground">Please wait while we set up your session</p>
+            <h2 className="text-xl font-semibold">
+              {searchParams.get('marketplaceInstall') === 'true'
+                ? 'Completing installation...'
+                : 'Completing authentication...'}
+            </h2>
+            <p className="text-muted-foreground">
+              {searchParams.get('marketplaceInstall') === 'true'
+                ? 'Please wait while we prepare your Signalmash Connect workspace.'
+                : 'Please wait while we set up your session'}
+            </p>
           </div>
         )}
 
         {status === 'success' && (
           <div className="space-y-4">
-            <div className="h-16 w-16 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto">
-              <CheckCircle className="h-10 w-10 text-green-600" />
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/12 text-primary">
+              <CheckCircle className="h-10 w-10" />
             </div>
-            <h2 className="text-xl font-semibold">Authentication successful!</h2>
-            <p className="text-muted-foreground">Redirecting to your dashboard...</p>
+            <h2 className="text-xl font-semibold">
+              {searchParams.get('marketplaceInstall') === 'true'
+                ? 'Installation complete'
+                : 'Authentication successful!'}
+            </h2>
+            <p className="text-muted-foreground">
+              {searchParams.get('marketplaceInstall') === 'true'
+                ? 'HighLevel is reopening Signalmash Connect inside the installed workspace.'
+                : 'Redirecting to your dashboard...'}
+            </p>
+            {searchParams.get('marketplaceInstall') === 'true' && showCloseHint && (
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  This install tab can be closed if it stays open.
+                </p>
+                <button
+                  onClick={() =>
+                    finishMarketplaceInstallTab({
+                      explicitReturnUrl: searchParams.get('returnTo'),
+                      onStayOpen: () => setShowCloseHint(true),
+                    })
+                  }
+                  className="rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:opacity-90"
+                >
+                  Close this tab
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {status === 'error' && (
           <div className="space-y-4">
-            <div className="h-16 w-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mx-auto">
-              <AlertCircle className="h-10 w-10 text-red-600" />
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-destructive/12 text-destructive">
+              <AlertCircle className="h-10 w-10" />
             </div>
             <h2 className="text-xl font-semibold">Authentication failed</h2>
             <p className="text-muted-foreground">{error}</p>
             <button
               onClick={() => navigate('/connect')}
-              className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90"
+              className="mt-4 rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:opacity-90"
             >
               Try again
             </button>

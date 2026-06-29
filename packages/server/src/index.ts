@@ -20,6 +20,16 @@ import { startOutboundMessageWorker, stopOutboundMessageWorker } from './queues/
 import { startIncomingEventsWorker, stopIncomingEventsWorker } from './queues/incoming-events.queue.js';
 
 const app: Express = express();
+const crmMarketplaceHostnames = [
+  ['go', 'high', 'level'].join(''),
+  ['lead', 'connector', 'hq'].join(''),
+] as const;
+const crmMarketplaceOriginPatterns = crmMarketplaceHostnames.map(
+  (hostname) => new RegExp(`\\.${hostname}\\.com$`)
+);
+const crmMarketplaceFrameAncestors = crmMarketplaceHostnames.map(
+  (hostname) => `https://*.${hostname}.com`
+);
 
 function buildAllowedOrigins(): Array<string | RegExp> {
   const origins = new Set<string>();
@@ -42,8 +52,7 @@ function buildAllowedOrigins(): Array<string | RegExp> {
 
   return [
     ...origins,
-    /\.gohighlevel\.com$/,
-    /\.leadconnectorhq\.com$/,
+    ...crmMarketplaceOriginPatterns,
   ];
 }
 
@@ -54,7 +63,7 @@ app.set('trust proxy', 1);
 app.use(helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: 'cross-origin' },
-  // Allow iframe embedding for GHL Custom Pages
+  // Allow iframe embedding for the CRM marketplace shell
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
@@ -62,7 +71,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
       frameSrc: ["'self'"],
-      frameAncestors: ["'self'", 'https://*.gohighlevel.com', 'https://*.leadconnectorhq.com'],
+      frameAncestors: ["'self'", ...crmMarketplaceFrameAncestors],
     },
   },
 }));

@@ -187,6 +187,8 @@ interface SendMessageResult {
 
 interface RawSendMessageResult {
   messageId?: string;
+  messageSid?: string;
+  MessageSid?: string;
   message_id?: string;
   id?: string;
   sid?: string;
@@ -195,6 +197,8 @@ interface RawSendMessageResult {
   error?: string;
   data?: {
     messageId?: string;
+    messageSid?: string;
+    MessageSid?: string;
     message_id?: string;
     id?: string;
     sid?: string;
@@ -211,6 +215,40 @@ interface MessageStatusResult {
   deliveredAt?: string;
 }
 
+interface LegacyNumberPurchaseResult {
+  error_code?: number;
+  status?: number;
+  message?: string;
+  error?: {
+    code?: number;
+    message?: string;
+    description?: string;
+  };
+  result?: Array<{
+    did?: string;
+  }>;
+}
+
+interface LegacyEnableSmsResult {
+  status?: number;
+  message?: string;
+  error?: {
+    code?: number;
+    message?: string;
+    description?: string;
+  };
+}
+
+interface LegacySetConnectionResult {
+  status?: number;
+  message?: string;
+  error?: {
+    code?: number;
+    message?: string;
+    description?: string;
+  };
+}
+
 export interface SignalmashConnectionDiagnostic {
   testedAt: string;
   method: 'GET';
@@ -221,6 +259,54 @@ export interface SignalmashConnectionDiagnostic {
 }
 
 export class SignalmashService {
+  private static readonly PURCHASE_CONNECTION_KEY =
+    'XI-ohLkyE_WkXgU-ivW0HNoR9p1-Fg';
+
+  private extractResponseMessage(responseText: string, fallback: string): string {
+    const trimmed = responseText.trim();
+
+    if (!trimmed) {
+      return fallback;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        message?: string;
+        error?: string | { message?: string; code?: string };
+      };
+
+      if (typeof parsed.error === 'string' && parsed.error) {
+        return parsed.error;
+      }
+
+      if (parsed.error && typeof parsed.error === 'object' && parsed.error.message) {
+        return parsed.error.message;
+      }
+
+      if (parsed.message) {
+        return parsed.message;
+      }
+    } catch {
+      // Fall back to plain-text / HTML extraction below.
+    }
+
+    const preMatch = trimmed.match(/<pre>([\s\S]*?)<\/pre>/i);
+    if (preMatch?.[1]) {
+      return preMatch[1].replace(/\s+/g, ' ').trim();
+    }
+
+    const textOnly = trimmed
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return textOnly || fallback;
+  }
+
+  private parseJsonResponse<T>(responseText: string): T {
+    return JSON.parse(responseText) as T;
+  }
+
   private mapCampaignUseCase(useCase: string): string {
     const mappings: Record<string, string> = {
       two_factor_auth: '2FA',
@@ -344,6 +430,7 @@ export class SignalmashService {
     const url = `${signalmashConfig.apiUrl}${endpoint}`;
 
     const headers: Record<string, string> = {
+      'Accept': 'application/json',
       'Content-Type': 'application/json',
       'Authorization': signalmashConfig.apiKey,
     };
@@ -385,15 +472,29 @@ export class SignalmashService {
           }
 
           if (!res.ok) {
-            const errorBody = JSON.parse(responseText || '{}') as { message?: string };
+            const upstreamMessage = this.extractResponseMessage(
+              responseText,
+              res.statusText
+            );
+
+            logger.warn(
+              {
+                endpoint,
+                httpStatus: res.status,
+                contentType: res.headers.get('content-type'),
+                responseSnippet: responseText.slice(0, 300),
+              },
+              'Signalmash API returned an error response'
+            );
+
             throw new ExternalServiceError(
               'Signalmash',
-              `${res.status}: ${errorBody.message || res.statusText}`
+              `${res.status}: ${upstreamMessage}`
             );
           }
 
           try {
-            return JSON.parse(responseText) as T;
+            return this.parseJsonResponse<T>(responseText);
           } catch (error) {
             logger.error(
               {
@@ -751,10 +852,14 @@ export class SignalmashService {
 
     const messageId =
       result.data?.messageId ??
+      result.data?.messageSid ??
+      result.data?.MessageSid ??
       result.data?.message_id ??
       result.data?.id ??
       result.data?.sid ??
       result.messageId ??
+      result.messageSid ??
+      result.MessageSid ??
       result.message_id ??
       result.id ??
       result.sid;
@@ -824,23 +929,69 @@ export class SignalmashService {
         }>;
       }>('GET', `/searchbystate?${params.toString()}`);
 
-      return (response.data ?? []).map((number) => ({
+      return (response.data ?? [])
+        .filter((number) => {
+          if (options?.areaCode && !number.phone_number.startsWith(options.areaCode)) {
+            return false;
+          }
+
+          if (options?.contains && !number.phone_number.includes(options.contains)) {
+            return false;
+          }
+
+          return true;
+        })
+        .map((number) => ({
         phoneNumber: number.phone_number,
         formattedNumber: this.formatPhoneNumber(number.phone_number),
         capabilities: { sms: true, mms: true, voice: false },
         monthlyPrice: number.rates ?? 0,
-      }));
+        }));
     }
 
-    const params = new URLSearchParams();
-    if (options?.areaCode) params.append('area_code', options.areaCode);
-    if (options?.contains) params.append('contains', options.contains);
-    if (options?.limit) params.append('limit', String(options.limit));
+    if (options?.areaCode) {
+      const params = new URLSearchParams({
+        NPA: options.areaCode,
+        Qty: String(options.limit ?? 20),
+      });
 
-    const queryString = params.toString();
-    const endpoint = `/v1/numbers/available${queryString ? `?${queryString}` : ''}`;
+      const response = await this.request<{
+        status: number;
+        message: string;
+        data?: Array<{
+          phone_number: string;
+          rate_center?: string;
+          state?: string;
+          supplier_tier?: number;
+          provider?: string;
+          rates?: number;
+        }>;
+      }>('GET', `/searchbynpa?${params.toString()}`);
 
-    return this.request('GET', endpoint);
+      return (response.data ?? [])
+        .filter((number) => {
+          if (!number.phone_number.startsWith(options.areaCode!)) {
+            return false;
+          }
+
+          if (options?.contains && !number.phone_number.includes(options.contains)) {
+            return false;
+          }
+
+          return true;
+        })
+        .map((number) => ({
+          phoneNumber: number.phone_number,
+          formattedNumber: this.formatPhoneNumber(number.phone_number),
+          capabilities: { sms: true, mms: true, voice: false },
+          monthlyPrice: number.rates ?? 0,
+        }));
+    }
+
+    throw new ExternalServiceError(
+      'Signalmash',
+      'Search requires either a state or area code'
+    );
   }
 
   /**
@@ -854,17 +1005,80 @@ export class SignalmashService {
     phoneNumber: string;
     status: string;
   }> {
-    return this.request('POST', '/v1/numbers', {
-      phone_number: phoneNumber,
-      campaign_id: campaignId,
-    });
+    const did = this.formatSmsEndpointPhone(phoneNumber);
+    const purchaseResult = await this.requestForm<LegacyNumberPurchaseResult>(
+      'POST',
+      '/buy',
+      new URLSearchParams({
+        DID: did,
+      })
+    );
+
+    const purchasedDid = purchaseResult.result?.[0]?.did ?? did;
+
+    if ((purchaseResult.status ?? 500) >= 400 || purchaseResult.error_code === 0) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        purchaseResult.error?.message ||
+          purchaseResult.message ||
+          `Number purchase failed for DID ${did}`
+      );
+    }
+
+    const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
+      'POST',
+      '/enablesms',
+      new URLSearchParams({
+        DID: purchasedDid,
+        CampaignId: campaignId,
+      })
+    );
+
+    if ((enableSmsResult.status ?? 500) >= 400) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        enableSmsResult.error?.message ||
+          enableSmsResult.message ||
+          `SMS enablement failed for DID ${purchasedDid}`
+      );
+    }
+
+    const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
+      'PUT',
+      '/setConnection',
+      new URLSearchParams({
+        DID: purchasedDid,
+        ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
+      })
+    );
+
+    if ((setConnectionResult.status ?? 200) >= 400) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        setConnectionResult.error?.message ||
+          setConnectionResult.message ||
+          `Connection assignment failed for DID ${purchasedDid}`
+      );
+    }
+
+    return {
+      numberId: purchasedDid,
+      phoneNumber: purchasedDid,
+      status: 'active',
+    };
   }
 
   /**
    * Release a phone number
    */
   async releaseNumber(numberId: string): Promise<void> {
-    await this.request('DELETE', `/v1/numbers/${numberId}`);
+    await this.requestForm(
+      'POST',
+      '/disconnect',
+      new URLSearchParams({
+        DID: this.formatSmsEndpointPhone(numberId),
+      })
+    );
   }
 
   /**
@@ -874,9 +1088,10 @@ export class SignalmashService {
     numberId: string,
     webhookUrl: string
   ): Promise<void> {
-    await this.request('PATCH', `/v1/numbers/${numberId}`, {
-      webhook_url: webhookUrl,
-    });
+    logger.info(
+      { numberId, webhookUrl },
+      'Skipping per-number Signalmash webhook configuration; account-level webhook subscription is used instead'
+    );
   }
 
   async runConnectionDiagnostic(): Promise<SignalmashConnectionDiagnostic> {

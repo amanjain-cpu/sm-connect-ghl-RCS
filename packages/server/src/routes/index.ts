@@ -16,6 +16,8 @@ import { billingRoutes } from './billing.routes.js';
 import { portOrderRoutes } from './port-order.routes.js';
 import { operationsRoutes } from './operations.routes.js';
 import adminRoutes from './admin.routes.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
+import { handleCrmAppWebhook } from './webhook.routes.js';
 
 const router: RouterType = Router();
 
@@ -28,14 +30,17 @@ router.get('/health', (req, res) => {
   });
 });
 
-// Direct webhook endpoint (for GHL marketplace compatibility)
+// Direct webhook endpoint for marketplace compatibility
 router.get('/webhook', (req, res) => {
   res.status(200).json({ success: true });
 });
 
-router.post('/webhook', (req, res) => {
-  res.status(200).json({ success: true });
-});
+router.post(
+  '/webhook',
+  asyncHandler(async (req, res) => {
+    return handleCrmAppWebhook(req, res, { requireSignature: false });
+  })
+);
 
 // API Routes
 router.use('/auth', authRoutes);

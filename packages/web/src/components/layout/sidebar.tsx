@@ -7,15 +7,13 @@ import {
   Phone,
   MessageSquare,
   Plug,
+  CreditCard,
   Settings,
   HelpCircle,
-  ChevronRight,
-  PanelLeft,
+  ChevronLeft,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth.store';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { ThemeToggle } from '@/components/ui/theme-toggle';
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -25,6 +23,7 @@ const navigation = [
   { name: 'Phone Numbers', href: '/phone-numbers', icon: Phone },
   { name: 'Messages', href: '/messages', icon: MessageSquare },
   { name: 'Platforms', href: '/platforms', icon: Plug },
+  { name: 'Billing', href: '/subscriptions', icon: CreditCard },
 ];
 
 const secondaryNavigation = [
@@ -32,7 +31,13 @@ const secondaryNavigation = [
   { name: 'Help & Support', href: '/help', icon: HelpCircle },
 ];
 
-export function Sidebar() {
+type SidebarProps = {
+  collapsed: boolean;
+  onToggle: () => void;
+  mobileOnly?: boolean;
+};
+
+export function Sidebar({ collapsed, onToggle, mobileOnly = false }: SidebarProps) {
   const location = useLocation();
   const { user, organization } = useAuthStore();
 
@@ -41,29 +46,25 @@ export function Sidebar() {
     return `${user.firstName.charAt(0)}${user.lastName.charAt(0)}`;
   };
 
-  return (
-    <>
-      <div className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80 dark:border-slate-800 dark:bg-slate-950/95 dark:supports-[backdrop-filter]:bg-slate-950/80 lg:hidden">
-        <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-950 text-sm font-semibold text-white dark:bg-slate-100 dark:text-slate-950">
-              SM
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Signalmash</p>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Connect</p>
+  const userName = user ? `${user.firstName} ${user.lastName}` : 'Workspace user';
+  const orgLabel = organization?.name ?? 'Admin workspace';
+
+  if (mobileOnly) {
+    return (
+      <div className="sticky top-0 z-40 lg:hidden">
+        <div className="flex items-center justify-between border-b border-black/5 bg-white/90 px-4 py-3 backdrop-blur">
+          <div className="flex items-center gap-2">
+            <img src="/icon-color.png" alt="" className="h-10 w-10 shrink-0" />
+            <div className="text-[18px] font-bold leading-none tracking-[-0.015em]">
+              <span className="text-[#2FB267]">Mash</span>
+              <span className="text-[#111827]">Connect</span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <ThemeToggle variant="outline" size="icon" className="border-slate-300 dark:border-slate-700" />
-            <Avatar size="sm">
-              <AvatarImage src={undefined} />
-              <AvatarFallback>{getInitials()}</AvatarFallback>
-            </Avatar>
+          <div className="flex h-8 w-8 items-center justify-center rounded-[8px] bg-[#2FB267] text-xs font-bold text-white">
+            {getInitials()}
           </div>
         </div>
-
-        <nav className="scrollbar-hide flex gap-2 overflow-x-auto px-4 pb-3">
+        <nav className="scrollbar-hide flex gap-2 overflow-x-auto border-b border-black/5 bg-white px-4 py-3">
           {navigation.map((item) => {
             const isActive = location.pathname.startsWith(item.href);
             return (
@@ -71,10 +72,8 @@ export function Sidebar() {
                 key={item.name}
                 to={item.href}
                 className={cn(
-                  'inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
-                  isActive
-                    ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950'
-                    : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-600'
+                  'inline-flex shrink-0 items-center gap-2 rounded-full px-3 py-2 text-sm font-medium transition-colors',
+                  isActive ? 'bg-[#2FB267] text-white' : 'bg-black/[0.04] text-[#4B5563]'
                 )}
               >
                 <item.icon className="h-4 w-4" />
@@ -84,96 +83,106 @@ export function Sidebar() {
           })}
         </nav>
       </div>
+    );
+  }
 
-      <aside className="fixed left-0 top-0 z-40 hidden h-screen w-72 flex-col border-r border-slate-200 bg-white/92 backdrop-blur supports-[backdrop-filter]:bg-white/80 dark:border-slate-800 dark:bg-slate-950/92 dark:supports-[backdrop-filter]:bg-slate-950/80 lg:flex">
-        <div className="border-b border-slate-200 px-6 py-5 dark:border-slate-800">
-          <div className="flex items-center gap-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-950 text-base font-semibold text-white shadow-sm dark:bg-slate-100 dark:text-slate-950">
-              SM
-            </div>
-            <div>
-              <h1 className="text-base font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-                Signalmash Connect
-              </h1>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Messaging operations console
-              </p>
-            </div>
-          </div>
-        </div>
+  return (
+    <aside
+      className={cn(
+        'relative z-20 hidden h-full min-h-0 shrink-0 self-stretch flex-col bg-gradient-to-b from-[#3DC077] to-[#2FB267] text-white transition-all duration-200 lg:flex',
+        collapsed ? 'w-[72px]' : 'w-[228px]'
+      )}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        title={collapsed ? 'Expand' : 'Collapse'}
+        aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        className={cn(
+          'absolute bottom-[66px] right-[-11px] z-30 flex h-[22px] w-[22px] items-center justify-center rounded-full border border-black/5 bg-white p-0 text-[#1F7E4A] shadow-[0_6px_18px_rgba(17,24,39,0.18),0_0_0_1px_rgba(17,24,39,0.04)] transition-transform',
+          collapsed && 'rotate-180'
+        )}
+      >
+        <ChevronLeft className="h-3 w-3 stroke-[2.5]" />
+      </button>
 
-        <div className="border-b border-slate-200 px-6 py-5 dark:border-slate-800">
-          <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
-            <Avatar size="md">
-              <AvatarImage src={undefined} />
-              <AvatarFallback>{getInitials()}</AvatarFallback>
-            </Avatar>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
-                {user?.firstName} {user?.lastName}
-              </p>
-              <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-                {organization?.name}
-              </p>
-            </div>
-            <ThemeToggle variant="outline" size="icon" className="shrink-0 border-slate-300 dark:border-slate-700" />
-          </div>
-        </div>
-
-        <nav className="flex-1 overflow-y-auto px-4 py-5">
-          <div className="mb-3 flex items-center gap-2 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
-            <PanelLeft className="h-3.5 w-3.5" />
+      <div className="flex-1 overflow-y-auto px-2.5 py-4">
+        {!collapsed ? (
+          <div className="px-3 pb-2 text-[10.5px] font-bold uppercase tracking-[0.10em] text-white/80">
             Workspace
           </div>
-          <div className="space-y-1.5">
-            {navigation.map((item) => {
-              const isActive = location.pathname.startsWith(item.href);
-              return (
-                <NavLink
-                  key={item.name}
-                  to={item.href}
-                  className={cn(
-                    'flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-medium transition-all',
-                    isActive
-                      ? 'bg-slate-950 text-white shadow-sm dark:bg-slate-100 dark:text-slate-950'
-                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-900 dark:hover:text-slate-50'
-                  )}
-                >
-                  <item.icon className="h-5 w-5" />
-                  <span>{item.name}</span>
-                  {isActive && <ChevronRight className="ml-auto h-4 w-4" />}
-                </NavLink>
-              );
-            })}
-          </div>
+        ) : null}
 
-          <div className="mt-8 border-t border-slate-200 pt-6 dark:border-slate-800">
-            <p className="mb-3 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
-              Support
-            </p>
-            <div className="space-y-1.5">
-              {secondaryNavigation.map((item) => {
-                const isActive = location.pathname.startsWith(item.href);
-                return (
-                  <NavLink
-                    key={item.name}
-                    to={item.href}
-                    className={cn(
-                      'flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-medium transition-all',
-                      isActive
-                        ? 'bg-slate-200 text-slate-950 dark:bg-slate-800 dark:text-slate-50'
-                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-900 dark:hover:text-slate-50'
-                    )}
-                  >
-                    <item.icon className="h-5 w-5" />
-                    <span>{item.name}</span>
-                  </NavLink>
-                );
-              })}
-            </div>
-          </div>
+        <nav className="space-y-[3px]">
+          {navigation.map((item) => {
+            const isActive = location.pathname.startsWith(item.href);
+            return (
+              <NavLink
+                key={item.name}
+                to={item.href}
+                title={collapsed ? item.name : undefined}
+                className={cn(
+                  'relative flex items-center gap-3 rounded-[10px] px-3 py-[11px] text-[13.5px] font-medium text-white transition-colors',
+                  isActive ? 'bg-white font-bold text-[#1F7E4A] shadow-[0_2px_8px_-2px_rgba(17,24,39,0.20)]' : 'hover:bg-white/15',
+                  collapsed && 'mx-[10px] justify-center px-0'
+                )}
+              >
+                <item.icon className={cn('h-4 w-4 shrink-0', isActive && 'text-[#1F7E4A]')} />
+                {!collapsed ? <span className="truncate">{item.name}</span> : null}
+              </NavLink>
+            );
+          })}
         </nav>
-      </aside>
-    </>
+
+        {!collapsed ? (
+          <div className="mt-3 px-3 pb-2 pt-4 text-[10.5px] font-bold uppercase tracking-[0.10em] text-white/80">
+            Support
+          </div>
+        ) : null}
+
+        <nav className="space-y-[3px]">
+          {secondaryNavigation.map((item) => {
+            const isActive = location.pathname.startsWith(item.href);
+            return (
+              <NavLink
+                key={item.name}
+                to={item.href}
+                title={collapsed ? item.name : undefined}
+                className={cn(
+                  'flex items-center gap-3 rounded-[10px] px-3 py-[11px] text-[13.5px] font-medium text-white transition-colors',
+                  isActive ? 'bg-white font-bold text-[#1F7E4A] shadow-[0_2px_8px_-2px_rgba(17,24,39,0.20)]' : 'hover:bg-white/15',
+                  collapsed && 'mx-[10px] justify-center px-0'
+                )}
+              >
+                <item.icon className={cn('h-4 w-4 shrink-0', isActive && 'text-[#1F7E4A]')} />
+                {!collapsed ? <span className="truncate">{item.name}</span> : null}
+              </NavLink>
+            );
+          })}
+        </nav>
+      </div>
+
+      <div className="flex items-center gap-2.5 border-t border-white/15 bg-black/10 px-[14px] py-3">
+        <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[8px] bg-white text-[11px] font-bold text-[#1F7E4A] shadow-[0_0_0_0.5px_rgba(0,0,0,0.08)]">
+          {getInitials()}
+        </div>
+
+        {!collapsed ? (
+          <>
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-semibold leading-[1.2] text-white">{userName}</div>
+              <div className="truncate text-[11px] leading-[1.2] text-white/70">{orgLabel}</div>
+            </div>
+            <NavLink
+              to="/settings"
+              className="ml-auto rounded-full p-1 text-white/75 transition-colors hover:bg-white/10 hover:text-white"
+              aria-label="Open settings"
+            >
+              <Settings className="h-[15px] w-[15px] shrink-0" />
+            </NavLink>
+          </>
+        ) : null}
+      </div>
+    </aside>
   );
 }

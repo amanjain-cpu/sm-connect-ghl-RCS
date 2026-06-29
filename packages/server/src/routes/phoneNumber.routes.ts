@@ -9,6 +9,9 @@ import { phoneNumberService } from '../services/phoneNumber.service.js';
 import { validate, paginationSchema, idParamSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { prisma } from '../config/database.js';
+import { AppError } from '../utils/errors.js';
+import { subscriptionBillingService } from '../services/subscription-billing.service.js';
 
 const router: RouterType = Router();
 
@@ -81,7 +84,13 @@ router.get(
 
     const result = await phoneNumberService.getOrganizationNumbers(
       req.user!.organizationId,
-      { status: status as any, campaignId, page, limit }
+      {
+        status: status as any,
+        campaignId,
+        page,
+        limit,
+        installationId: req.user!.embeddedInstallationId ?? null,
+      }
     );
 
     res.json({
@@ -119,13 +128,134 @@ const purchaseBodySchema = z.object({
   phoneNumber: z.string().min(10).max(15),
   campaignId: z.string().uuid(),
   friendlyName: z.string().max(100).optional(),
+  monthlyPrice: z.coerce.number().positive().max(1000).optional(),
 });
+
+router.post(
+  '/checkout',
+  validate({ body: purchaseBodySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { phoneNumber, campaignId, friendlyName, monthlyPrice } = req.body as z.infer<typeof purchaseBodySchema>;
+
+    const campaign = await prisma.campaign.findFirst({
+      where: {
+        id: campaignId,
+        organizationId: req.user!.organizationId,
+      },
+      select: {
+        id: true,
+        status: true,
+        signalmashCampaignId: true,
+      },
+    });
+
+    if (!campaign) {
+      throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
+    }
+
+    if (campaign.status !== 'approved' || !campaign.signalmashCampaignId) {
+      throw new AppError('Select an approved provider-linked campaign before checkout', 'CAMPAIGN_NOT_READY', 400);
+    }
+
+    const result = await subscriptionBillingService.preparePhoneNumberCheckout({
+      organizationId: req.user!.organizationId,
+      phoneNumber,
+      campaignId,
+      friendlyName,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  })
+);
+
+const completeCheckoutBodySchema = z.object({
+  sessionId: z.string().min(8),
+});
+
+router.post(
+  '/checkout/complete',
+  validate({ body: completeCheckoutBodySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { sessionId } = req.body as z.infer<typeof completeCheckoutBodySchema>;
+    const metadata = await subscriptionBillingService.completePhoneNumberCheckout(
+      req.user!.organizationId,
+      sessionId
+    );
+
+    try {
+      const number = await phoneNumberService.purchaseNumber(
+        req.user!.organizationId,
+        metadata.phoneNumber,
+        {
+          campaignId: metadata.campaignId,
+          friendlyName: metadata.friendlyName || undefined,
+        }
+      );
+
+      res.status(201).json({
+        success: true,
+        data: number,
+      });
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'NUMBER_ALREADY_OWNED') {
+        const existing = await prisma.phoneNumber.findUnique({
+          where: { phoneNumber: metadata.phoneNumber },
+          include: {
+            campaign: {
+              select: {
+                id: true,
+                name: true,
+                status: true,
+              },
+            },
+          },
+        });
+
+        if (existing?.organizationId === req.user!.organizationId) {
+          res.status(200).json({
+            success: true,
+            data: existing,
+          });
+          return;
+        }
+      }
+
+      throw error;
+    }
+  })
+);
 
 router.post(
   '/purchase',
   validate({ body: purchaseBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
+
+    const subscription = await subscriptionBillingService.assertCanProvisionPhoneNumber(
+      req.user!.organizationId
+    );
+    const activePhoneNumbers = await prisma.phoneNumber.count({
+      where: {
+        organizationId: req.user!.organizationId,
+        status: 'active',
+      },
+    });
+
+    if (activePhoneNumbers >= subscription.phoneNumbersIncluded) {
+      throw new AppError(
+        'This purchase requires the extra phone-number checkout flow first.',
+        'PHONE_NUMBER_OVERAGE_PAYMENT_REQUIRED',
+        402,
+        true,
+        {
+          activePhoneNumbers,
+          includedPhoneNumbers: subscription.phoneNumbersIncluded,
+        }
+      );
+    }
 
     const number = await phoneNumberService.purchaseNumber(
       req.user!.organizationId,
@@ -147,6 +277,7 @@ router.post(
 const updateBodySchema = z.object({
   friendlyName: z.string().max(100).optional(),
   campaignId: z.string().uuid().nullable().optional(),
+  makeDefault: z.boolean().optional(),
 });
 
 router.patch(
@@ -156,7 +287,8 @@ router.patch(
     const number = await phoneNumberService.updateNumber(
       req.user!.organizationId,
       req.params.id,
-      req.body
+      req.body,
+      { installationId: req.user!.embeddedInstallationId ?? null }
     );
 
     res.json({

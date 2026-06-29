@@ -15,6 +15,7 @@ const router: RouterType = Router();
 // Validation schemas
 const sendMessageSchema = z.object({
   campaignId: z.string().uuid().optional(),
+  phoneNumberId: z.string().uuid().optional(),
   from: phoneSchema,
   to: phoneSchema,
   body: z.string().min(1, 'Message body is required').max(1600),

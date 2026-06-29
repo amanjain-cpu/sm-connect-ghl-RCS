@@ -584,13 +584,13 @@ export class IntegrationService {
       },
       {
         key: 'provider_activation',
-        label: 'GHL sender routing ready',
+        label: 'Sender routing ready',
         complete: providerActivation.isActivated || resourceCounts.activeNumbers > 0,
         helper: providerActivation.isActivated
           ? `Sender routing was confirmed${providerActivation.activatedAt ? ` on ${providerActivation.activatedAt}` : ''}.`
           : resourceCounts.activeNumbers > 0
             ? 'An active sender number is linked. Use embedded messaging to validate the send flow.'
-            : 'Link an active sender number before testing GHL outbound traffic.',
+            : 'Link an active sender number before testing outbound traffic.',
       },
       {
         key: 'traffic_validation',
