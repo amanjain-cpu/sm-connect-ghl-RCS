@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
+import { sanitizePlatformBranding } from './lib/platform-branding';
 import './styles/globals.css';
 
 const rootElement = document.getElementById('root');
@@ -13,14 +14,14 @@ const root = ReactDOM.createRoot(rootElement);
 
 function FatalStartupError({ message }: { message: string }) {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-950 p-6 text-slate-50">
-      <div className="w-full max-w-2xl rounded-3xl border border-red-500/30 bg-slate-900 p-8 shadow-2xl">
-        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-300">Startup Error</p>
+    <div className="min-h-screen flex items-center justify-center bg-background p-6 text-foreground">
+      <div className="w-full max-w-2xl rounded-3xl border border-border bg-card p-8 shadow-pop">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-destructive">Startup Error</p>
         <h1 className="mt-4 text-2xl font-semibold">The app failed before it could render.</h1>
-        <p className="mt-4 text-sm leading-6 text-slate-300">
+        <p className="mt-4 text-sm leading-6 text-muted-foreground">
           The frontend threw during startup. The message below is the actual browser error captured at boot.
         </p>
-        <pre className="mt-6 overflow-x-auto rounded-2xl border border-slate-800 bg-black/40 p-4 text-sm text-amber-200">
+        <pre className="mt-6 overflow-x-auto rounded-2xl border border-border bg-muted/60 p-4 text-sm text-foreground">
           {message}
         </pre>
       </div>
@@ -31,9 +32,9 @@ function FatalStartupError({ message }: { message: string }) {
 function renderFatalError(error: unknown) {
   const message =
     error instanceof Error
-      ? `${error.name}: ${error.message}`
+      ? sanitizePlatformBranding(`${error.name}: ${error.message}`)
       : typeof error === 'string'
-        ? error
+        ? sanitizePlatformBranding(error)
         : JSON.stringify(error, null, 2);
 
   root.render(

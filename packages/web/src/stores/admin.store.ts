@@ -3,6 +3,7 @@
 // ===========================================
 
 import { create } from 'zustand';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { safeGetItem, safeRemoveItem, safeSetItem } from '@/lib/storage';
 
 interface Admin {
@@ -70,7 +71,7 @@ export const useAdminStore = create<AdminAuthState>((set, _get) => ({
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error?.message || 'Login failed');
+        throw new Error(sanitizePlatformBranding(data.error?.message || 'Login failed'));
       }
 
       saveAdminSession({
@@ -86,7 +87,7 @@ export const useAdminStore = create<AdminAuthState>((set, _get) => ({
       });
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : 'Login failed',
+        error: sanitizePlatformBranding(error instanceof Error ? error.message : 'Login failed'),
         isLoading: false,
       });
       throw error;
@@ -262,7 +263,7 @@ class AdminApiClient {
 
         const retryData = await retryResponse.json();
         if (!retryResponse.ok) {
-          throw new Error(retryData.error?.message || 'Request failed');
+          throw new Error(sanitizePlatformBranding(retryData.error?.message || 'Request failed'));
         }
 
         return retryData;
@@ -272,7 +273,7 @@ class AdminApiClient {
     }
 
     if (!response.ok) {
-      throw new Error(data.error?.message || 'Request failed');
+      throw new Error(sanitizePlatformBranding(data.error?.message || 'Request failed'));
     }
 
     return data;

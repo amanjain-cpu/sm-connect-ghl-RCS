@@ -12,12 +12,14 @@ import {
   Calendar,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/stores/auth.store';
 import { api } from '@/lib/api';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { formatDateTime } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
 
@@ -265,7 +267,7 @@ export function SettingsPage() {
         subtitle="Review account, organization, and operational configuration using supported backend data."
       />
 
-      <div className="p-4 sm:p-6">
+      <PageShell>
         <div className="grid gap-6 xl:grid-cols-[260px_minmax(0,1fr)]">
           <aside>
             <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
@@ -470,12 +472,10 @@ export function SettingsPage() {
               </Card>
             )}
 
-            {['security', 'notifications'].includes(activeTab) && (
+            {activeTab === 'security' && (
               <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
                 <CardContent className="p-6">
-                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">
-                    {navItems.find((item) => item.id === activeTab)?.label}
-                  </h3>
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Security</h3>
                   <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-400">
                     This section is intentionally read-only for now because the current backend
                     does not expose stable endpoints for these controls. The UI no longer pretends
@@ -491,6 +491,33 @@ export function SettingsPage() {
               </Card>
             )}
 
+            {activeTab === 'notifications' && (
+              <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <CardContent className="p-6">
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Notifications</h3>
+                  <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-400">
+                    This section now reflects live operational items instead of a dead placeholder control set.
+                  </p>
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    {[
+                      ['Pending dead letters', deadLetters.filter((job) => job.status === 'pending').length],
+                      ['Pending billing posts', billingSummary?.pending ?? 0],
+                      ['Port orders in progress', portOrders.filter((order) => ['submitted', 'awaiting_documents', 'in_progress'].includes(order.status)).length],
+                      ['Recent billing events', billingEvents.length],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 dark:border-slate-800 dark:bg-slate-900">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">{label}</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-950 dark:text-slate-50">{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
+                    Use the notification bell in the top bar for quick operational alerts. Use Help &amp; Support for troubleshooting guidance tied to this organization.
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {activeTab === 'billing' && (
               <div className="space-y-6">
                 <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
@@ -499,7 +526,7 @@ export function SettingsPage() {
                       <div>
                         <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Billing Summary</h3>
                         <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-                          Usage is tracked locally by cycle while GHL-first billing integration is being completed.
+                          Usage is tracked locally by cycle while platform billing integration is being completed.
                         </p>
                       </div>
                       <Button onClick={handleProcessBilling} isLoading={isProcessingBilling}>
@@ -556,7 +583,7 @@ export function SettingsPage() {
                               )}
                               {event.metadata?.statusReason && (
                                 <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                                  Reason: {event.metadata.statusReason}
+                                  Reason: {sanitizePlatformBranding(event.metadata.statusReason)}
                                 </p>
                               )}
                             </div>
@@ -592,9 +619,13 @@ export function SettingsPage() {
                         <div key={job.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 dark:border-slate-800 dark:bg-slate-900">
                           <div className="flex items-start justify-between gap-4">
                             <div>
-                              <p className="font-medium text-slate-950 dark:text-slate-50">{job.jobName}</p>
+                              <p className="font-medium text-slate-950 dark:text-slate-50">
+                                {sanitizePlatformBranding(job.jobName)}
+                              </p>
                               <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{job.queueName}</p>
-                              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{job.error}</p>
+                              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                                {sanitizePlatformBranding(job.error)}
+                              </p>
                             </div>
                             <div className="flex items-center gap-3">
                               <Badge variant={job.status === 'pending' ? 'warning' : 'secondary'}>{job.status}</Badge>
@@ -655,7 +686,7 @@ export function SettingsPage() {
             )}
           </div>
         </div>
-      </div>
+      </PageShell>
     </div>
   );
 }

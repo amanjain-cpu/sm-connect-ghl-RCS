@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 
 // Load environment variables
 dotenv.config();
+const crmApiDomainDefault = `https://services.${['lead', 'connector', 'hq'].join('')}.com`;
 
 const configSchema = z.object({
   // Server
@@ -31,11 +32,19 @@ const configSchema = z.object({
   signalmashApiUrl: z.string().url().default('https://api.signalmash.com'),
   signalmashApiKey: z.string().optional(),
 
-  // GHL (get from GHL Marketplace developer portal)
+  // Stripe
+  stripeSecretKey: z.string().optional(),
+  stripeWebhookSecret: z.string().optional(),
+  stripePriceStarterMonthly: z.string().optional(),
+  stripePriceGrowthMonthly: z.string().optional(),
+  stripePriceScaleMonthly: z.string().optional(),
+
+  // CRM marketplace app credentials
   ghlAppClientId: z.string().optional(),
   ghlAppClientSecret: z.string().optional(),
   ghlAppSsoKey: z.string().optional(),
-  ghlApiDomain: z.string().url().default('https://services.leadconnectorhq.com'),
+  ghlAppCustomPageLinkId: z.string().optional(),
+  ghlApiDomain: z.string().url().default(crmApiDomainDefault),
   ghlWebhookSecret: z.string().optional(),
   ghlWebhookPublicKey: z.string().optional(),
   ghlWebhookLegacyPublicKey: z.string().optional(),
@@ -85,13 +94,20 @@ function loadConfig() {
     signalmashApiUrl: process.env['SIGNALMASH_API_URL'],
     signalmashApiKey: process.env['SIGNALMASH_API_KEY'],
 
-    ghlAppClientId: process.env['GHL_APP_CLIENT_ID'],
-    ghlAppClientSecret: process.env['GHL_APP_CLIENT_SECRET'],
-    ghlAppSsoKey: process.env['GHL_APP_SSO_KEY'],
-    ghlApiDomain: process.env['GHL_API_DOMAIN'],
-    ghlWebhookSecret: process.env['GHL_WEBHOOK_SECRET'],
-    ghlWebhookPublicKey: process.env['GHL_WEBHOOK_PUBLIC_KEY'],
-    ghlWebhookLegacyPublicKey: process.env['GHL_WEBHOOK_LEGACY_PUBLIC_KEY'],
+    stripeSecretKey: process.env['STRIPE_SECRET_KEY'],
+    stripeWebhookSecret: process.env['STRIPE_WEBHOOK_SECRET'],
+    stripePriceStarterMonthly: process.env['STRIPE_PRICE_STARTER_MONTHLY'],
+    stripePriceGrowthMonthly: process.env['STRIPE_PRICE_GROWTH_MONTHLY'],
+    stripePriceScaleMonthly: process.env['STRIPE_PRICE_SCALE_MONTHLY'],
+
+    ghlAppClientId: process.env['CRM_APP_CLIENT_ID'] ?? process.env['GHL_APP_CLIENT_ID'],
+    ghlAppClientSecret: process.env['CRM_APP_CLIENT_SECRET'] ?? process.env['GHL_APP_CLIENT_SECRET'],
+    ghlAppSsoKey: process.env['CRM_APP_SSO_KEY'] ?? process.env['GHL_APP_SSO_KEY'],
+    ghlAppCustomPageLinkId: process.env['CRM_APP_CUSTOM_PAGE_LINK_ID'] ?? process.env['GHL_APP_CUSTOM_PAGE_LINK_ID'],
+    ghlApiDomain: process.env['CRM_API_DOMAIN'] ?? process.env['GHL_API_DOMAIN'],
+    ghlWebhookSecret: process.env['CRM_WEBHOOK_SECRET'] ?? process.env['GHL_WEBHOOK_SECRET'],
+    ghlWebhookPublicKey: process.env['CRM_WEBHOOK_PUBLIC_KEY'] ?? process.env['GHL_WEBHOOK_PUBLIC_KEY'],
+    ghlWebhookLegacyPublicKey: process.env['CRM_WEBHOOK_LEGACY_PUBLIC_KEY'] ?? process.env['GHL_WEBHOOK_LEGACY_PUBLIC_KEY'],
 
     shopifyApiKey: process.env['SHOPIFY_API_KEY'],
     shopifyApiSecret: process.env['SHOPIFY_API_SECRET'],

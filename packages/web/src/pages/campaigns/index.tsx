@@ -11,6 +11,7 @@ import {
   BadgeCheck,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -89,8 +90,8 @@ export function CampaignsPage() {
         }}
       />
 
-      <div className="space-y-6 p-4 sm:p-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+      <PageShell>
+        <PageSection className="px-6 py-6">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-2">
               <Badge variant="outline" className="w-fit border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300">
@@ -120,9 +121,9 @@ export function CampaignsPage() {
               </div>
             </div>
           </div>
-        </section>
+        </PageSection>
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+        <PageSection className="p-4">
           <div className="max-w-md">
             <Input
               placeholder="Search campaigns by name, brand, or use case"
@@ -132,7 +133,7 @@ export function CampaignsPage() {
               className="border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-900"
             />
           </div>
-        </section>
+        </PageSection>
 
         {isLoading ? (
           <div className="space-y-4">
@@ -239,7 +240,7 @@ export function CampaignsPage() {
             })}
           </div>
         )}
-      </div>
+      </PageShell>
     </div>
   );
 }

@@ -109,7 +109,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
 
   const handleSearch = async () => {
     if (!areaCode && !contains && !state) {
-      setError('Please enter an area code, digits, or state to search');
+      setError('Please enter a state, area code, or digits to search');
       return;
     }
 
@@ -130,7 +130,10 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
         setStep('select');
       }
     } catch (error: unknown) {
-      if (error instanceof ApiError && error.code === 'PROVIDER_CONNECTION_BLOCKED') {
+      if (error instanceof ApiError && (
+        error.code === 'PROVIDER_CONNECTION_BLOCKED' ||
+        error.code === 'SEARCH_CRITERIA_REQUIRED'
+      )) {
         setProviderBlocked(error.message);
         setAvailableNumbers([]);
         return;
@@ -154,22 +157,37 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
     setError('');
 
     try {
-      const response = await api.purchasePhoneNumber({
+      const response = await api.createPhoneNumberCheckout({
         phoneNumber: selectedNumber.phoneNumber,
-        campaignId: selectedCampaignId || undefined,
+        campaignId: selectedCampaignId,
         friendlyName: friendlyName || undefined,
+        monthlyPrice: selectedNumber.monthlyPrice,
       });
 
-      if (response.success) {
+      if (response.success && response.data?.mode === 'checkout' && response.data.checkoutUrl) {
+        window.location.href = response.data.checkoutUrl;
+        return;
+      }
+
+      if (response.success && response.data?.mode === 'included') {
+        await api.purchasePhoneNumber({
+          phoneNumber: selectedNumber.phoneNumber,
+          campaignId: selectedCampaignId,
+          friendlyName: friendlyName || undefined,
+        });
+        await onPurchased();
         notify.success('Number purchased', 'The selected phone number was added to your inventory.');
-        onPurchased();
         handleClose();
+        return;
       }
     } catch (error: unknown) {
-      if (error instanceof ApiError && error.code === 'PROVIDER_CONNECTION_BLOCKED') {
+      if (error instanceof ApiError && (
+        error.code === 'PROVIDER_CONNECTION_BLOCKED' ||
+        error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE'
+      )) {
         setProviderBlocked(error.message);
         setError('');
-        notify.error('Provider connection not yet verified', error.message);
+        notify.error('Number provisioning unavailable', error.message);
         return;
       }
 
@@ -238,7 +256,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      Uses the provider-backed state search contract when available.
+                      Best for broader availability searches.
                     </p>
                   </div>
 
@@ -299,7 +317,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                 )}
 
                 {providerBlocked && (
-                  <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                  <div className="rounded-2xl border border-border bg-accent px-4 py-4 text-sm text-foreground">
                     <p className="font-medium">Provider connection not yet verified</p>
                     <p className="mt-1 leading-6">
                       {providerBlocked}

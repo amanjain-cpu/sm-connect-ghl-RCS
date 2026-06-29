@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { adminApi } from '@/stores/admin.store';
 import { AdminHeader } from '@/components/layout/admin-header';
 import { formatDateTime } from '@/lib/utils';
@@ -55,20 +56,50 @@ const SETTING_LABELS: Record<string, { label: string; description: string; place
     description: 'Secret used to verify Signalmash webhook signatures.',
     placeholder: 'Webhook secret',
   },
+  stripe_secret_key: {
+    label: 'Stripe Secret Key',
+    description: 'Secret API key used for Stripe checkout, subscriptions, and overage charging.',
+    placeholder: 'sk_live_...',
+  },
+  stripe_webhook_secret: {
+    label: 'Stripe Webhook Secret',
+    description: 'Signing secret for the Stripe webhook endpoint.',
+    placeholder: 'whsec_...',
+  },
+  stripe_price_starter_monthly: {
+    label: 'Starter Price ID',
+    description: 'Recurring monthly Stripe Price ID for the Starter plan.',
+    placeholder: 'price_...',
+  },
+  stripe_price_growth_monthly: {
+    label: 'Growth Price ID',
+    description: 'Recurring monthly Stripe Price ID for the Growth plan.',
+    placeholder: 'price_...',
+  },
+  stripe_price_scale_monthly: {
+    label: 'Scale Price ID',
+    description: 'Recurring monthly Stripe Price ID for the Scale plan.',
+    placeholder: 'price_...',
+  },
   ghl_app_client_id: {
-    label: 'GHL Client ID',
-    description: 'GoHighLevel marketplace application client ID.',
-    placeholder: 'GHL client ID',
+    label: 'OAuth Client ID',
+    description: 'Marketplace application client ID.',
+    placeholder: 'OAuth client ID',
   },
   ghl_app_client_secret: {
-    label: 'GHL Client Secret',
-    description: 'GoHighLevel marketplace application client secret.',
-    placeholder: 'GHL client secret',
+    label: 'OAuth Client Secret',
+    description: 'Marketplace application client secret.',
+    placeholder: 'OAuth client secret',
   },
   ghl_app_sso_key: {
-    label: 'GHL Shared Secret',
-    description: 'Shared secret used to decrypt GoHighLevel custom-page user context.',
-    placeholder: 'GHL shared secret',
+    label: 'Embedded SSO Shared Secret',
+    description: 'Shared secret used to decrypt embedded user context. During app version transitions you can store multiple secrets separated by commas or new lines.',
+    placeholder: 'Embedded SSO shared secret(s)',
+  },
+  ghl_app_custom_page_link_id: {
+    label: 'Embedded Custom Page Link ID',
+    description: 'GHL custom page link ID for the primary embedded Signalmash app entry. Used to send installs directly into the embedded workspace page.',
+    placeholder: 'Custom page link ID',
   },
   app_name: {
     label: 'Application Name',
@@ -189,7 +220,7 @@ export function AdminSettingsPage() {
 
       <main className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
         {error && (
-          <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+          <div className="rounded-2xl border border-destructive/20 bg-destructive/10 px-4 py-4 text-sm text-destructive">
             {error}
           </div>
         )}
@@ -294,8 +325,8 @@ export function AdminSettingsPage() {
             <div className="space-y-4">
               {settings.map((setting) => {
                 const info = SETTING_LABELS[setting.key] || {
-                  label: setting.key,
-                  description: setting.description || '',
+                  label: sanitizePlatformBranding(setting.key),
+                  description: sanitizePlatformBranding(setting.description || ''),
                   placeholder: '',
                 };
 

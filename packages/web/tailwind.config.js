@@ -1,10 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ['class'],
-  content: [
-    './index.html',
-    './src/**/*.{js,ts,jsx,tsx}',
-  ],
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
       colors: {
@@ -59,12 +56,11 @@ export default {
       },
       fontFamily: {
         sans: [
+          '"Montserrat Alternates"',
           '-apple-system',
           'BlinkMacSystemFont',
-          'SF Pro Display',
-          'SF Pro Text',
+          'Segoe UI',
           'Helvetica Neue',
-          'Helvetica',
           'Arial',
           'sans-serif',
         ],
@@ -79,26 +75,17 @@ export default {
         ],
       },
       boxShadow: {
-        'glass': '0 8px 32px 0 rgba(31, 38, 135, 0.15)',
-        'glass-sm': '0 4px 16px 0 rgba(31, 38, 135, 0.1)',
-        'glass-lg': '0 12px 48px 0 rgba(31, 38, 135, 0.2)',
-        'glow': '0 0 20px rgba(59, 130, 246, 0.3)',
-        'glow-lg': '0 0 40px rgba(59, 130, 246, 0.4)',
-        'macos': '0 22px 70px 4px rgba(0, 0, 0, 0.56)',
-      },
-      backdropBlur: {
-        'glass': '16px',
-        'glass-lg': '24px',
+        card: '0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 3px rgba(17, 24, 39, 0.04)',
+        'card-lg': '0 4px 12px rgba(17, 24, 39, 0.06), 0 2px 4px rgba(17, 24, 39, 0.04)',
+        pop: '0 12px 32px rgba(17, 24, 39, 0.12), 0 4px 12px rgba(17, 24, 39, 0.06)',
+        'ring-brand': '0 0 0 3px rgba(47, 178, 103, 0.18)',
       },
       animation: {
-        'fade-in': 'fade-in 0.3s ease-out',
-        'fade-out': 'fade-out 0.3s ease-out',
-        'slide-in-up': 'slide-in-up 0.4s ease-out',
-        'slide-in-down': 'slide-in-down 0.4s ease-out',
-        'scale-in': 'scale-in 0.2s ease-out',
-        'shimmer': 'shimmer 2s linear infinite',
-        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        'float': 'float 3s ease-in-out infinite',
+        'fade-in': 'fade-in 0.2s ease-out',
+        'fade-out': 'fade-out 0.2s ease-out',
+        'slide-in-up': 'slide-in-up 0.3s cubic-bezier(0.2, 0, 0, 1)',
+        'slide-in-down': 'slide-in-down 0.3s cubic-bezier(0.2, 0, 0, 1)',
+        'scale-in': 'scale-in 0.15s ease-out',
       },
       keyframes: {
         'fade-in': {
@@ -110,24 +97,16 @@ export default {
           '100%': { opacity: '0' },
         },
         'slide-in-up': {
-          '0%': { transform: 'translateY(20px)', opacity: '0' },
+          '0%': { transform: 'translateY(8px)', opacity: '0' },
           '100%': { transform: 'translateY(0)', opacity: '1' },
         },
         'slide-in-down': {
-          '0%': { transform: 'translateY(-20px)', opacity: '0' },
+          '0%': { transform: 'translateY(-8px)', opacity: '0' },
           '100%': { transform: 'translateY(0)', opacity: '1' },
         },
         'scale-in': {
-          '0%': { transform: 'scale(0.95)', opacity: '0' },
+          '0%': { transform: 'scale(0.97)', opacity: '0' },
           '100%': { transform: 'scale(1)', opacity: '1' },
-        },
-        'shimmer': {
-          '0%': { backgroundPosition: '-200% 0' },
-          '100%': { backgroundPosition: '200% 0' },
-        },
-        'float': {
-          '0%, 100%': { transform: 'translateY(0)' },
-          '50%': { transform: 'translateY(-10px)' },
         },
       },
     },

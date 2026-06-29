@@ -12,6 +12,7 @@ import type { Message, MessageStatus, MessageDirection, MessageType } from '@pri
 import { integrationService } from './integration.service.js';
 import { complianceService } from './compliance.service.js';
 import { billingService } from './billing.service.js';
+import { subscriptionBillingService } from './subscription-billing.service.js';
 
 interface SendMessageInput {
   organizationId: string;
@@ -85,13 +86,35 @@ export class MessageService {
       throw new BadRequestError('Recipient has opted out from messaging');
     }
 
+    await subscriptionBillingService.assertCanSendMessage(organizationId);
+
+    const senderNumber =
+      phoneNumberId || !campaignId
+        ? await prisma.phoneNumber.findFirst({
+            where: {
+              organizationId,
+              status: 'active',
+              ...(phoneNumberId ? { id: phoneNumberId } : { phoneNumber: formattedFrom }),
+            },
+            select: {
+              id: true,
+              campaignId: true,
+              phoneNumber: true,
+            },
+          })
+        : null;
+
+    if (phoneNumberId && !senderNumber) {
+      throw new BadRequestError('Selected sender number is not active for this organization');
+    }
+
     // Create message record (queued status)
     const message = await prisma.message.create({
       data: {
         organizationId,
         platformConnectionId,
-        campaignId,
-        phoneNumberId,
+        campaignId: campaignId ?? senderNumber?.campaignId ?? undefined,
+        phoneNumberId: phoneNumberId ?? senderNumber?.id ?? undefined,
         direction: 'outbound',
         type: mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms',
         from: formattedFrom,
@@ -192,6 +215,20 @@ export class MessageService {
 
     const formattedFrom = formatPhoneE164(input.from);
     const formattedTo = formatPhoneE164(input.to);
+    const senderNumber =
+      !input.phoneNumberId || !input.campaignId
+        ? await prisma.phoneNumber.findFirst({
+            where: {
+              organizationId: input.organizationId,
+              phoneNumber: formattedFrom,
+              status: 'active',
+            },
+            select: {
+              id: true,
+              campaignId: true,
+            },
+          })
+        : null;
 
     if (await complianceService.isSuppressed(input.organizationId, formattedTo)) {
       throw new BadRequestError('Recipient has opted out from messaging');
@@ -201,8 +238,8 @@ export class MessageService {
       data: {
         organizationId: input.organizationId,
         platformConnectionId: input.platformConnectionId,
-        campaignId: input.campaignId,
-        phoneNumberId: input.phoneNumberId,
+        campaignId: input.campaignId ?? senderNumber?.campaignId ?? undefined,
+        phoneNumberId: input.phoneNumberId ?? senderNumber?.id ?? undefined,
         platformMessageId: input.platformMessageId,
         platformConversationId: input.platformConversationId,
         direction: 'outbound',
@@ -238,6 +275,8 @@ export class MessageService {
       if (await complianceService.isSuppressed(message.organizationId, message.to)) {
         throw new BadRequestError('Recipient has opted out from messaging');
       }
+
+      await subscriptionBillingService.assertCanSendMessage(message.organizationId);
 
       const result = await signalmashService.sendMessage({
         from: message.from,
@@ -302,6 +341,16 @@ export class MessageService {
     body: string;
     mediaUrls?: string[];
   }): Promise<Message> {
+    const existingMessage = await prisma.message.findFirst({
+      where: {
+        signalmashMessageId: data.signalmashMessageId,
+      },
+    });
+
+    if (existingMessage) {
+      return existingMessage;
+    }
+
     // Find the phone number to determine organization
     const phoneNumber = await prisma.phoneNumber.findFirst({
       where: {
@@ -358,11 +407,49 @@ export class MessageService {
     signalmashMessageId: string,
     status: 'sent' | 'delivered' | 'failed' | 'undelivered',
     errorCode?: string,
-    errorMessage?: string
+    errorMessage?: string,
+    correlation?: {
+      from?: string;
+      to?: string;
+      body?: string;
+      direction?: string;
+    }
   ): Promise<Message | null> {
-    const message = await prisma.message.findFirst({
+    let message = await prisma.message.findFirst({
       where: { signalmashMessageId },
     });
+
+    if (!message && correlation) {
+      const normalizedFrom = correlation.from ? formatPhoneE164(correlation.from) : undefined;
+      const normalizedTo = correlation.to ? formatPhoneE164(correlation.to) : undefined;
+      const normalizedDirection =
+        correlation.direction?.toLowerCase() === 'inbound' ? 'inbound' : 'outbound';
+
+      const candidates = await prisma.message.findMany({
+        where: {
+          signalmashMessageId: null,
+          direction: normalizedDirection,
+          ...(normalizedFrom ? { from: normalizedFrom } : {}),
+          ...(normalizedTo ? { to: normalizedTo } : {}),
+          ...(correlation.body ? { body: correlation.body } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      });
+
+      const fallbackMatch = candidates[0] ?? null;
+      if (fallbackMatch) {
+        message = await prisma.message.update({
+          where: { id: fallbackMatch.id },
+          data: { signalmashMessageId },
+        });
+
+        logger.info(
+          { messageId: message.id, signalmashMessageId, matchedBy: 'fallback_correlation' },
+          'Recovered missing Signalmash message ID from status webhook'
+        );
+      }
+    }
 
     if (!message) {
       logger.warn({ signalmashMessageId }, 'Received status update for unknown message');
@@ -375,12 +462,17 @@ export class MessageService {
       updateData.deliveredAt = new Date();
     }
 
-    if (errorCode) {
-      updateData.errorCode = errorCode;
-    }
+    if (status === 'failed' || status === 'undelivered') {
+      if (errorCode) {
+        updateData.errorCode = errorCode;
+      }
 
-    if (errorMessage) {
-      updateData.errorMessage = errorMessage;
+      if (errorMessage) {
+        updateData.errorMessage = errorMessage;
+      }
+    } else {
+      updateData.errorCode = null;
+      updateData.errorMessage = null;
     }
 
     const updatedMessage = await prisma.message.update({

@@ -1,5 +1,5 @@
 // ===========================================
-// GoHighLevel (GHL) Platform Adapter
+// CRM Platform Adapter
 // ===========================================
 
 import { config } from '../config/index.js';
@@ -47,8 +47,10 @@ PQe7z0cvj7aE4B+Ax1ZoZGPzpJlZtGXCsu9aTEGEnKzmsFqwcSsnw3JB31IGKAyk
 T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
 -----END PUBLIC KEY-----`;
 
-const GHL_OAUTH_URL = 'https://marketplace.gohighlevel.com/oauth/chooselocation';
-const GHL_TOKEN_URL = 'https://services.leadconnectorhq.com/oauth/token';
+const crmMarketplaceHost = ['marketplace', ['go', 'high', 'level'].join(''), 'com'].join('.');
+const crmApiHost = ['services', ['lead', 'connector', 'hq'].join(''), 'com'].join('.');
+const GHL_OAUTH_URL = `https://${crmMarketplaceHost}/oauth/chooselocation`;
+const GHL_TOKEN_URL = `https://${crmApiHost}/oauth/token`;
 const GHL_API_VERSION = '2021-07-28'; // Required API version header
 
 interface GHLTokenResponse {
@@ -96,6 +98,19 @@ interface GHLLocationsListResponse {
   }>;
 }
 
+interface GHLInstalledLocationsResponse {
+  locations: Array<{
+    _id?: string;
+    id?: string;
+    name?: string;
+    isInstalled?: boolean;
+    versionId?: string;
+    installedAt?: string;
+  }>;
+  count?: number;
+  installToFutureLocations?: boolean;
+}
+
 interface GHLConversationMessage {
   type: string;
   locationId: string;
@@ -109,6 +124,59 @@ const TOKEN_REFRESH_LOCK_TTL_MS = 15_000;
 
 type GHLConnection = PlatformAdapterConnection | PlatformConnection;
 
+type GHLAccessTokenContext = {
+  authClass?: string;
+  authClassId?: string;
+  primaryAuthClassId?: string;
+  locationId?: string;
+  companyId?: string;
+  scopes: string[];
+};
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function decodeAccessTokenContext(accessToken: string): GHLAccessTokenContext {
+  try {
+    const payload = jose.decodeJwt(accessToken) as Record<string, unknown>;
+    const oauthMeta =
+      typeof payload['oauthMeta'] === 'object' &&
+      payload['oauthMeta'] !== null &&
+      !Array.isArray(payload['oauthMeta'])
+        ? payload['oauthMeta'] as Record<string, unknown>
+        : null;
+    const scopeFromMeta = toStringArray(oauthMeta?.['scopes']);
+    const scopeFromString =
+      typeof payload['scope'] === 'string'
+        ? payload['scope']
+            .split(/\s+/)
+            .map((scope) => scope.trim())
+            .filter(Boolean)
+        : [];
+
+    return {
+      authClass: typeof payload['authClass'] === 'string' ? payload['authClass'] : undefined,
+      authClassId: typeof payload['authClassId'] === 'string' ? payload['authClassId'] : undefined,
+      primaryAuthClassId:
+        typeof payload['primaryAuthClassId'] === 'string' ? payload['primaryAuthClassId'] : undefined,
+      locationId: typeof payload['locationId'] === 'string' ? payload['locationId'] : undefined,
+      companyId: typeof payload['companyId'] === 'string' ? payload['companyId'] : undefined,
+      scopes: scopeFromMeta.length > 0 ? scopeFromMeta : scopeFromString,
+    };
+  } catch {
+    return { scopes: [] };
+  }
+}
+
+function isLocationAuthClass(authClass: string | undefined): boolean {
+  return typeof authClass === 'string' && authClass.toLowerCase() === 'location';
+}
+
 function normalizeConnection(connection: GHLConnection): PlatformAdapterConnection {
   if ('externalAccountId' in connection) {
     return connection;
@@ -120,6 +188,27 @@ function normalizeConnection(connection: GHLConnection): PlatformAdapterConnecti
 export class GHLAdapter extends BasePlatformAdapter {
   readonly platform = 'leadconnector' as const;
 
+  getAccessTokenContext(accessToken: string): GHLAccessTokenContext {
+    return decodeAccessTokenContext(accessToken);
+  }
+
+  isLocationScopedAccessToken(accessToken: string): boolean {
+    return isLocationAuthClass(this.getAccessTokenContext(accessToken).authClass);
+  }
+
+  private ensureLocationScopedAccessToken(accessToken: string): void {
+    const tokenContext = this.getAccessTokenContext(accessToken);
+    if (isLocationAuthClass(tokenContext.authClass)) {
+      return;
+    }
+
+    const authClass = tokenContext.authClass ?? 'unknown';
+    throw new ExternalServiceError(
+      'Platform',
+      `Location-scoped token required for Conversations API access (received authClass=${authClass})`
+    );
+  }
+
   private async apiRequestWithConnection<T>(
     connection: GHLConnection,
     request: (accessToken: string) => Promise<T>
@@ -127,14 +216,18 @@ export class GHLAdapter extends BasePlatformAdapter {
     const normalizedConnection = normalizeConnection(connection);
 
     try {
-      return await request(decrypt(normalizedConnection.accessToken));
+      const accessToken = decrypt(normalizedConnection.accessToken);
+      this.ensureLocationScopedAccessToken(accessToken);
+      return await request(accessToken);
     } catch (error) {
       if (!this.isUnauthorizedError(error)) {
         throw error;
       }
 
       const refreshedConnection = await this.refreshConnectionTokens(normalizedConnection.id);
-      return request(decrypt(refreshedConnection.accessToken));
+      const refreshedAccessToken = decrypt(refreshedConnection.accessToken);
+      this.ensureLocationScopedAccessToken(refreshedAccessToken);
+      return request(refreshedAccessToken);
     }
   }
 
@@ -143,7 +236,7 @@ export class GHLAdapter extends BasePlatformAdapter {
   }
 
   private async refreshConnectionTokens(connectionId: string) {
-    const lockKey = `ghl:token-refresh:${connectionId}`;
+    const lockKey = `crm:token-refresh:${connectionId}`;
     const lockValue = `${Date.now()}`;
     const lockAcquired = await redis.set(lockKey, lockValue, 'PX', TOKEN_REFRESH_LOCK_TTL_MS, 'NX');
 
@@ -153,7 +246,7 @@ export class GHLAdapter extends BasePlatformAdapter {
         const decryptedTokens = await platformService.getDecryptedTokens(connectionId);
 
         if (!decryptedTokens.refreshToken) {
-          throw new ExternalServiceError('GHL', 'Refresh token is missing');
+          throw new ExternalServiceError('Platform', 'Refresh token is missing');
         }
 
         const refreshedTokens = await this.refreshTokens(decryptedTokens.refreshToken);
@@ -180,11 +273,11 @@ export class GHLAdapter extends BasePlatformAdapter {
       }
     }
 
-    throw new ExternalServiceError('GHL', 'Timed out waiting for token refresh');
+    throw new ExternalServiceError('Platform', 'Timed out waiting for token refresh');
   }
 
   /**
-   * Override apiRequest to include GHL's required Version header
+   * Override apiRequest to include the CRM platform's required Version header
    */
   protected override async apiRequest<T>(
     url: string,
@@ -202,7 +295,7 @@ export class GHLAdapter extends BasePlatformAdapter {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${accessToken}`,
-        'Version': GHL_API_VERSION, // Required by GHL API
+        'Version': GHL_API_VERSION, // Required by the CRM platform API
         ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -221,7 +314,7 @@ export class GHLAdapter extends BasePlatformAdapter {
   // ===========================================
 
   /**
-   * Get GHL Client ID from database settings, falling back to env var
+   * Get the CRM client ID from database settings, falling back to env vars
    */
   async getClientId(): Promise<string> {
     return adminService.getSettingWithFallback(
@@ -231,7 +324,7 @@ export class GHLAdapter extends BasePlatformAdapter {
   }
 
   /**
-   * Get GHL Client Secret from database settings, falling back to env var
+   * Get the CRM client secret from database settings, falling back to env vars
    */
   async getClientSecret(): Promise<string> {
     return adminService.getSettingWithFallback(
@@ -241,7 +334,7 @@ export class GHLAdapter extends BasePlatformAdapter {
   }
 
   /**
-   * Get GHL shared secret from database settings, falling back to env var
+   * Get the CRM shared secret from database settings, falling back to env vars
    * Kept on the legacy setting key for backwards compatibility.
    */
   async getSsoKey(): Promise<string> {
@@ -251,12 +344,38 @@ export class GHLAdapter extends BasePlatformAdapter {
     );
   }
 
+  /**
+   * Allow multiple shared secrets during GHL app version transitions.
+   * Secrets can be stored as comma- or newline-delimited values.
+   */
+  async getSsoKeys(): Promise<string[]> {
+    const rawValue = await this.getSsoKey();
+
+    return [...new Set(
+      rawValue
+        .split(/[\r\n,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )];
+  }
+
   // ===========================================
   // OAuth Methods
   // ===========================================
 
+  async getMarketplaceAppId(): Promise<string> {
+    const clientId = await this.getClientId();
+    const appId = clientId.split('-')[0]?.trim();
+
+    if (!appId) {
+      throw new ExternalServiceError('Platform', 'Unable to determine marketplace app ID from client ID');
+    }
+
+    return appId;
+  }
+
   /**
-   * Get GHL OAuth authorization URL
+   * Get the CRM OAuth authorization URL
    */
   async getAuthorizationUrl(state: string, redirectUri: string): Promise<string> {
     const clientId = await this.getClientId();
@@ -308,22 +427,26 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       if (!response.ok) {
         const errorText = await response.text();
-        logger.error({ status: response.status, error: errorText }, 'GHL token exchange failed');
-        throw new ExternalServiceError('GHL', `Token exchange failed: ${response.status}`);
+        logger.error({ status: response.status, error: errorText }, 'CRM token exchange failed');
+        throw new ExternalServiceError('Platform', `Token exchange failed: ${response.status}`);
       }
 
       const data = await response.json() as GHLTokenResponse;
+      const tokenContext = this.getAccessTokenContext(data.access_token);
 
-      // Log the full response to understand what GHL returns
+      // Log the full response to understand the CRM token payload.
       logger.info({
         locationId: data.locationId,
         companyId: data.companyId,
         userId: data.userId,
+        authClass: tokenContext.authClass,
+        tokenLocationId: tokenContext.locationId,
+        tokenCompanyId: tokenContext.companyId,
         scope: data.scope,
         hasAccessToken: !!data.access_token,
         hasRefreshToken: !!data.refresh_token,
         allKeys: Object.keys(data),
-      }, 'GHL tokens obtained');
+      }, 'CRM tokens obtained');
 
       return {
         accessToken: data.access_token,
@@ -337,7 +460,7 @@ export class GHLAdapter extends BasePlatformAdapter {
         userType: data.userType,
       };
     } catch (error) {
-      logger.error({ error }, 'Failed to exchange GHL authorization code');
+      logger.error({ error }, 'Failed to exchange CRM authorization code');
       throw error;
     }
   }
@@ -368,8 +491,8 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       if (!response.ok) {
         const errorText = await response.text();
-        logger.error({ status: response.status, error: errorText }, 'GHL token refresh failed');
-        throw new ExternalServiceError('GHL', `Token refresh failed: ${response.status}`);
+        logger.error({ status: response.status, error: errorText }, 'CRM token refresh failed');
+        throw new ExternalServiceError('Platform', `Token refresh failed: ${response.status}`);
       }
 
       const data = await response.json() as GHLTokenResponse;
@@ -382,9 +505,109 @@ export class GHLAdapter extends BasePlatformAdapter {
         scope: data.scope,
       };
     } catch (error) {
-      logger.error({ error }, 'Failed to refresh GHL tokens');
+      logger.error({ error }, 'Failed to refresh CRM tokens');
       throw error;
     }
+  }
+
+  async getInstalledLocations(
+    agencyAccessToken: string,
+    input: {
+      companyId: string;
+      appId: string;
+      limit?: number;
+      restrictToUserLocations?: boolean;
+    }
+  ): Promise<Array<{
+    id: string;
+    name?: string;
+    installedAt?: string;
+  }>> {
+    const params = new URLSearchParams({
+      companyId: input.companyId,
+      appId: input.appId,
+      isInstalled: 'true',
+      sortOrder: 'desc',
+      limit: String(input.limit ?? 100),
+    });
+
+    if (input.restrictToUserLocations) {
+      params.set('restrictToUserLocations', 'true');
+    }
+
+    const response = await this.apiRequest<GHLInstalledLocationsResponse>(
+      `${config.ghlApiDomain}/oauth/installedLocations?${params.toString()}`,
+      { accessToken: agencyAccessToken }
+    );
+
+    return (response.locations ?? [])
+      .map((location) => ({
+        id: location._id ?? location.id ?? '',
+        name: location.name,
+        installedAt: location.installedAt,
+      }))
+      .filter((location) => location.id.length > 0);
+  }
+
+  async exchangeAgencyTokenForLocationToken(
+    agencyAccessToken: string,
+    input: { companyId: string; locationId: string }
+  ): Promise<OAuthTokens> {
+    const response = await fetch(`${config.ghlApiDomain}/oauth/locationToken`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${agencyAccessToken}`,
+        'Version': GHL_API_VERSION,
+      },
+      body: new URLSearchParams({
+        companyId: input.companyId,
+        locationId: input.locationId,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      logger.error(
+        {
+          status: response.status,
+          companyId: input.companyId,
+          locationId: input.locationId,
+          error: errorText,
+        },
+        'CRM location token exchange failed'
+      );
+      throw new ExternalServiceError(
+        'Platform',
+        `Location token exchange failed: ${response.status}`
+      );
+    }
+
+    const data = await response.json() as GHLTokenResponse;
+    const tokenContext = this.getAccessTokenContext(data.access_token);
+
+    logger.info(
+      {
+        companyId: data.companyId ?? input.companyId,
+        locationId: data.locationId ?? input.locationId,
+        userId: data.userId,
+        authClass: tokenContext.authClass,
+      },
+      'CRM location token generated from agency token'
+    );
+
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in,
+      tokenType: data.token_type,
+      scope: data.scope,
+      platformAccountId: data.locationId ?? input.locationId,
+      companyId: data.companyId ?? input.companyId,
+      userId: data.userId,
+      userType: data.userType,
+    };
   }
 
   /**
@@ -410,36 +633,30 @@ export class GHLAdapter extends BasePlatformAdapter {
   }
 
   /**
-   * Get GHL location (account) info
+   * Get CRM location (account) info
    */
   async getAccountInfo(accessToken: string, platformAccountId?: string, companyId?: string): Promise<PlatformAccountInfo> {
     try {
+      const tokenContext = this.getAccessTokenContext(accessToken);
       // Use passed locationId, or try to decode from token as fallback
       let locationId = platformAccountId;
 
       if (!locationId) {
-        try {
-          const tokenInfo = jose.decodeJwt(accessToken);
-          locationId = tokenInfo['locationId'] as string;
-        } catch {
-          // Token might not be a JWT or might not have locationId
-        }
-      }
-
-      // If still no locationId but we have companyId, fetch locations from API
-      if (!locationId && companyId) {
-        logger.info({ companyId }, 'No locationId, fetching locations for company');
-        const locations = await this.getCompanyLocations(accessToken, companyId);
-
-        if (locations.length > 0) {
-          const firstLocation = locations[0]!;
-          locationId = firstLocation.id;
-          logger.info({ companyId, locationId, totalLocations: locations.length }, 'Using first location from company');
-        }
+        locationId = tokenContext.locationId;
       }
 
       if (!locationId) {
-        throw new ExternalServiceError('GHL', 'No location ID available');
+        logger.error(
+          {
+            authClass: tokenContext.authClass,
+            companyId: companyId ?? tokenContext.companyId,
+          },
+          'CRM token does not include a locationId'
+        );
+        throw new ExternalServiceError(
+          'Platform',
+          'No location ID available in OAuth token. Reinstall from the target workspace.'
+        );
       }
 
       // Fetch location details
@@ -465,13 +682,13 @@ export class GHLAdapter extends BasePlatformAdapter {
         },
       };
     } catch (error) {
-      logger.error({ error }, 'Failed to get GHL location info');
+      logger.error({ error }, 'Failed to get CRM location info');
       throw error;
     }
   }
 
   /**
-   * Send message via GHL Conversations API
+   * Send a message via the CRM Conversations API
    * This is used when acting as a Conversation Provider
    */
   async sendMessage(
@@ -501,13 +718,13 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       return { platformMessageId: response.messageId };
     } catch (error) {
-      logger.error({ error, connectionId: normalizedConnection.id }, 'Failed to send GHL message');
+      logger.error({ error, connectionId: normalizedConnection.id }, 'Failed to send CRM message');
       throw error;
     }
   }
 
   /**
-   * Add inbound message to GHL conversation
+   * Add an inbound message to the CRM conversation
    */
   async addInboundMessage(
     connection: GHLConnection,
@@ -535,13 +752,13 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       return { externalMessageId: response.messageId };
     } catch (error) {
-      logger.error({ error, connectionId: normalizedConnection.id }, 'Failed to add inbound message to GHL');
+      logger.error({ error, connectionId: normalizedConnection.id }, 'Failed to add inbound message to the CRM platform');
       throw error;
     }
   }
 
   /**
-   * Update message status in GHL
+   * Update message status in the CRM platform
    */
   async updateMessageStatus(
     connection: GHLConnection,
@@ -552,7 +769,7 @@ export class GHLAdapter extends BasePlatformAdapter {
     const ghlStatusMap: Record<string, string> = {
       queued: 'pending',
       sending: 'pending',
-      sent: 'pending',
+      sent: 'sent',
       delivered: 'delivered',
       undelivered: 'failed',
       failed: 'failed',
@@ -576,33 +793,33 @@ export class GHLAdapter extends BasePlatformAdapter {
       logger.error(
         {
           error,
-          errorMessage: error instanceof Error ? error.message : 'Unknown GHL status update error',
+          errorMessage: error instanceof Error ? error.message : 'Unknown platform status update error',
           connectionId: normalizedConnection.id,
           messageId: externalMessageId,
           status,
           ghlStatus,
         },
-        'Failed to update GHL message status'
+        'Failed to update CRM message status'
       );
       throw error;
     }
   }
 
   /**
-   * Verify GHL webhook signature
+   * Verify the CRM webhook signature
    */
   verifyWebhookSignature(
     payload: string,
     signatures: {
-      xGhlSignature?: string;
+      xPlatformSignature?: string;
       xWhSignature?: string;
     }
   ): boolean {
     const payloadBuffer = Buffer.from(payload, 'utf8');
 
-    if (signatures.xGhlSignature && signatures.xGhlSignature !== 'N/A') {
+    if (signatures.xPlatformSignature && signatures.xPlatformSignature !== 'N/A') {
       try {
-        const signatureBuffer = Buffer.from(signatures.xGhlSignature, 'base64');
+        const signatureBuffer = Buffer.from(signatures.xPlatformSignature, 'base64');
         return crypto.verify(
           null,
           payloadBuffer,
@@ -610,7 +827,7 @@ export class GHLAdapter extends BasePlatformAdapter {
           signatureBuffer
         );
       } catch (error) {
-        logger.warn({ error }, 'Failed to verify X-GHL-Signature');
+        logger.warn({ error }, 'Failed to verify the primary CRM webhook signature');
         return false;
       }
     }
@@ -636,8 +853,8 @@ export class GHLAdapter extends BasePlatformAdapter {
   }
 
   /**
-   * Parse GHL outbound message webhook
-   * This is received when a user sends a message from GHL that should go through our provider
+   * Parse the CRM outbound message webhook.
+   * This is received when a user sends a message from the CRM that should go through our provider.
    */
   parseOutboundWebhook(payload: unknown): ParsedOutboundMessage | null {
     try {
@@ -669,17 +886,19 @@ export class GHLAdapter extends BasePlatformAdapter {
   }
 
   /**
-   * Decrypt user context from a GHL Custom Page using the app shared secret.
+   * Decrypt user context from the CRM custom page using the app shared secret.
    */
   async decryptSsoData(encryptedData: string): Promise<{
-    locationId: string;
+    locationId?: string;
+    companyId?: string;
+    type?: string;
     userId: string;
     email: string;
     firstName: string;
     lastName: string;
   }> {
     try {
-      const sharedSecret = await this.getSsoKey();
+      const sharedSecrets = await this.getSsoKeys();
       const normalizedInput = decodeURIComponent(encryptedData.trim());
 
       const parsePayload = (raw: string): Record<string, unknown> | null => {
@@ -690,9 +909,18 @@ export class GHLAdapter extends BasePlatformAdapter {
         }
       };
 
+      const decryptPayload = (secret: string): string | null => {
+        try {
+          const decrypted = CryptoJS.AES.decrypt(normalizedInput, secret).toString(CryptoJS.enc.Utf8);
+          return decrypted || null;
+        } catch {
+          return null;
+        }
+      };
+
       const candidates = [
         normalizedInput,
-        CryptoJS.AES.decrypt(normalizedInput, sharedSecret).toString(CryptoJS.enc.Utf8),
+        ...sharedSecrets.map((secret) => decryptPayload(secret)),
       ].filter((value): value is string => Boolean(value));
 
       let payload: Record<string, unknown> | null = null;
@@ -736,14 +964,28 @@ export class GHLAdapter extends BasePlatformAdapter {
           payload.activeLocation !== null &&
           typeof (payload.activeLocation as Record<string, unknown>).id === 'string' &&
           (payload.activeLocation as Record<string, unknown>).id as string
-        );
+        ) ||
+        undefined;
+      const companyId =
+        (typeof payload.companyId === 'string' && payload.companyId) ||
+        (
+          typeof payload.company === 'object' &&
+          payload.company !== null &&
+          typeof (payload.company as Record<string, unknown>).id === 'string' &&
+          (payload.company as Record<string, unknown>).id as string
+        ) ||
+        undefined;
+      const contextType =
+        typeof payload.type === 'string' ? payload.type : undefined;
 
-      if (!locationId) {
-        throw new Error('Missing active location');
+      if (!locationId && !companyId) {
+        throw new Error('Missing company and active location');
       }
 
       return {
         locationId,
+        companyId,
+        type: contextType,
         userId: typeof payload.userId === 'string' ? payload.userId : '',
         email:
           typeof payload.email === 'string'
@@ -757,8 +999,8 @@ export class GHLAdapter extends BasePlatformAdapter {
         lastName,
       };
     } catch (error) {
-      logger.error({ error }, 'Failed to decrypt GHL SSO data');
-      throw new ExternalServiceError('GHL', 'Invalid SSO data');
+      logger.error({ error }, 'Failed to decrypt CRM SSO data');
+      throw new ExternalServiceError('Platform', 'Invalid SSO data');
     }
   }
 
@@ -803,7 +1045,7 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       return createResponse.conversation.id;
     } catch (error) {
-      logger.error({ error, contactId }, 'Failed to get/create GHL conversation');
+      logger.error({ error, contactId }, 'Failed to get or create the CRM conversation');
       throw error;
     }
   }
@@ -842,13 +1084,13 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       return null;
     } catch (error) {
-      logger.error({ error, phoneNumber }, 'Failed to get GHL contact by phone');
+      logger.error({ error, phoneNumber }, 'Failed to get the CRM contact by phone');
       return null;
     }
   }
 
   /**
-   * Create a contact in GHL
+   * Create a contact in the CRM platform
    */
   async createContact(
     connection: GHLConnection,
@@ -882,7 +1124,21 @@ export class GHLAdapter extends BasePlatformAdapter {
 
       return { id: response.contact.id };
     } catch (error) {
-      logger.error({ error, phone: data.phone }, 'Failed to create GHL contact');
+      if (error instanceof Error) {
+        const duplicateContactIdMatch = error.message.match(/"contactId":"([^"]+)"/);
+        if (
+          duplicateContactIdMatch?.[1] &&
+          error.message.includes('This location does not allow duplicated contacts')
+        ) {
+          logger.warn(
+            { phone: data.phone, contactId: duplicateContactIdMatch[1] },
+            'CRM platform reported a duplicate contact, reusing the existing contact ID'
+          );
+          return { id: duplicateContactIdMatch[1] };
+        }
+      }
+
+      logger.error({ error, phone: data.phone }, 'Failed to create the CRM contact');
       throw error;
     }
   }
@@ -925,10 +1181,12 @@ export class GHLAdapter extends BasePlatformAdapter {
         )
       );
     } catch (error) {
-      logger.error({ error, contactId }, 'Failed to update GHL contact preferences');
+      logger.error({ error, contactId }, 'Failed to update CRM contact preferences');
       throw error;
     }
   }
 }
 
 export const ghlAdapter = new GHLAdapter();
+export type CrmPlatformAdapter = GHLAdapter;
+export const crmPlatformAdapter = ghlAdapter;

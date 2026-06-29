@@ -94,6 +94,19 @@ router.get(
   })
 );
 
+router.get(
+  '/dashboard',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const summary = await organizationService.getDashboardSummary(req.user!.organizationId);
+
+    res.json({
+      success: true,
+      data: summary,
+    });
+  })
+);
+
 /**
  * GET /organization/users
  * Get organization users

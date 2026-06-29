@@ -1,6 +1,6 @@
 // ===========================================
-// Connect GHL Page
-// Entry point for users - initiates GHL OAuth
+// Connect Page
+// Entry point for users - initiates platform OAuth
 // ===========================================
 
 import { motion } from 'framer-motion';
@@ -13,7 +13,7 @@ const features = [
   {
     icon: Zap,
     title: 'Instant Setup',
-    description: 'Connect your GHL account in seconds with secure OAuth',
+    description: 'Connect your CRM workspace in seconds with secure OAuth',
   },
   {
     icon: MessageSquare,
@@ -28,23 +28,22 @@ const features = [
 ];
 
 export function ConnectPage() {
-  const { initiateGHLOAuth, isLoading, error } = useAuthStore();
+  const { initiatePlatformOAuth, isLoading, error } = useAuthStore();
 
   const handleConnect = async () => {
     try {
-      await initiateGHLOAuth();
+      await initiatePlatformOAuth();
     } catch {
       // Error is handled by the store
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-900 dark:to-gray-950">
-      {/* Decorative background */}
+    <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-96 h-96 bg-purple-500/20 rounded-full blur-3xl" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-green-500/10 rounded-full blur-3xl" />
+        <div className="absolute -top-40 -right-40 h-96 w-96 rounded-full bg-primary/12 blur-3xl" />
+        <div className="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-accent blur-3xl" />
+        <div className="absolute left-1/2 top-1/2 h-96 w-96 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/8 blur-3xl" />
       </div>
 
       <motion.div
@@ -53,20 +52,18 @@ export function ConnectPage() {
         transition={{ duration: 0.5 }}
         className="relative w-full max-w-lg"
       >
-        {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 shadow-lg mb-4">
-            <span className="text-white font-bold text-3xl">SM</span>
+          <div className="mb-4 inline-flex h-20 w-20 items-center justify-center rounded-2xl bg-primary text-3xl font-bold text-primary-foreground shadow-pop">
+            <span>SM</span>
           </div>
           <h1 className="text-3xl font-bold">Signalmash Connect</h1>
           <p className="text-muted-foreground mt-2 text-lg">
-            Power your GoHighLevel with SMS messaging
+            Power your CRM with SMS messaging
           </p>
         </div>
 
-        <Card className="shadow-2xl border-0 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl">
+        <Card className="border-border shadow-pop">
           <CardContent className="p-8">
-            {/* Features */}
             <div className="space-y-4 mb-8">
               {features.map((feature, index) => (
                 <motion.div
@@ -100,15 +97,15 @@ export function ConnectPage() {
             {/* Connect Button */}
             <Button
               onClick={handleConnect}
-              className="w-full h-14 text-lg bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
+              className="h-14 w-full text-lg"
               isLoading={isLoading}
             >
               <ExternalLink className="h-5 w-5 mr-2" />
-              Connect with GoHighLevel
+              Connect your CRM
             </Button>
 
             <p className="mt-4 text-center text-sm text-muted-foreground">
-              You'll be redirected to GoHighLevel to authorize access
+              You'll be redirected to your CRM to authorize access
             </p>
           </CardContent>
         </Card>

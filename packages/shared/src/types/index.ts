@@ -353,8 +353,8 @@ export interface OAuthState {
   nonce: string;
 }
 
-// GHL Specific Types
-export interface GHLLocation {
+// CRM platform-specific types
+export interface CrmLocation {
   id: string;
   name: string;
   address?: string;
@@ -365,7 +365,7 @@ export interface GHLLocation {
   phone?: string;
 }
 
-export interface GHLConversation {
+export interface CrmConversation {
   id: string;
   locationId: string;
   contactId: string;
@@ -373,7 +373,7 @@ export interface GHLConversation {
   lastMessageDate?: Date;
 }
 
-export interface GHLContact {
+export interface CrmContact {
   id: string;
   locationId: string;
   firstName?: string;

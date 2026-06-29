@@ -107,6 +107,13 @@ export function AdminOrganizationsPage() {
 
   const handleLinkExistingAssets = async () => {
     if (!selectedOrganization) return;
+    if (linkForm.configureWebhook && !linkForm.signalmashNumberId.trim()) {
+      notify.error(
+        'Signalmash Number ID required',
+        'Enter the provider number ID before linking when webhook configuration is enabled. Without it, inbound replies cannot sync back into the connected workspace.'
+      );
+      return;
+    }
 
     setIsLinking(true);
     try {

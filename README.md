@@ -1,12 +1,12 @@
 # SignalMash Connect
 
-A multi-platform SMS messaging marketplace application that integrates with Signalmash APIs. Currently supports GoHighLevel (GHL) with architecture designed for future expansion to Shopify, Salesforce, HubSpot, and Zoho.
+A multi-platform SMS messaging marketplace application that integrates with Signalmash APIs. Currently supports CRM marketplace platform with architecture designed for future expansion to Shopify, Salesforce, HubSpot, and Zoho.
 
 ## Features
 
 - **10DLC Brand Registration**: Register and verify business brands for compliant SMS messaging
 - **Campaign Management**: Create and manage SMS campaigns with compliance settings
-- **Multi-Platform Integration**: Connect with GHL (more platforms coming soon)
+- **Multi-Platform Integration**: Connect with CRM (more platforms coming soon)
 - **Professional UI**: macOS-inspired glassmorphism design
 - **Real-time Message Tracking**: Monitor message delivery and status
 - **API Key Management**: Secure API access for programmatic integration
@@ -43,7 +43,7 @@ signalmash-connect/
 │   ├── server/           # Express.js API server
 │   │   ├── prisma/       # Database schema and migrations
 │   │   ├── src/
-│   │   │   ├── adapters/ # Platform adapters (GHL, etc.)
+│   │   │   ├── adapters/ # Platform adapters (CRM, etc.)
 │   │   │   ├── config/   # Configuration
 │   │   │   ├── middleware/
 │   │   │   ├── routes/   # API routes
@@ -106,9 +106,9 @@ ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
 SIGNALMASH_API_KEY=your-signalmash-api-key
 SIGNALMASH_API_URL=https://api.signalmash.com
 
-# GHL App Credentials
-GHL_APP_CLIENT_ID=your-ghl-client-id
-GHL_APP_CLIENT_SECRET=your-ghl-client-secret
+# CRM App Credentials
+CRM_APP_CLIENT_ID=your-crm-client-id
+CRM_APP_CLIENT_SECRET=your-crm-client-secret
 GHL_APP_REDIRECT_URI=http://localhost:3000/oauth/callback
 
 # App URL
@@ -196,14 +196,14 @@ yarn dev
 
 ### Webhooks
 - `POST /webhooks/signalmash` - Signalmash status callbacks
-- `POST /webhooks/ghl` - GHL webhook events
+- `POST /webhook` - CRM webhook events
 - `GET /oauth/callback` - OAuth callback handler
 
-## GHL Integration
+## CRM Integration
 
-### Setting Up as GHL Marketplace App
+### Setting Up as CRM Marketplace App
 
-1. Create a new app in GHL Developer Portal
+1. Create a new app in CRM Developer Portal
 2. Configure OAuth 2.0 scopes:
    - `conversations.readonly`
    - `conversations.write`
@@ -217,7 +217,7 @@ yarn dev
 
 ### Custom Pages Setup
 
-Add these pages to your GHL app:
+Add these pages to your CRM app:
 - `/register` - Brand registration form
 - `/campaigns` - Campaign management
 - `/settings` - App settings
@@ -256,7 +256,7 @@ Ensure all secrets are properly set:
 - Refresh tokens are rotated on use
 - Rate limiting on sensitive endpoints
 - Input validation on all endpoints
-- CSP headers configured for GHL iframe embedding
+- CSP headers configured for CRM iframe embedding
 
 ## License
 

@@ -5,6 +5,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database.js';
 import { BadRequestError, NotFoundError } from '../utils/errors.js';
+import { subscriptionBillingService } from './subscription-billing.service.js';
 
 type BillingDirection = 'inbound' | 'outbound';
 type BillingUnit = 'sms' | 'mms' | 'phone_number';
@@ -24,25 +25,41 @@ export class BillingService {
     quantity?: number;
     metadata?: Record<string, unknown>;
   }) {
-    return prisma.billingEvent.upsert({
+    const existing = await prisma.billingEvent.findUnique({
       where: { billingKey: input.billingKey },
-      create: {
-        organizationId: input.organizationId,
-        messageId: input.messageId,
-        direction: input.direction,
-        unit: input.unit,
-        quantity: input.quantity ?? 1,
-        source: input.source,
-        billingKey: input.billingKey,
-        cycleMonth: getCycleMonth(),
-        metadata: input.metadata as Prisma.InputJsonValue | undefined,
-      },
-      update: {
-        status: 'pending',
-        quantity: input.quantity ?? 1,
-        metadata: input.metadata as Prisma.InputJsonValue | undefined,
-      },
     });
+
+    const mergedMetadata = {
+      ...this.asRecord(existing?.metadata),
+      ...(input.metadata ?? {}),
+    };
+
+    const event = existing
+      ? await prisma.billingEvent.update({
+          where: { id: existing.id },
+          data: {
+            status: 'pending',
+            quantity: input.quantity ?? 1,
+            metadata: mergedMetadata as Prisma.InputJsonValue,
+          },
+        })
+      : await prisma.billingEvent.create({
+          data: {
+            organizationId: input.organizationId,
+            messageId: input.messageId,
+            direction: input.direction,
+            unit: input.unit,
+            quantity: input.quantity ?? 1,
+            source: input.source,
+            billingKey: input.billingKey,
+            cycleMonth: getCycleMonth(),
+            metadata: mergedMetadata as Prisma.InputJsonValue | undefined,
+          },
+        });
+
+    await subscriptionBillingService.processMeteredEvent(event.id);
+
+    return event;
   }
 
   async updateEventStatus(

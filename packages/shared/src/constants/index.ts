@@ -3,7 +3,7 @@
 // ===========================================
 
 export const PLATFORMS = {
-  GHL: 'leadconnector',
+  CRM: 'leadconnector',
   SHOPIFY: 'shopify',
   HUBSPOT: 'hubspot',
   SALESFORCE: 'salesforce',
@@ -11,7 +11,7 @@ export const PLATFORMS = {
 } as const;
 
 export const PLATFORM_NAMES: Record<string, string> = {
-  leadconnector: 'GoHighLevel',
+  leadconnector: 'CRM Platform',
   shopify: 'Shopify',
   hubspot: 'HubSpot',
   salesforce: 'Salesforce',

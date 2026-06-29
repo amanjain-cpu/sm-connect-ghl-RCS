@@ -20,6 +20,7 @@ import {
   Pencil,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
+import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -290,13 +291,13 @@ export function BrandDetailPage() {
     return (
       <div>
         <Header title="Brand Details" />
-        <div className="space-y-6 p-4 sm:p-6">
+        <PageShell>
           <div className="h-40 animate-pulse rounded-[28px] bg-slate-200 dark:bg-slate-800" />
           <div className="grid gap-6 lg:grid-cols-3">
             <div className="h-64 animate-pulse rounded-3xl bg-slate-200 dark:bg-slate-800 lg:col-span-2" />
             <div className="h-64 animate-pulse rounded-3xl bg-slate-200 dark:bg-slate-800" />
           </div>
-        </div>
+        </PageShell>
       </div>
     );
   }
@@ -323,7 +324,7 @@ export function BrandDetailPage() {
         subtitle={`Display name: ${brand.displayName}`}
       />
 
-      <div className="space-y-6 p-4 sm:p-6">
+      <PageShell>
         <Button
           variant="ghost"
           onClick={() => navigate('/brands')}
@@ -332,7 +333,7 @@ export function BrandDetailPage() {
           Back to Brands
         </Button>
 
-        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+        <PageSection className="px-6 py-6">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-4">
               <div className="flex items-center gap-4">
@@ -356,7 +357,7 @@ export function BrandDetailPage() {
               </div>
 
               {brand.rejectionReason && (
-                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+                <div className="rounded-2xl border border-destructive/20 bg-destructive/10 px-4 py-4 text-sm text-destructive">
                   <strong className="font-semibold">Rejection reason:</strong> {brand.rejectionReason}
                 </div>
               )}
@@ -392,7 +393,7 @@ export function BrandDetailPage() {
               )}
             </div>
           </div>
-        </section>
+        </PageSection>
 
         <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
           <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
@@ -703,7 +704,7 @@ export function BrandDetailPage() {
             </Card>
           </div>
         </div>
-      </div>
+      </PageShell>
 
       <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
         <DialogContent className="max-w-3xl">

@@ -324,6 +324,14 @@ const linkExistingAssetsSchema = z.object({
   friendlyName: z.string().max(100).optional().transform((value) => value?.trim() || undefined),
   configureWebhook: z.boolean().optional(),
   makeDefaultSender: z.boolean().optional(),
+}).superRefine((value, ctx) => {
+  if (value.configureWebhook && !value.signalmashNumberId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['signalmashNumberId'],
+      message: 'Signalmash Number ID is required when configuring the inbound webhook.',
+    });
+  }
 });
 
 router.post('/organizations/link-existing-assets', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
