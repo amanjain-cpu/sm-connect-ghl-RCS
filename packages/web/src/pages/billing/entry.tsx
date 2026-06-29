@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { finishMarketplaceInstallTab } from '@/lib/marketplace-install';
 import { useAuthStore } from '@/stores/auth.store';
 
-const crmPlatformId = `${'lead'}connector` as const;
+const crmPublicPlatformId = 'crm' as const;
 
 function getEmbeddedDataFromQuery(
   searchParams: URLSearchParams,
@@ -224,7 +224,7 @@ export function BillingEntryPage() {
             </h2>
             <p className="max-w-md text-muted-foreground">{error}</p>
             <button
-              onClick={() => navigate(isMarketplaceInstall ? `/auth/install-complete?platform=${crmPlatformId}&success=false&reason=external_billing_authorization_failed` : '/connect')}
+              onClick={() => navigate(isMarketplaceInstall ? `/auth/install-complete?platform=${crmPublicPlatformId}&success=false&reason=external_billing_authorization_failed` : '/connect')}
               className="mt-4 rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:opacity-90"
             >
               {isMarketplaceInstall ? 'Back to install status' : 'Open standard connect flow'}

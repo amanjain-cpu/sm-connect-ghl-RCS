@@ -24,12 +24,30 @@ import { adminService, SETTINGS_KEYS } from '../services/admin.service.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
+const crmPublicPlatformId = 'crm' as const;
 const supportedPlatforms = [crmPlatformId, 'shopify', 'hubspot', 'salesforce', 'zoho'] as const;
+const supportedPlatformRouteParams = [crmPublicPlatformId, ...supportedPlatforms] as const;
+type SupportedPlatform = (typeof supportedPlatforms)[number];
+type SupportedPlatformRouteParam = (typeof supportedPlatformRouteParams)[number];
 const crmMarketplaceHostSuffixes = [
   `.${['go', 'high', 'level'].join('')}.com`,
   `.${['lead', 'connector', 'hq'].join('')}.com`,
 ];
 const defaultCrmWorkspaceOrigin = `https://app.${['go', 'high', 'level'].join('')}.com`;
+
+function normalizePlatformRouteParam(platform: SupportedPlatformRouteParam): SupportedPlatform {
+  return platform === crmPublicPlatformId ? crmPlatformId : platform;
+}
+
+function getPublicPlatformRouteParam(
+  platform: SupportedPlatformRouteParam | SupportedPlatform
+): SupportedPlatformRouteParam | SupportedPlatform {
+  return platform === crmPlatformId ? crmPublicPlatformId : platform;
+}
+
+function buildPlatformCallbackUrl(platform: SupportedPlatformRouteParam | SupportedPlatform): string {
+  return `${config.apiUrl}/api/platforms/${getPublicPlatformRouteParam(platform)}/callback`;
+}
 
 function getTrustedCrmReturnUrl(referrer: string | undefined): string | null {
   if (!referrer) {
@@ -92,7 +110,7 @@ const oauthCallbackSchema = z.object({
 });
 
 const platformParamSchema = z.object({
-  platform: z.enum(supportedPlatforms),
+  platform: z.enum(supportedPlatformRouteParams),
 });
 
 const activationSchema = z.object({
@@ -156,9 +174,10 @@ router.get(
   optionalAuth,
   validate({ params: platformParamSchema }),
   asyncHandler(async (req, res) => {
-    const { platform } = req.params;
+    const routePlatform = req.params.platform as SupportedPlatformRouteParam;
+    const platform = normalizePlatformRouteParam(routePlatform);
     const platformAdapter = platformAdapterRegistry.get(platform as Parameters<typeof platformAdapterRegistry.get>[0]);
-    const redirectUri = `${config.apiUrl}/api/platforms/${platform}/callback`;
+    const redirectUri = buildPlatformCallbackUrl(routePlatform);
 
     // Generate state token
     const state = generateUrlSafeToken(32);
@@ -191,7 +210,8 @@ router.get(
   '/:platform/callback',
   validate({ params: platformParamSchema, query: oauthCallbackSchema }),
   asyncHandler(async (req, res) => {
-    const { platform } = req.params;
+    const routePlatform = req.params.platform as SupportedPlatformRouteParam;
+    const platform = normalizePlatformRouteParam(routePlatform);
     const { code, state, locationId: callbackLocationId, companyId: callbackCompanyId, userId: callbackUserId } = req.query;
     const platformAdapter = platformAdapterRegistry.get(platform as Parameters<typeof platformAdapterRegistry.get>[0]);
     const crmReturnUrl = getTrustedCrmReturnUrl(req.get('referer') ?? undefined);
@@ -227,7 +247,7 @@ router.get(
       logger.info({ platform }, 'OAuth callback without state (marketplace install)');
     }
 
-    const redirectUri = `${config.apiUrl}/api/platforms/${platform}/callback`;
+    const redirectUri = buildPlatformCallbackUrl(routePlatform);
 
     let tokens = await platformAdapter.exchangeCodeForTokens(code as string, redirectUri);
     let crmTokenContext:
@@ -243,7 +263,7 @@ router.get(
       const failCrmInstall = (reason: string, message: string): never | void => {
         if (!state) {
           const installCompleteUrl = new URL(`${config.webUrl}/auth/install-complete`);
-          installCompleteUrl.searchParams.set('platform', platform);
+          installCompleteUrl.searchParams.set('platform', getPublicPlatformRouteParam(platform));
           installCompleteUrl.searchParams.set('success', 'false');
           installCompleteUrl.searchParams.set('reason', reason);
           res.redirect(installCompleteUrl.toString());
@@ -299,7 +319,7 @@ router.get(
         });
 
         const installCompleteUrl = new URL(`${config.webUrl}/auth/install-complete`);
-        installCompleteUrl.searchParams.set('platform', platform);
+        installCompleteUrl.searchParams.set('platform', getPublicPlatformRouteParam(platform));
         installCompleteUrl.searchParams.set('success', 'true');
         installCompleteUrl.searchParams.set('installScope', 'agency');
         if (isNew) {
@@ -628,7 +648,7 @@ router.get(
           : crmReturnUrl;
 
       const successUrl = new URL(`${config.webUrl}/auth/callback`);
-      successUrl.searchParams.set('platform', platform);
+      successUrl.searchParams.set('platform', getPublicPlatformRouteParam(platform));
       successUrl.searchParams.set('success', 'true');
       successUrl.searchParams.set('accessToken', authResult.tokens.accessToken);
       successUrl.searchParams.set('refreshToken', authResult.tokens.refreshToken);
@@ -654,7 +674,7 @@ router.get(
         : crmReturnUrl;
 
     const successUrl = new URL(`${config.webUrl}/auth/callback`);
-    successUrl.searchParams.set('platform', platform);
+    successUrl.searchParams.set('platform', getPublicPlatformRouteParam(platform));
     successUrl.searchParams.set('success', 'true');
     successUrl.searchParams.set('accessToken', authResult.tokens.accessToken);
     successUrl.searchParams.set('refreshToken', authResult.tokens.refreshToken);
@@ -673,171 +693,171 @@ router.get(
 /**
  * Exchange embedded CRM SSO payload for app auth tokens.
  */
-router.post(
-  `/${crmPlatformId}/sso/exchange`,
-  asyncHandler(async (req, res) => {
-    const { encryptedData } = embeddedSsoExchangeSchema.parse(req.body);
-    const crmPlatformAdapter = platformAdapterRegistry.get(crmPlatformId) as CrmPlatformAdapter;
-    const ssoPayload = await crmPlatformAdapter.decryptSsoData?.(encryptedData);
+const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
+  const { encryptedData } = embeddedSsoExchangeSchema.parse(req.body);
+  const crmPlatformAdapter = platformAdapterRegistry.get(crmPlatformId) as CrmPlatformAdapter;
+  const ssoPayload = await crmPlatformAdapter.decryptSsoData?.(encryptedData);
 
-    if (!ssoPayload?.locationId) {
-      if (ssoPayload?.companyId) {
-        throw new BadRequestError(
-          'Open the app from a workspace inside your CRM to continue.'
-        );
-      }
-
-      throw new BadRequestError('Invalid embedded sign-in payload');
+  if (!ssoPayload?.locationId) {
+    if (ssoPayload?.companyId) {
+      throw new BadRequestError(
+        'Open the app from a workspace inside your CRM to continue.'
+      );
     }
 
-    let connection = await platformService.getByPlatformAccount(
-      crmPlatformId,
-      ssoPayload.locationId
+    throw new BadRequestError('Invalid embedded sign-in payload');
+  }
+
+  let connection = await platformService.getByPlatformAccount(
+    crmPlatformId,
+    ssoPayload.locationId
+  );
+
+  if (!connection && ssoPayload.companyId) {
+    const agencyConnection = await platformService.getLeadconnectorAgencyConnectionByCompanyId(
+      ssoPayload.companyId
     );
 
-    if (!connection && ssoPayload.companyId) {
-      const agencyConnection = await platformService.getLeadconnectorAgencyConnectionByCompanyId(
-        ssoPayload.companyId
-      );
+    if (agencyConnection) {
+      const decryptedAgencyTokens = await platformService.getDecryptedTokens(agencyConnection.id);
+      const agencyTokenContext = crmPlatformAdapter.getAccessTokenContext(decryptedAgencyTokens.accessToken);
 
-      if (agencyConnection) {
-        const decryptedAgencyTokens = await platformService.getDecryptedTokens(agencyConnection.id);
-        const agencyTokenContext = crmPlatformAdapter.getAccessTokenContext(decryptedAgencyTokens.accessToken);
+      if (!crmPlatformAdapter.isLocationScopedAccessToken(decryptedAgencyTokens.accessToken)) {
+        try {
+          const locationTokens = await crmPlatformAdapter.exchangeAgencyTokenForLocationToken(
+            decryptedAgencyTokens.accessToken,
+            {
+              companyId: ssoPayload.companyId,
+              locationId: ssoPayload.locationId,
+            }
+          );
+          const locationTokenContext = crmPlatformAdapter.getAccessTokenContext(locationTokens.accessToken);
+          const accountInfo = await crmPlatformAdapter.getAccountInfo(
+            locationTokens.accessToken,
+            ssoPayload.locationId,
+            ssoPayload.companyId
+          );
 
-        if (!crmPlatformAdapter.isLocationScopedAccessToken(decryptedAgencyTokens.accessToken)) {
-          try {
-            const locationTokens = await crmPlatformAdapter.exchangeAgencyTokenForLocationToken(
-              decryptedAgencyTokens.accessToken,
-              {
-                companyId: ssoPayload.companyId,
-                locationId: ssoPayload.locationId,
-              }
-            );
-            const locationTokenContext = crmPlatformAdapter.getAccessTokenContext(locationTokens.accessToken);
-            const accountInfo = await crmPlatformAdapter.getAccountInfo(
-              locationTokens.accessToken,
-              ssoPayload.locationId,
-              ssoPayload.companyId
-            );
+          connection = await platformService.createConnection({
+            organizationId: agencyConnection.organizationId,
+            platform: crmPlatformId,
+            platformAccountId: accountInfo.id,
+            platformAccountName: accountInfo.name,
+            accessToken: locationTokens.accessToken,
+            refreshToken: locationTokens.refreshToken,
+            tokenExpiresAt: locationTokens.expiresIn
+              ? new Date(Date.now() + locationTokens.expiresIn * 1000)
+              : undefined,
+            scopes: locationTokens.scope?.split(' ') ?? [],
+            metadata: {
+              ...(accountInfo.metadata ?? {}),
+              companyId: ssoPayload.companyId,
+              agencyBridgeConnectionId: agencyConnection.id,
+              agencyBridgeAuthClass: agencyTokenContext.authClass ?? null,
+              ghlAuthClass: locationTokenContext.authClass ?? null,
+              ghlAuthClassId: locationTokenContext.authClassId ?? null,
+              ghlPrimaryAuthClassId: locationTokenContext.primaryAuthClassId ?? null,
+              ghlTokenLocationId: locationTokenContext.locationId ?? null,
+              ghlTokenCompanyId: locationTokenContext.companyId ?? null,
+              ghlTokenScopes: locationTokenContext.scopes,
+            },
+          });
 
-            connection = await platformService.createConnection({
+          logger.info(
+            {
+              locationId: ssoPayload.locationId,
+              companyId: ssoPayload.companyId,
+              agencyConnectionId: agencyConnection.id,
               organizationId: agencyConnection.organizationId,
-              platform: crmPlatformId,
-              platformAccountId: accountInfo.id,
-              platformAccountName: accountInfo.name,
-              accessToken: locationTokens.accessToken,
-              refreshToken: locationTokens.refreshToken,
-              tokenExpiresAt: locationTokens.expiresIn
-                ? new Date(Date.now() + locationTokens.expiresIn * 1000)
-                : undefined,
-              scopes: locationTokens.scope?.split(' ') ?? [],
-              metadata: {
-                ...(accountInfo.metadata ?? {}),
-                companyId: ssoPayload.companyId,
-                agencyBridgeConnectionId: agencyConnection.id,
-                agencyBridgeAuthClass: agencyTokenContext.authClass ?? null,
-                ghlAuthClass: locationTokenContext.authClass ?? null,
-                ghlAuthClassId: locationTokenContext.authClassId ?? null,
-                ghlPrimaryAuthClassId: locationTokenContext.primaryAuthClassId ?? null,
-                ghlTokenLocationId: locationTokenContext.locationId ?? null,
-                ghlTokenCompanyId: locationTokenContext.companyId ?? null,
-                ghlTokenScopes: locationTokenContext.scopes,
-              },
-            });
-
-            logger.info(
-              {
-                locationId: ssoPayload.locationId,
-                companyId: ssoPayload.companyId,
-                agencyConnectionId: agencyConnection.id,
-                organizationId: agencyConnection.organizationId,
-              },
-              'Created location-scoped CRM connection from agency installation during embedded sign-in'
-            );
-          } catch (error) {
-            logger.error(
-              {
-                err: error,
-                locationId: ssoPayload.locationId,
-                companyId: ssoPayload.companyId,
-                agencyConnectionId: agencyConnection.id,
-              },
-              'Failed to create location-scoped CRM connection from agency installation'
-            );
-          }
+            },
+            'Created location-scoped CRM connection from agency installation during embedded sign-in'
+          );
+        } catch (error) {
+          logger.error(
+            {
+              err: error,
+              locationId: ssoPayload.locationId,
+              companyId: ssoPayload.companyId,
+              agencyConnectionId: agencyConnection.id,
+            },
+            'Failed to create location-scoped CRM connection from agency installation'
+          );
         }
       }
     }
+  }
 
-    if (!connection) {
-      throw new BadRequestError(
-        'This workspace is not connected yet. Install or reconnect the Signalmash app first.'
-      );
-    }
+  if (!connection) {
+    throw new BadRequestError(
+      'This workspace is not connected yet. Install or reconnect the Signalmash app first.'
+    );
+  }
 
-    const installation = connection.installationId
-      ? await prisma.platformInstallation.findFirst({
-          where: {
-            id: connection.installationId,
-            organizationId: connection.organizationId,
-            platform: crmPlatformId,
-          },
-          select: {
-            id: true,
-            status: true,
-            externalAccountId: true,
-          },
-        })
-      : await prisma.platformInstallation.findFirst({
-          where: {
-            organizationId: connection.organizationId,
-            platform: crmPlatformId,
-            externalAccountId: ssoPayload.locationId,
-          },
-          select: {
-            id: true,
-            status: true,
-            externalAccountId: true,
-          },
-        });
-
-    if (
-      connection.status !== 'connected' ||
-      !installation ||
-      installation.status !== 'connected' ||
-      installation.externalAccountId !== ssoPayload.locationId
-    ) {
-      logger.warn(
-        {
-          locationId: ssoPayload.locationId,
-          connectionId: connection.id,
-          connectionStatus: connection.status,
-          installationId: installation?.id ?? null,
-          installationStatus: installation?.status ?? null,
+  const installation = connection.installationId
+    ? await prisma.platformInstallation.findFirst({
+        where: {
+          id: connection.installationId,
+          organizationId: connection.organizationId,
+          platform: crmPlatformId,
         },
-        'Rejected embedded CRM SSO exchange because the workspace connection is not active'
-      );
+        select: {
+          id: true,
+          status: true,
+          externalAccountId: true,
+        },
+      })
+    : await prisma.platformInstallation.findFirst({
+        where: {
+          organizationId: connection.organizationId,
+          platform: crmPlatformId,
+          externalAccountId: ssoPayload.locationId,
+        },
+        select: {
+          id: true,
+          status: true,
+          externalAccountId: true,
+        },
+      });
 
-      throw new BadRequestError(
-        'This workspace connection is inactive. Reconnect the Signalmash app from this workspace and try again.'
-      );
-    }
-
-    const authResult = await authService.loginViaOAuth(connection.organizationId, {
-      locationId: ssoPayload.locationId,
-      installationId: installation.id,
-    });
-    setAuthCookies(req, res, authResult.tokens);
-
-    res.json({
-      success: true,
-      data: {
-        ...authResult,
+  if (
+    connection.status !== 'connected' ||
+    !installation ||
+    installation.status !== 'connected' ||
+    installation.externalAccountId !== ssoPayload.locationId
+  ) {
+    logger.warn(
+      {
         locationId: ssoPayload.locationId,
+        connectionId: connection.id,
+        connectionStatus: connection.status,
+        installationId: installation?.id ?? null,
+        installationStatus: installation?.status ?? null,
       },
-    });
-  })
-);
+      'Rejected embedded CRM SSO exchange because the workspace connection is not active'
+    );
+
+    throw new BadRequestError(
+      'This workspace connection is inactive. Reconnect the Signalmash app from this workspace and try again.'
+    );
+  }
+
+  const authResult = await authService.loginViaOAuth(connection.organizationId, {
+    locationId: ssoPayload.locationId,
+    installationId: installation.id,
+  });
+  setAuthCookies(req, res, authResult.tokens);
+
+  res.json({
+    success: true,
+    data: {
+      ...authResult,
+      locationId: ssoPayload.locationId,
+    },
+  });
+});
+
+router.post(`/${crmPublicPlatformId}/sso/exchange`, handleEmbeddedCrmSsoExchange);
+router.post(`/${crmPlatformId}/sso/exchange`, handleEmbeddedCrmSsoExchange);
 
 /**
  * GET /platforms/:id

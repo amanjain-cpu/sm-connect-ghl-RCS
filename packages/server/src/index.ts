@@ -110,6 +110,7 @@ const limiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => (
     req.path === '/auth/refresh' ||
+    req.path === '/platforms/crm/sso/exchange' ||
     req.path === '/platforms/leadconnector/sso/exchange'
   ),
   message: {

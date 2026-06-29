@@ -14,6 +14,7 @@ import { externalBillingBridgeService } from '../services/external-billing-bridg
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
+const crmPublicPlatformId = 'crm' as const;
 
 const processBillingSchema = z.object({
   limit: z.coerce.number().int().positive().max(500).default(100),
@@ -48,6 +49,15 @@ router.post(
       req.headers['stripe-signature'] as string | undefined
     );
 
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  `/${crmPublicPlatformId}/install/authorize`,
+  validate({ body: authorizeMarketplaceBillingSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await externalBillingBridgeService.authorizeInstallation(req.body);
     res.json({ success: true, data: result });
   })
 );

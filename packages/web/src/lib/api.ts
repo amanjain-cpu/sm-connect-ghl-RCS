@@ -7,6 +7,11 @@ import { sanitizePlatformBranding } from './platform-branding';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 const crmPlatformId = `${'lead'}connector` as const;
+const crmPublicPlatformId = 'crm' as const;
+
+function getPublicPlatformId(platform: string): string {
+  return platform === crmPlatformId ? crmPublicPlatformId : platform;
+}
 
 interface ApiResponse<T> {
   success: boolean;
@@ -58,7 +63,7 @@ class ApiClient {
    * Get the OAuth URL for a platform
    */
   async initiateOAuth(platform: string) {
-    return this.get<{ authUrl: string }>(`/platforms/${platform}/oauth`);
+    return this.get<{ authUrl: string }>(`/platforms/${getPublicPlatformId(platform)}/oauth`);
   }
 
   async exchangeEmbeddedSso(encryptedData: string) {
@@ -67,7 +72,7 @@ class ApiClient {
       organization: any;
       tokens: { accessToken: string; refreshToken: string; expiresIn: number };
       locationId: string;
-    }>(`/platforms/${crmPlatformId}/sso/exchange`, { encryptedData });
+    }>(`/platforms/${crmPublicPlatformId}/sso/exchange`, { encryptedData });
   }
 
   private async request<T>(
@@ -340,7 +345,7 @@ class ApiClient {
   }
 
   async getOAuthUrl(platform: string) {
-    return this.get<{ authUrl: string }>(`/platforms/${platform}/oauth`);
+    return this.get<{ authUrl: string }>(`/platforms/${getPublicPlatformId(platform)}/oauth`);
   }
 
   async disconnectPlatform(id: string) {
@@ -385,7 +390,7 @@ class ApiClient {
     locationId?: string;
     companyId?: string;
   }) {
-    return this.post<any>(`/billing/${crmPlatformId}/install/authorize`, data);
+    return this.post<any>(`/billing/${crmPublicPlatformId}/install/authorize`, data);
   }
 
   async processBillingEvents(limit = 100) {
