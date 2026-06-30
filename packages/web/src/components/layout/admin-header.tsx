@@ -5,7 +5,6 @@
 import { useNavigate } from 'react-router-dom';
 import { Shield, LogOut, ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { useAdminStore } from '@/stores/admin.store';
 
 interface AdminHeaderProps {
@@ -54,7 +53,6 @@ export function AdminHeader({ title, subtitle, showBack, backTo = '/admin/dashbo
               <span className="text-slate-500 dark:text-slate-400">Admin</span>{' '}
               <span className="font-medium text-slate-950 dark:text-slate-50">{admin?.name || admin?.email}</span>
             </div>
-            <ThemeToggle variant="outline" size="icon" className="border-slate-300 dark:border-slate-700" />
             <Button
               variant="outline"
               size="sm"
