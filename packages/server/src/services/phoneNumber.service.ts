@@ -48,7 +48,7 @@ interface LinkExistingAssetsInput {
 
 export class PhoneNumberService {
   private getSignalmashWebhookUrl(): string {
-    return `${config.apiUrl}/webhooks/signalmash`;
+    return `${config.apiUrl}/api/webhooks/signalmash`;
   }
 
   // ===========================================

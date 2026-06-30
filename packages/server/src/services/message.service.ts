@@ -43,7 +43,7 @@ interface ListMessagesOptions {
 
 export class MessageService {
   private getSignalmashWebhookUrl(): string {
-    return `${config.apiUrl}/webhooks/signalmash`;
+    return `${config.apiUrl}/api/webhooks/signalmash`;
   }
 
   /**

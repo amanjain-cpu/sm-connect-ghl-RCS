@@ -283,7 +283,7 @@ export async function handleCrmAppWebhook(
 }
 
 /**
- * POST /webhooks/signalmash
+ * POST /api/webhooks/signalmash
  * Handle Signalmash webhooks (inbound messages, status updates, brand/campaign status)
  */
 router.post(
