@@ -4,7 +4,7 @@
 
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { getSafeStorage } from '@/lib/storage';
+import { getSafeStorage, safeRemoveItem } from '@/lib/storage';
 
 type Theme = 'light' | 'dark' | 'system';
 
@@ -23,6 +23,8 @@ const applyTheme = () => {
   root.classList.remove('light', 'dark');
   root.classList.add('light');
   root.style.colorScheme = 'light';
+  root.dataset.themeLock = 'light';
+  safeRemoveItem('theme-storage');
 };
 
 export const useThemeStore = create<ThemeState>()(
