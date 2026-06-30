@@ -79,6 +79,7 @@ export function AppLayout() {
     user?.embeddedInstallationId ||
     (typeof window !== 'undefined' && window.self !== window.top)
   );
+  const showLightModeControl = isEmbeddedExperience || resolvedTheme === 'dark';
 
   const setConfig = useCallback((nextConfig: AppChromeConfig) => {
     setConfigState(nextConfig);
@@ -193,7 +194,7 @@ export function AppLayout() {
       <div className="min-h-screen bg-[#F4F6F8] text-[#111827] lg:hidden">
         <Sidebar collapsed={false} onToggle={() => undefined} mobileOnly />
         <main className="relative min-h-screen bg-[#F4F6F8]">
-          {isEmbeddedExperience ? (
+          {showLightModeControl ? (
             <div className="border-b border-black/5 bg-white px-4 py-2">
               <button
                 type="button"
@@ -301,7 +302,7 @@ export function AppLayout() {
               <LifeBuoy className="h-[15px] w-[15px]" />
             </button>
 
-            {isEmbeddedExperience ? (
+            {showLightModeControl ? (
               <button
                 type="button"
                 onClick={forceLightMode}

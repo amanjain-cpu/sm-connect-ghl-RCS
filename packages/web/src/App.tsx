@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
+import { Sun } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth.store';
 import { useAdminStore } from '@/stores/admin.store';
 import { useThemeStore } from '@/stores/theme.store';
@@ -160,6 +161,8 @@ function AdminPublicRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
   const location = useLocation();
   const { user } = useAuthStore();
+  const { resolvedTheme, forceLightMode } = useThemeStore();
+  const isAdminRoute = location.pathname.startsWith('/admin');
 
   // Initialize theme on mount
   useEffect(() => {
@@ -174,121 +177,137 @@ export default function App() {
   }, [location.pathname, user?.embeddedInstallationId, user?.embeddedLocationId]);
 
   return (
-    <AnimatePresence mode="wait">
-      <Routes location={location} key={location.pathname}>
-        {/* Public routes for embedded OAuth and sign-in */}
-        <Route
-          path="/connect"
-          element={
-            <PublicRoute>
-              <ConnectPage />
-            </PublicRoute>
-          }
-        />
-        {/* OAuth callback - no auth check, handles token from URL */}
-        <Route
-          path="/auth/callback"
-          element={
-            <NoAuthCheckRoute>
-              <AuthCallbackPage />
-            </NoAuthCheckRoute>
-          }
-        />
-        <Route
-          path="/auth/install-complete"
-          element={
-            <NoAuthCheckRoute>
-              <InstallCompletePage />
-            </NoAuthCheckRoute>
-          }
-        />
-        <Route
-          path="/auth/embed"
-          element={
-            <NoAuthCheckRoute>
-              <EmbeddedSsoPage />
-            </NoAuthCheckRoute>
-          }
-        />
-        <Route
-          path="/billing"
-          element={
-            <NoAuthCheckRoute>
-              <BillingEntryPage />
-            </NoAuthCheckRoute>
-          }
-        />
-        {/* Legacy login redirect to connect */}
-        <Route path="/login" element={<Navigate to="/connect" replace />} />
-        <Route path="/register" element={<Navigate to="/connect" replace />} />
+    <>
+      <AnimatePresence mode="wait">
+        <Routes location={location} key={location.pathname}>
+          {/* Public routes for embedded OAuth and sign-in */}
+          <Route
+            path="/connect"
+            element={
+              <PublicRoute>
+                <ConnectPage />
+              </PublicRoute>
+            }
+          />
+          {/* OAuth callback - no auth check, handles token from URL */}
+          <Route
+            path="/auth/callback"
+            element={
+              <NoAuthCheckRoute>
+                <AuthCallbackPage />
+              </NoAuthCheckRoute>
+            }
+          />
+          <Route
+            path="/auth/install-complete"
+            element={
+              <NoAuthCheckRoute>
+                <InstallCompletePage />
+              </NoAuthCheckRoute>
+            }
+          />
+          <Route
+            path="/auth/embed"
+            element={
+              <NoAuthCheckRoute>
+                <EmbeddedSsoPage />
+              </NoAuthCheckRoute>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <NoAuthCheckRoute>
+                <BillingEntryPage />
+              </NoAuthCheckRoute>
+            }
+          />
+          {/* Legacy login redirect to connect */}
+          <Route path="/login" element={<Navigate to="/connect" replace />} />
+          <Route path="/register" element={<Navigate to="/connect" replace />} />
 
-        {/* Protected Routes */}
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <AppLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          <Route path="onboarding" element={<OnboardingPage />} />
-          <Route path="dashboard" element={<DashboardPage />} />
-          <Route path="brands" element={<BrandsPage />} />
-          <Route path="brands/new" element={<NewBrandPage />} />
-          <Route path="brands/:id" element={<BrandDetailPage />} />
-          <Route path="campaigns" element={<CampaignsPage />} />
-          <Route path="campaigns/new" element={<NewCampaignPage />} />
-          <Route path="campaigns/:id" element={<CampaignDetailPage />} />
-          <Route path="phone-numbers" element={<PhoneNumbersPage />} />
-          <Route path="messages" element={<MessagesPage />} />
-          <Route path="platforms" element={<PlatformsPage />} />
-          <Route path="subscriptions" element={<SubscriptionsPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="help" element={<HelpPage />} />
-        </Route>
+          {/* Protected Routes */}
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <AppLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<Navigate to="/dashboard" replace />} />
+            <Route path="onboarding" element={<OnboardingPage />} />
+            <Route path="dashboard" element={<DashboardPage />} />
+            <Route path="brands" element={<BrandsPage />} />
+            <Route path="brands/new" element={<NewBrandPage />} />
+            <Route path="brands/:id" element={<BrandDetailPage />} />
+            <Route path="campaigns" element={<CampaignsPage />} />
+            <Route path="campaigns/new" element={<NewCampaignPage />} />
+            <Route path="campaigns/:id" element={<CampaignDetailPage />} />
+            <Route path="phone-numbers" element={<PhoneNumbersPage />} />
+            <Route path="messages" element={<MessagesPage />} />
+            <Route path="platforms" element={<PlatformsPage />} />
+            <Route path="subscriptions" element={<SubscriptionsPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="help" element={<HelpPage />} />
+          </Route>
 
-        {/* Admin Routes */}
-        <Route
-          path="/admin/login"
-          element={
-            <AdminPublicRoute>
-              <AdminLoginPage />
-            </AdminPublicRoute>
-          }
-        />
-        <Route
-          path="/admin/setup"
-          element={<AdminSetupPage />}
-        />
-        <Route
-          path="/admin/dashboard"
-          element={
-            <AdminProtectedRoute>
-              <AdminDashboardPage />
-            </AdminProtectedRoute>
-          }
-        />
-        <Route
-          path="/admin/settings"
-          element={
-            <AdminProtectedRoute>
-              <AdminSettingsPage />
-            </AdminProtectedRoute>
-          }
-        />
-        <Route
-          path="/admin/organizations"
-          element={
-            <AdminProtectedRoute>
-              <AdminOrganizationsPage />
-            </AdminProtectedRoute>
-          }
-        />
+          {/* Admin Routes */}
+          <Route
+            path="/admin/login"
+            element={
+              <AdminPublicRoute>
+                <AdminLoginPage />
+              </AdminPublicRoute>
+            }
+          />
+          <Route
+            path="/admin/setup"
+            element={<AdminSetupPage />}
+          />
+          <Route
+            path="/admin/dashboard"
+            element={
+              <AdminProtectedRoute>
+                <AdminDashboardPage />
+              </AdminProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/settings"
+            element={
+              <AdminProtectedRoute>
+                <AdminSettingsPage />
+              </AdminProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/organizations"
+            element={
+              <AdminProtectedRoute>
+                <AdminOrganizationsPage />
+              </AdminProtectedRoute>
+            }
+          />
 
-        {/* Catch all */}
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
-    </AnimatePresence>
+          {/* Catch all */}
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </AnimatePresence>
+
+      {!isAdminRoute && resolvedTheme === 'dark' ? (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[80]">
+          <button
+            type="button"
+            onClick={forceLightMode}
+            title="Switch to light mode"
+            className="pointer-events-auto inline-flex h-10 items-center gap-2 rounded-full border border-[#2FB267]/25 bg-white px-4 text-[13px] font-semibold text-[#1F7E4A] shadow-[0_12px_30px_-14px_rgba(17,24,39,0.45)] transition-colors hover:bg-[#F5FBF7]"
+          >
+            <Sun className="h-4 w-4" />
+            <span>Light mode</span>
+          </button>
+        </div>
+      ) : null}
+    </>
   );
 }
