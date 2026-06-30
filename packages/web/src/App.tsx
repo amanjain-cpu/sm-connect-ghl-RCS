@@ -33,6 +33,23 @@ import { AdminDashboardPage } from '@/pages/admin/dashboard';
 import { AdminSettingsPage } from '@/pages/admin/settings';
 import { AdminOrganizationsPage } from '@/pages/admin/organizations';
 
+function isEmbeddedExperience(
+  pathname: string,
+  user?: {
+    embeddedLocationId?: string;
+    embeddedInstallationId?: string;
+  } | null
+) {
+  const isIframe = typeof window !== 'undefined' && window.self !== window.top;
+
+  return (
+    pathname === '/auth/embed' ||
+    pathname === '/billing' ||
+    isIframe ||
+    Boolean(user?.embeddedLocationId || user?.embeddedInstallationId)
+  );
+}
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, checkAuth } = useAuthStore();
 
@@ -142,12 +159,19 @@ function AdminPublicRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const location = useLocation();
+  const { user } = useAuthStore();
 
   // Initialize theme on mount
   useEffect(() => {
     // This triggers the theme store to apply the saved theme
     useThemeStore.getState();
   }, []);
+
+  useEffect(() => {
+    if (isEmbeddedExperience(location.pathname, user)) {
+      useThemeStore.getState().forceLightMode();
+    }
+  }, [location.pathname, user?.embeddedInstallationId, user?.embeddedLocationId]);
 
   return (
     <AnimatePresence mode="wait">

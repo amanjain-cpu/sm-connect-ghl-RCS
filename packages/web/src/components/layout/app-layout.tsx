@@ -1,10 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
-import { Bell, LifeBuoy, Plus, RefreshCcw, Settings } from 'lucide-react';
+import { Bell, LifeBuoy, Plus, RefreshCcw, Settings, Sun } from 'lucide-react';
 import { Sidebar } from './sidebar';
 import { safeGetItem, safeSetItem } from '@/lib/storage';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import { useAuthStore } from '@/stores/auth.store';
+import { useThemeStore } from '@/stores/theme.store';
 import {
   Dialog,
   DialogContent,
@@ -69,6 +71,14 @@ export function AppLayout() {
     portOrdersInProgress: 0,
     platformAttention: 0,
   });
+  const { user } = useAuthStore();
+  const { resolvedTheme, forceLightMode } = useThemeStore();
+
+  const isEmbeddedExperience = Boolean(
+    user?.embeddedLocationId ||
+    user?.embeddedInstallationId ||
+    (typeof window !== 'undefined' && window.self !== window.top)
+  );
 
   const setConfig = useCallback((nextConfig: AppChromeConfig) => {
     setConfigState(nextConfig);
@@ -183,6 +193,24 @@ export function AppLayout() {
       <div className="min-h-screen bg-[#F4F6F8] text-[#111827] lg:hidden">
         <Sidebar collapsed={false} onToggle={() => undefined} mobileOnly />
         <main className="relative min-h-screen bg-[#F4F6F8]">
+          {isEmbeddedExperience ? (
+            <div className="border-b border-black/5 bg-white px-4 py-2">
+              <button
+                type="button"
+                onClick={forceLightMode}
+                title={resolvedTheme === 'light' ? 'Light mode active' : 'Switch to light mode'}
+                className={[
+                  'inline-flex h-8 items-center gap-2 rounded-[10px] border px-3 text-[12px] font-semibold transition-colors',
+                  resolvedTheme === 'light'
+                    ? 'border-[#2FB267]/25 bg-[#E8F7EF] text-[#1F7E4A]'
+                    : 'border-black/[0.09] bg-white text-[#1F2937] hover:bg-black/[0.03]',
+                ].join(' ')}
+              >
+                <Sun className="h-3.5 w-3.5" />
+                <span>Light mode</span>
+              </button>
+            </div>
+          ) : null}
           <Outlet />
         </main>
       </div>
@@ -272,6 +300,23 @@ export function AppLayout() {
             >
               <LifeBuoy className="h-[15px] w-[15px]" />
             </button>
+
+            {isEmbeddedExperience ? (
+              <button
+                type="button"
+                onClick={forceLightMode}
+                title={resolvedTheme === 'light' ? 'Light mode active' : 'Switch to light mode'}
+                className={[
+                  'inline-flex h-8 items-center gap-1.5 rounded-[10px] border px-3 text-[12.5px] font-semibold transition-colors',
+                  resolvedTheme === 'light'
+                    ? 'border-[#2FB267]/25 bg-[#E8F7EF] text-[#1F7E4A]'
+                    : 'border-black/[0.09] bg-white text-[#1F2937] hover:bg-black/[0.03]',
+                ].join(' ')}
+              >
+                <Sun className="h-3.5 w-3.5" />
+                <span>Light mode</span>
+              </button>
+            ) : null}
 
             {config.action ? (
               <button
