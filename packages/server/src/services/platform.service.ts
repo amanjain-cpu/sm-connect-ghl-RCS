@@ -256,6 +256,7 @@ export class PlatformService {
 
       return {
         ...connection,
+        metadata: connection.metadata,
         installation: installation
           ? {
               id: installation.id,

@@ -11,6 +11,8 @@ import { verifyAdminAccessToken } from '../utils/jwt.js';
 import { prisma } from '../config/database.js';
 import { signalmashService } from '../services/signalmash.service.js';
 import { phoneNumberService } from '../services/phoneNumber.service.js';
+import { brandService } from '../services/brand.service.js';
+import { campaignService } from '../services/campaign.service.js';
 
 const router: RouterType = Router();
 
@@ -311,6 +313,19 @@ router.get('/organizations', requireSuperAdmin, async (req: AdminRequest, res: R
   }
 });
 
+router.get('/organizations/:id/onboarding', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const detail = await adminService.getOrganizationOnboarding(req.admin!.id, req.params.id);
+
+    res.json({
+      success: true,
+      data: detail,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 const linkExistingAssetsSchema = z.object({
   organizationId: z.string().uuid(),
   brandName: z.string().min(1).max(150),
@@ -367,6 +382,126 @@ router.post('/organizations/link-existing-assets', requireSuperAdmin, async (req
       message: linked.webhookError
         ? 'Existing assets linked, but webhook configuration needs review'
         : 'Existing Signalmash assets linked',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/brands/:brandId/submit', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      brandId: z.string().uuid(),
+    }).parse(req.params);
+    const brand = await brandService.submitForVerification(params.brandId, params.organizationId);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_SUBMIT_BRAND',
+      'brand',
+      params.brandId,
+      { organizationId: params.organizationId, status: brand.status },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: brand,
+      message: 'Brand submitted for verification',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/brands/:brandId/refresh-status', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      brandId: z.string().uuid(),
+    }).parse(req.params);
+    const brand = await brandService.refreshVerificationStatus(params.brandId, params.organizationId);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_REFRESH_BRAND_STATUS',
+      'brand',
+      params.brandId,
+      { organizationId: params.organizationId, status: brand.status },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: brand,
+      message: 'Brand status refreshed',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/campaigns/:campaignId/submit', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      campaignId: z.string().uuid(),
+    }).parse(req.params);
+    const campaign = await campaignService.submitForApproval(params.campaignId, params.organizationId);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_SUBMIT_CAMPAIGN',
+      'campaign',
+      params.campaignId,
+      { organizationId: params.organizationId, status: campaign.status },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: campaign,
+      message: 'Campaign submitted for approval',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/campaigns/:campaignId/refresh-status', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      campaignId: z.string().uuid(),
+    }).parse(req.params);
+    const campaign = await campaignService.refreshApprovalStatus(params.campaignId, params.organizationId);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_REFRESH_CAMPAIGN_STATUS',
+      'campaign',
+      params.campaignId,
+      { organizationId: params.organizationId, status: campaign.status },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: campaign,
+      message: 'Campaign status refreshed',
     });
   } catch (error) {
     next(error);

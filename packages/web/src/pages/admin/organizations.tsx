@@ -9,6 +9,9 @@ import {
   ChevronRight,
   Calendar,
   Link2,
+  RefreshCw,
+  Send,
+  Eye,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -54,6 +57,10 @@ export function AdminOrganizationsPage() {
   const [selectedOrganization, setSelectedOrganization] = useState<Organization | null>(null);
   const [showLinkDialog, setShowLinkDialog] = useState(false);
   const [isLinking, setIsLinking] = useState(false);
+  const [showInspectDialog, setShowInspectDialog] = useState(false);
+  const [isInspecting, setIsInspecting] = useState(false);
+  const [onboardingDetail, setOnboardingDetail] = useState<any | null>(null);
+  const [activeOrgAction, setActiveOrgAction] = useState<string | null>(null);
   const [linkForm, setLinkForm] = useState({
     brandName: '',
     signalmashBrandId: '',
@@ -105,6 +112,28 @@ export function AdminOrganizationsPage() {
     setShowLinkDialog(true);
   };
 
+  const loadOrganizationOnboarding = async (organizationId: string) => {
+    setIsInspecting(true);
+    try {
+      const response = await adminApi.getOrganizationOnboarding(organizationId);
+      if (response.success) {
+        setOnboardingDetail(response.data);
+      }
+    } catch (error) {
+      console.error('Failed to load organization onboarding:', error);
+      notify.error('Load failed', 'The onboarding detail could not be loaded.');
+    } finally {
+      setIsInspecting(false);
+    }
+  };
+
+  const openInspectDialog = async (organization: Organization) => {
+    setSelectedOrganization(organization);
+    setShowInspectDialog(true);
+    setOnboardingDetail(null);
+    await loadOrganizationOnboarding(organization.id);
+  };
+
   const handleLinkExistingAssets = async () => {
     if (!selectedOrganization) return;
     if (linkForm.configureWebhook && !linkForm.signalmashNumberId.trim()) {
@@ -148,6 +177,72 @@ export function AdminOrganizationsPage() {
       notify.error('Link failed', error instanceof Error ? error.message : 'The existing Signalmash assets could not be linked.');
     } finally {
       setIsLinking(false);
+    }
+  };
+
+  const handleBrandAction = async (brandId: string, action: 'submit' | 'refresh') => {
+    if (!selectedOrganization) return;
+
+    const actionKey = `${action}:brand:${brandId}`;
+    setActiveOrgAction(actionKey);
+    try {
+      const response = action === 'submit'
+        ? await adminApi.submitOrganizationBrand(selectedOrganization.id, brandId)
+        : await adminApi.refreshOrganizationBrand(selectedOrganization.id, brandId);
+
+      if (response.success) {
+        await Promise.all([
+          loadOrganizations(),
+          loadOrganizationOnboarding(selectedOrganization.id),
+        ]);
+        notify.success(
+          action === 'submit' ? 'Brand submitted' : 'Brand refreshed',
+          action === 'submit'
+            ? 'The brand was submitted to Signalmash from the admin console.'
+            : 'The latest provider state was loaded for the brand.'
+        );
+      }
+    } catch (error) {
+      console.error(`Failed to ${action} brand:`, error);
+      notify.error(
+        action === 'submit' ? 'Brand submit failed' : 'Brand refresh failed',
+        error instanceof Error ? error.message : 'The admin action failed.'
+      );
+    } finally {
+      setActiveOrgAction(null);
+    }
+  };
+
+  const handleCampaignAction = async (campaignId: string, action: 'submit' | 'refresh') => {
+    if (!selectedOrganization) return;
+
+    const actionKey = `${action}:campaign:${campaignId}`;
+    setActiveOrgAction(actionKey);
+    try {
+      const response = action === 'submit'
+        ? await adminApi.submitOrganizationCampaign(selectedOrganization.id, campaignId)
+        : await adminApi.refreshOrganizationCampaign(selectedOrganization.id, campaignId);
+
+      if (response.success) {
+        await Promise.all([
+          loadOrganizations(),
+          loadOrganizationOnboarding(selectedOrganization.id),
+        ]);
+        notify.success(
+          action === 'submit' ? 'Campaign submitted' : 'Campaign refreshed',
+          action === 'submit'
+            ? 'The campaign was submitted to Signalmash from the admin console.'
+            : 'The latest provider state was loaded for the campaign.'
+        );
+      }
+    } catch (error) {
+      console.error(`Failed to ${action} campaign:`, error);
+      notify.error(
+        action === 'submit' ? 'Campaign submit failed' : 'Campaign refresh failed',
+        error instanceof Error ? error.message : 'The admin action failed.'
+      );
+    } finally {
+      setActiveOrgAction(null);
     }
   };
 
@@ -244,7 +339,10 @@ export function AdminOrganizationsPage() {
                     Created {formatDate(org.createdAt)}
                   </div>
 
-                  <div className="mt-5 flex justify-end">
+                  <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    <Button variant="outline" onClick={() => openInspectDialog(org)} leftIcon={<Eye className="h-4 w-4" />}>
+                      Inspect Readiness
+                    </Button>
                     <Button variant="outline" onClick={() => openLinkDialog(org)} leftIcon={<Link2 className="h-4 w-4" />}>
                       Link Existing Assets
                     </Button>
@@ -353,6 +451,202 @@ export function AdminOrganizationsPage() {
               Link Assets
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showInspectDialog} onOpenChange={setShowInspectDialog}>
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>Organization Readiness</DialogTitle>
+            <DialogDescription>
+              Review install lifecycle, provider state, and self-serve brand/campaign registration progress for {selectedOrganization?.name}.
+            </DialogDescription>
+          </DialogHeader>
+
+          {isInspecting || !onboardingDetail ? (
+            <div className="space-y-4 py-4">
+              <div className="h-24 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-900" />
+              <div className="h-56 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-900" />
+            </div>
+          ) : (
+            <div className="max-h-[75vh] space-y-6 overflow-y-auto pr-1">
+              <div className="grid gap-4 md:grid-cols-3">
+                <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                  <CardContent className="p-5">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Lifecycle State</p>
+                    <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">
+                      {onboardingDetail.installations?.[0]?.lifecycleState?.replace(/_/g, ' ') || 'not connected'}
+                    </p>
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                      {onboardingDetail.installations?.[0]?.externalAccountName || 'No connected workspace'}
+                    </p>
+                  </CardContent>
+                </Card>
+                <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                  <CardContent className="p-5">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Primary Brand / Campaign</p>
+                    <p className="mt-2 text-sm font-medium text-slate-950 dark:text-slate-50">
+                      Brand: {onboardingDetail.installations?.[0]?.metadata?.primaryBrandId || 'not pinned'}
+                    </p>
+                    <p className="mt-1 text-sm font-medium text-slate-950 dark:text-slate-50">
+                      Campaign: {onboardingDetail.installations?.[0]?.metadata?.primaryCampaignId || 'not pinned'}
+                    </p>
+                  </CardContent>
+                </Card>
+                <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                  <CardContent className="p-5">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Counts</p>
+                    <p className="mt-2 text-sm font-medium text-slate-950 dark:text-slate-50">
+                      Brands {onboardingDetail.organization?._count?.brands ?? 0} · Campaigns {onboardingDetail.organization?._count?.campaigns ?? 0}
+                    </p>
+                    <p className="mt-1 text-sm font-medium text-slate-950 dark:text-slate-50">
+                      Numbers {onboardingDetail.organization?._count?.phoneNumbers ?? 0} · Messages {onboardingDetail.organization?._count?.messages ?? 0}
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <CardContent className="space-y-5 p-6">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Brands</h3>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Current provider-facing brand records and their async state.</p>
+                    </div>
+                    {selectedOrganization && (
+                      <Button variant="outline" onClick={() => loadOrganizationOnboarding(selectedOrganization.id)} leftIcon={<RefreshCw className="h-4 w-4" />}>
+                        Reload
+                      </Button>
+                    )}
+                  </div>
+
+                  {onboardingDetail.brands?.length ? onboardingDetail.brands.map((brand: any) => (
+                    <div key={brand.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                          <p className="font-semibold text-slate-950 dark:text-slate-50">{brand.displayName} ({brand.legalName})</p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Local: {brand.status} · Provider: {brand.providerStatus || 'not submitted'}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Signalmash: {brand.signalmashBrandId || 'n/a'} · TCR: {brand.tcrBrandId || 'n/a'}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Message: {brand.providerMessage || brand.lastSubmissionError || 'no provider message'}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {['draft', 'unverified', 'rejected'].includes(brand.status) && (
+                            <Button
+                              size="sm"
+                              onClick={() => handleBrandAction(brand.id, 'submit')}
+                              isLoading={activeOrgAction === `submit:brand:${brand.id}`}
+                              leftIcon={<Send className="h-4 w-4" />}
+                            >
+                              Submit
+                            </Button>
+                          )}
+                          {brand.signalmashBrandId && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleBrandAction(brand.id, 'refresh')}
+                              isLoading={activeOrgAction === `refresh:brand:${brand.id}`}
+                              leftIcon={<RefreshCw className="h-4 w-4" />}
+                            >
+                              Refresh
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )) : (
+                    <p className="text-sm text-slate-600 dark:text-slate-400">No brands yet.</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <CardContent className="space-y-5 p-6">
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Campaigns</h3>
+                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Primary campaign onboarding and approval state for this organization.</p>
+                  </div>
+
+                  {onboardingDetail.campaigns?.length ? onboardingDetail.campaigns.map((campaign: any) => (
+                    <div key={campaign.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                          <p className="font-semibold text-slate-950 dark:text-slate-50">{campaign.name}</p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Brand: {campaign.brand?.displayName || campaign.brandId} · Local: {campaign.status} · Provider: {campaign.providerStatus || 'not submitted'}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Signalmash: {campaign.signalmashCampaignId || 'n/a'} · TCR: {campaign.tcrCampaignId || 'n/a'} · Numbers: {campaign.phoneNumbers?.length || 0}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Message: {campaign.providerMessage || campaign.lastSubmissionError || 'no provider message'}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {['draft', 'rejected'].includes(campaign.status) && (
+                            <Button
+                              size="sm"
+                              onClick={() => handleCampaignAction(campaign.id, 'submit')}
+                              isLoading={activeOrgAction === `submit:campaign:${campaign.id}`}
+                              leftIcon={<Send className="h-4 w-4" />}
+                            >
+                              Submit
+                            </Button>
+                          )}
+                          {campaign.signalmashCampaignId && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleCampaignAction(campaign.id, 'refresh')}
+                              isLoading={activeOrgAction === `refresh:campaign:${campaign.id}`}
+                              leftIcon={<RefreshCw className="h-4 w-4" />}
+                            >
+                              Refresh
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )) : (
+                    <p className="text-sm text-slate-600 dark:text-slate-400">No campaigns yet.</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <CardContent className="space-y-4 p-6">
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Recent Provider Operations</h3>
+                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Latest Signalmash submission, refresh, and webhook events captured for ops visibility.</p>
+                  </div>
+                  <div className="space-y-3">
+                    {(onboardingDetail.recentProviderOperations || []).slice(0, 10).map((event: any) => (
+                      <div key={event.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
+                        <p className="text-sm font-semibold text-slate-950 dark:text-slate-50">
+                          {event.operation} · {event.status}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          {formatDate(event.createdAt)} · {event.localResourceType || 'resource'} {event.localResourceId || 'n/a'}
+                        </p>
+                        <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                          {event.errorMessage || event.responsePayload?.message || 'No error recorded'}
+                        </p>
+                      </div>
+                    ))}
+                    {!onboardingDetail.recentProviderOperations?.length && (
+                      <p className="text-sm text-slate-600 dark:text-slate-400">No provider operations captured yet.</p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

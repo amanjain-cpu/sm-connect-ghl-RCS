@@ -42,6 +42,7 @@ model Organization {
   phoneNumbers        PhoneNumber[]
   messages            Message[]
   webhookEvents       WebhookEvent[]
+  providerOperationLogs ProviderOperationLog[]
 
   @@map("organizations")
 }
@@ -127,8 +128,14 @@ model Brand {
   signalmashBrandId String?      @unique @map("signalmash_brand_id")
   tcrBrandId        String?      @unique @map("tcr_brand_id")
   status            BrandStatus  @default(draft)
+  providerStatus    String?      @map("provider_status")
+  providerMessage   String?      @map("provider_message")
   verificationScore Int?         @map("verification_score")
   rejectionReason   String?      @map("rejection_reason")
+  submitAttempts    Int          @default(0) @map("submit_attempts")
+  lastSubmittedAt   DateTime?    @map("last_submitted_at")
+  lastSubmissionError String?    @map("last_submission_error")
+  lastStatusSyncedAt DateTime?   @map("last_status_synced_at")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -226,7 +233,13 @@ model Campaign {
   signalmashCampaignId String?        @unique @map("signalmash_campaign_id")
   tcrCampaignId        String?        @unique @map("tcr_campaign_id")
   status               CampaignStatus @default(draft)
+  providerStatus       String?        @map("provider_status")
+  providerMessage      String?        @map("provider_message")
   rejectionReason      String?        @map("rejection_reason")
+  submitAttempts       Int            @default(0) @map("submit_attempts")
+  lastSubmittedAt      DateTime?      @map("last_submitted_at")
+  lastSubmissionError  String?        @map("last_submission_error")
+  lastStatusSyncedAt   DateTime?      @map("last_status_synced_at")
 
   // Throughput limits
   dailyMessageLimit  Int? @map("daily_message_limit")
@@ -470,6 +483,7 @@ model PlatformInstallation {
   platformConnections    PlatformConnection[]
   externalResourceMappings ExternalResourceMapping[]
   senderProfiles         SenderProfile[]
+  providerOperationLogs  ProviderOperationLog[]
 
   @@unique([organizationId, platform, externalAccountId])
   @@index([organizationId])
@@ -933,4 +947,35 @@ model AdminAuditLog {
   @@index([action])
   @@index([createdAt])
   @@map("admin_audit_logs")
+}
+
+// ===========================================
+// Provider Operation Logs
+// ===========================================
+
+model ProviderOperationLog {
+  id                String   @id @default(uuid())
+  provider          MessagingProvider @default(signalmash)
+  operation         String
+  localResourceType String?  @map("local_resource_type")
+  localResourceId   String?  @map("local_resource_id")
+  externalId        String?  @map("external_id")
+  status            String
+  requestPayload    Json?    @map("request_payload")
+  responsePayload   Json?    @map("response_payload")
+  errorMessage      String?  @map("error_message")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  installationId String?               @map("installation_id")
+  installation   PlatformInstallation? @relation(fields: [installationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([installationId, createdAt])
+  @@index([localResourceType, localResourceId, createdAt])
+  @@index([externalId])
+  @@index([operation, createdAt])
+  @@map("provider_operation_logs")
 }

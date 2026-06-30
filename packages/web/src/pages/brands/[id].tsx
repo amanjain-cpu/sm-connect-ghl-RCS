@@ -18,6 +18,7 @@ import {
   Phone,
   ShieldCheck,
   Pencil,
+  RefreshCw,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
 import { PageShell, PageSection } from '@/components/layout/page-shell';
@@ -69,9 +70,15 @@ interface Brand {
   tags: string[];
   signalmashBrandId: string | null;
   tcrBrandId: string | null;
+  providerStatus: string | null;
+  providerMessage: string | null;
   status: 'draft' | 'pending_verification' | 'verified' | 'unverified' | 'rejected' | 'suspended';
   verificationScore: number | null;
   rejectionReason: string | null;
+  submitAttempts: number;
+  lastSubmittedAt: string | null;
+  lastSubmissionError: string | null;
+  lastStatusSyncedAt: string | null;
   createdAt: string;
   updatedAt: string;
   campaigns: Array<{
@@ -135,6 +142,7 @@ export function BrandDetailPage() {
   const [brand, setBrand] = useState<Brand | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editForm, setEditForm] = useState({
@@ -193,14 +201,32 @@ export function BrandDetailPage() {
     try {
       const response = await api.submitBrand(brand.id);
       if (response.success && response.data) {
-        setBrand(response.data);
-        notify.success('Brand submitted', 'The brand is now pending verification. Wait for approval before creating campaigns.');
+        await loadBrand();
+        notify.success('Brand submitted', 'The brand was submitted to Signalmash. Approval can take time, so refresh the status while it is in review.');
       }
     } catch (error) {
       console.error('Failed to submit brand:', error);
       notify.error('Submission failed', 'The brand could not be submitted for verification.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleRefreshStatus = async () => {
+    if (!brand?.signalmashBrandId) return;
+
+    setIsRefreshing(true);
+    try {
+      const response = await api.refreshBrandStatus(brand.id);
+      if (response.success && response.data) {
+        setBrand(response.data);
+        notify.success('Brand status refreshed', 'The latest provider verification state was loaded successfully.');
+      }
+    } catch (error) {
+      console.error('Failed to refresh brand status:', error);
+      notify.error('Refresh failed', 'The latest provider status could not be fetched right now.');
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -391,6 +417,16 @@ export function BrandDetailPage() {
                   Submit for Verification
                 </Button>
               )}
+              {brand.signalmashBrandId && (
+                <Button
+                  variant="outline"
+                  onClick={handleRefreshStatus}
+                  isLoading={isRefreshing}
+                  leftIcon={<RefreshCw className="h-4 w-4" />}
+                >
+                  Refresh Status
+                </Button>
+              )}
             </div>
           </div>
         </PageSection>
@@ -406,7 +442,7 @@ export function BrandDetailPage() {
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                     This brand is still editable. Once the legal and contact details look correct,
-                    submit it for verification so the embedded rollout can move toward campaign setup.
+                    submit it to Signalmash so the embedded rollout can move toward campaign setup.
                   </p>
                 </>
               ) : null}
@@ -416,8 +452,8 @@ export function BrandDetailPage() {
                     Wait for verification before creating campaigns
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                    The business identity is in review. Campaign creation should wait until this brand
-                    reaches a verified state or comes back with a rejection reason to fix.
+                    The business identity is in review with Signalmash/TCR. Campaign creation should
+                    wait until this brand reaches a verified state or comes back with a rejection reason to fix.
                   </p>
                 </>
               ) : null}
@@ -439,7 +475,7 @@ export function BrandDetailPage() {
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                     A blocking issue is preventing this brand from moving forward. Update the record using
-                    the rejection feedback, then resubmit for verification.
+                    the provider feedback, then resubmit for verification.
                   </p>
                 </>
               ) : null}
@@ -655,6 +691,58 @@ export function BrandDetailPage() {
                       <p className="text-sm text-slate-500 dark:text-slate-400">Stock Listing</p>
                       <p className="mt-1 break-all font-medium text-slate-950 dark:text-slate-50">
                         {brand.stockSymbol || brand.stockExchange ? `${brand.stockSymbol || 'N/A'} • ${brand.stockExchange || 'N/A'}` : 'Not assigned'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RefreshCw className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Provider Status</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
+                        {brand.providerStatus || 'Not submitted'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RefreshCw className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Provider Message</p>
+                      <p className="mt-1 break-words font-medium text-slate-950 dark:text-slate-50">
+                        {brand.providerMessage || 'No provider message recorded'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RefreshCw className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Submit Attempts</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">{brand.submitAttempts}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Calendar className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Last Submitted</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
+                        {brand.lastSubmittedAt ? formatDateTime(brand.lastSubmittedAt) : 'Not submitted'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Calendar className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Last Status Sync</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
+                        {brand.lastStatusSyncedAt ? formatDateTime(brand.lastStatusSyncedAt) : 'Not synced yet'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Last Submission Error</p>
+                      <p className="mt-1 break-words font-medium text-slate-950 dark:text-slate-50">
+                        {brand.lastSubmissionError || 'No submission error recorded'}
                       </p>
                     </div>
                   </div>

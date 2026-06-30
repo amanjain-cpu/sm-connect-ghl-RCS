@@ -8,6 +8,7 @@ import { encrypt, decrypt, hashPassword, verifyPassword } from '../utils/crypto.
 import { generateTokens, verifyAdminRefreshToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { integrationService } from './integration.service.js';
 
 // Settings keys
 export const SETTINGS_KEYS = {
@@ -463,6 +464,99 @@ export class AdminService {
         total,
         totalPages: Math.ceil(total / limit),
       },
+    };
+  }
+
+  async getOrganizationOnboarding(adminId: string, organizationId: string) {
+    const organization = await prisma.organization.findUnique({
+      where: { id: organizationId },
+      include: {
+        _count: {
+          select: {
+            users: true,
+            brands: true,
+            campaigns: true,
+            phoneNumbers: true,
+            messages: true,
+          },
+        },
+      },
+    });
+
+    if (!organization) {
+      throw new AppError('Organization not found', 'ORGANIZATION_NOT_FOUND', 404);
+    }
+
+    const [connections, installations, brands, campaigns, externalMappings, recentProviderOperations] =
+      await Promise.all([
+        prisma.platformConnection.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+        }),
+        integrationService.getInstallationOverview(organizationId),
+        prisma.brand.findMany({
+          where: { organizationId },
+          include: {
+            campaigns: {
+              include: {
+                phoneNumbers: {
+                  select: {
+                    id: true,
+                    phoneNumber: true,
+                    formattedNumber: true,
+                    status: true,
+                  },
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
+        prisma.campaign.findMany({
+          where: { organizationId },
+          include: {
+            brand: {
+              select: {
+                id: true,
+                legalName: true,
+                displayName: true,
+                status: true,
+              },
+            },
+            phoneNumbers: {
+              select: {
+                id: true,
+                phoneNumber: true,
+                formattedNumber: true,
+                status: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
+        prisma.externalResourceMapping.findMany({
+          where: { organizationId },
+          orderBy: { updatedAt: 'desc' },
+          take: 50,
+        }),
+        prisma.providerOperationLog.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        }),
+      ]);
+
+    await this.logAuditAction(adminId, 'VIEW_ORGANIZATION_ONBOARDING', 'organizations', organizationId);
+
+    return {
+      organization,
+      connections,
+      installations,
+      brands,
+      campaigns,
+      externalMappings,
+      recentProviderOperations,
     };
   }
 

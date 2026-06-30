@@ -17,6 +17,51 @@ import type {
 } from '@prisma/client';
 
 export class IntegrationService {
+  async getPrimaryInstallationForOrganization(
+    organizationId: string,
+    platform?: Platform
+  ) {
+    return this.getPrimaryInstallation(organizationId, platform);
+  }
+
+  async setPrimaryOnboardingResources(
+    organizationId: string,
+    input: {
+      platform?: Platform;
+      installationId?: string | null;
+      brandId?: string | null;
+      campaignId?: string | null;
+    }
+  ) {
+    const installation = input.installationId
+      ? await prisma.platformInstallation.findUnique({ where: { id: input.installationId } })
+      : await this.getPrimaryInstallation(organizationId, input.platform);
+
+    if (!installation) {
+      return null;
+    }
+
+    const metadata = this.asRecord(installation.metadata);
+    const nextMetadata: Record<string, unknown> = { ...metadata };
+
+    if (input.brandId !== undefined) {
+      nextMetadata.primaryBrandId = input.brandId;
+      nextMetadata.primaryBrandPinnedAt = new Date().toISOString();
+    }
+
+    if (input.campaignId !== undefined) {
+      nextMetadata.primaryCampaignId = input.campaignId;
+      nextMetadata.primaryCampaignPinnedAt = new Date().toISOString();
+    }
+
+    return prisma.platformInstallation.update({
+      where: { id: installation.id },
+      data: {
+        metadata: nextMetadata as Prisma.InputJsonValue,
+      },
+    });
+  }
+
   async getInstallationReadiness(
     organizationId: string,
     platform?: Platform,
@@ -550,7 +595,7 @@ export class IntegrationService {
         complete: resourceCounts.totalBrands > 0,
         helper: resourceCounts.totalBrands > 0
           ? 'A brand record is linked to this organization and ready for campaign assignment.'
-          : 'Ask an admin to link the approved Signalmash brand, or create a local brand record before continuing.',
+          : 'Create a brand record with your business details to begin 10DLC onboarding.',
       },
       {
         key: 'brand',
@@ -560,7 +605,7 @@ export class IntegrationService {
           ? 'At least one brand is rejected or suspended and needs correction.'
           : resourceCounts.pendingBrands > 0
             ? 'Brand registration is still pending verification.'
-            : 'Brand is approved or linked from an existing Signalmash approval.',
+            : 'A verified brand is ready for campaign registration.',
       },
       {
         key: 'campaign',
@@ -569,8 +614,8 @@ export class IntegrationService {
         helper: resourceCounts.rejectedCampaigns > 0
           ? 'A rejected or suspended campaign is blocking the install.'
           : resourceCounts.approvedCampaigns > 0
-            ? 'At least one approved or admin-linked campaign is ready for traffic.'
-            : 'Ask an admin to link the approved Signalmash campaign before sender numbers are used.',
+            ? 'At least one approved campaign is ready for traffic.'
+            : 'Create and submit your primary campaign after the brand is verified.',
       },
       {
         key: 'numbers',
@@ -580,7 +625,7 @@ export class IntegrationService {
           ? 'A port order is still active, so the install is waiting on number readiness.'
           : resourceCounts.activeNumbers > 0
             ? 'At least one active sender number is attached to the install.'
-            : 'Ask an admin to link the existing Signalmash number, or purchase a number against the approved campaign.',
+            : 'Purchase or attach a sender number to the approved campaign before going live.',
       },
       {
         key: 'provider_activation',
@@ -600,7 +645,7 @@ export class IntegrationService {
           ? 'This organization has already sent outbound traffic through Signalmash Connect.'
           : lifecycleState === 'ready'
             ? 'Sender routing is ready, but no outbound message has been observed yet.'
-            : 'After admin-linked assets are in place, send a test SMS from the embedded app to validate the live flow.',
+            : 'After the campaign and sender are ready, send a test SMS from the embedded app to validate the live flow.',
       },
     ];
   }

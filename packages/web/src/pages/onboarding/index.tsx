@@ -146,6 +146,7 @@ export function OnboardingPage() {
     }
 
     const lifecycle = crmConnection.installation?.lifecycleState;
+    const installationCounts = crmConnection.installation?.resourceCounts;
 
     if (!crmConnection.installation || lifecycle === 'installed' || lifecycle === 'business_details_needed') {
       return {
@@ -167,12 +168,14 @@ export function OnboardingPage() {
       };
     }
 
-    if (lifecycle === 'campaign_pending' || lifecycle === 'campaign_approved') {
+    if (lifecycle === 'campaign_pending') {
       return {
-        title: 'Create or review campaigns',
-        description: 'Move from approved brand to campaign readiness so numbers can be provisioned against an approved use case.',
-        href: '/campaigns/new',
-        cta: 'Open campaigns',
+        title: installationCounts?.totalCampaigns ? 'Review campaign submission' : 'Create the primary campaign',
+        description: installationCounts?.totalCampaigns
+          ? 'The next blocker is campaign approval. Review the campaign, finish any missing compliance fields, and submit it to Signalmash.'
+          : 'Create the first approved messaging campaign for this workspace so sender numbers can be provisioned against it.',
+        href: installationCounts?.totalCampaigns ? '/campaigns' : '/campaigns/new',
+        cta: installationCounts?.totalCampaigns ? 'Review campaigns' : 'Create campaign',
         icon: Megaphone,
       };
     }
@@ -249,11 +252,11 @@ export function OnboardingPage() {
               </Badge>
               <div className="space-y-2">
                 <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">
-                  Connect your CRM, link approved assets, and validate messaging
+                  Connect your CRM, complete compliance onboarding, and validate messaging
                 </h2>
                 <p className="max-w-xl text-sm leading-6 text-slate-300 md:text-base">
-                  This workflow covers the active product path: connect your CRM, use admin-linked
-                  Signalmash brand and campaign approvals, attach a sender number, and validate traffic.
+                  This workflow covers the live self-serve path: connect your CRM, register the brand,
+                  submit the campaign, attach a sender number, and validate outbound traffic.
                 </p>
               </div>
             </div>

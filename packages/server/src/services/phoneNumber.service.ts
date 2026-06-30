@@ -473,6 +473,10 @@ export class PhoneNumberService {
     await integrationService.syncBrandMapping(result.brand);
     await integrationService.syncCampaignMapping(result.campaign);
     await integrationService.syncPhoneNumberMapping(result.phoneNumber);
+    await integrationService.setPrimaryOnboardingResources(result.brand.organizationId, {
+      brandId: result.brand.id,
+      campaignId: result.campaign.id,
+    });
     await this.ensureDefaultSenderProfiles(result.phoneNumber, input.makeDefaultSender ?? true);
 
     let webhookConfigured = false;

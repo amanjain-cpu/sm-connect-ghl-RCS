@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -140,6 +140,17 @@ const formSchema = z.object({
 
 type BrandForm = z.infer<typeof formSchema>;
 
+interface PlatformConnectionPrefill {
+  platform: 'leadconnector' | 'shopify' | 'hubspot' | 'salesforce' | 'zoho';
+  platformAccountName?: string | null;
+  metadata?: {
+    address?: string;
+    city?: string;
+    state?: string;
+    country?: string;
+  } | null;
+}
+
 const steps = [
   {
     id: 1,
@@ -231,6 +242,7 @@ export function NewBrandPage() {
   const {
     register,
     handleSubmit,
+    setValue,
     trigger,
     formState: { errors },
   } = useForm<BrandForm>({
@@ -249,6 +261,48 @@ export function NewBrandPage() {
       businessEmailAddress: '',
     },
   });
+
+  useEffect(() => {
+    const prefillOrganization = async () => {
+      try {
+        const [organizationResponse, connectionsResponse] = await Promise.all([
+          api.getOrganization(),
+          api.getPlatformConnections(),
+        ]);
+
+        const organization = organizationResponse.success ? organizationResponse.data : null;
+        const crmConnection = connectionsResponse.success
+          ? (connectionsResponse.data as PlatformConnectionPrefill[] | undefined)?.find(
+              (connection) => connection.platform === 'leadconnector'
+            ) ?? null
+          : null;
+
+        const metadata = crmConnection?.metadata ?? null;
+        const orgName = organization?.name || crmConnection?.platformAccountName || '';
+        const orgWebsite = organization?.website || '';
+        const orgEmail = organization?.email || '';
+        const orgPhone = organization?.phone || '';
+        const country = metadata?.country || 'US';
+
+        setValue('legalCompanyName', orgName);
+        setValue('dbaBrandName', orgName);
+        setValue('website', orgWebsite);
+        setValue('supportEmail', orgEmail);
+        setValue('businessEmailAddress', orgEmail);
+        setValue('supportPhone', orgPhone);
+        setValue('streetAddress1', metadata?.address || '');
+        setValue('city', metadata?.city || '');
+        setValue('state', metadata?.state || '');
+        setValue('country', country);
+        setValue('registrationCountry', country);
+        setValue('taxIssuingCountry', country);
+      } catch (error) {
+        console.error('Failed to prefill organization details:', error);
+      }
+    };
+
+    prefillOrganization();
+  }, [setValue]);
 
   const onSubmit = async (data: BrandForm) => {
     setIsSubmitting(true);
@@ -314,7 +368,7 @@ export function NewBrandPage() {
     <div>
       <Header
         title="Register Brand"
-        subtitle="Capture the new brand wizard fields while keeping draft creation aligned with the current backend."
+        subtitle="Capture the compliance profile for a self-serve Signalmash brand submission."
       />
 
       <PageShell contentClassName="max-w-6xl gap-6">
@@ -325,11 +379,11 @@ export function NewBrandPage() {
                 Brand Registration Wizard
               </Badge>
               <h2 className="text-2xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">
-                Structured intake for brand onboarding
+                Structured intake for production brand onboarding
               </h2>
               <p className="text-sm leading-6 text-slate-600 dark:text-slate-400">
-                The brand intake wizard now captures company details, relationship tier, and final contact details
-                ahead of the backend payload alignment pass.
+                This wizard saves the business identity, relationship tier, and operational contacts that feed
+                the Signalmash brand-verification flow.
               </p>
             </div>
 
@@ -629,11 +683,10 @@ export function NewBrandPage() {
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-900">
                 <h4 className="text-sm font-semibold text-slate-950 dark:text-slate-50">Before you continue</h4>
                 <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-600 dark:text-slate-400">
-                  <li>Required labels now follow your asterisk rules in the Brand Details step.</li>
-                  <li>Brand Relationship now captures the CSP trust tier you specified.</li>
-                  <li>Contact Details now captures support email, support phone, and business email address.</li>
-                  <li>Country of registration, tax issuing country, and country all support the full ISO region list.</li>
-                  <li>The backend still stores a reduced brand schema, so several new fields are currently collected only at the UI layer.</li>
+                  <li>The wizard prefills from your connected CRM workspace when that data is available.</li>
+                  <li>Brand relationship, business contact email, and provider mappings are all persisted to the backend.</li>
+                  <li>You can save a draft now, then submit the brand to Signalmash from the detail page when the record is complete.</li>
+                  <li>Country of registration, tax issuing country, and operating country all support the full ISO region list.</li>
                 </ul>
               </div>
 
@@ -641,9 +694,9 @@ export function NewBrandPage() {
                 <div className="rounded-2xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-500/30 dark:bg-sky-500/10">
                   <h4 className="text-sm font-semibold text-sky-950 dark:text-sky-100">What happens next</h4>
                   <ul className="mt-3 space-y-2 text-sm leading-6 text-sky-900/80 dark:text-sky-100/80">
-                    <li>This creates a brand draft using the current server contract.</li>
-                    <li>The new relationship and contact fields are now collected in the wizard and ready for backend payload mapping.</li>
-                    <li>Once you send the sample brand payload, the server and database schema can be aligned to persist all new fields.</li>
+                    <li>This saves the brand draft in the live backend with the provider-facing fields intact.</li>
+                    <li>After review, submit the draft from the brand detail page to start Signalmash verification.</li>
+                    <li>Once the brand is verified, campaign creation and approval can continue inside the same workspace.</li>
                   </ul>
                 </div>
               )}

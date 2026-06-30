@@ -14,6 +14,7 @@ import {
   Phone,
   Send,
   Pencil,
+  RefreshCw,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
 import { PageShell, PageSection } from '@/components/layout/page-shell';
@@ -74,10 +75,16 @@ interface Campaign {
   embeddedLinkSample: string | null;
   signalmashCampaignId: string | null;
   tcrCampaignId: string | null;
+  providerStatus: string | null;
+  providerMessage: string | null;
   status: 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'suspended' | 'expired';
   rejectionReason: string | null;
   dailyMessageLimit: number | null;
   messagesPerSecond: number | null;
+  submitAttempts: number;
+  lastSubmittedAt: string | null;
+  lastSubmissionError: string | null;
+  lastStatusSyncedAt: string | null;
   createdAt: string;
   updatedAt: string;
   phoneNumbers: PhoneNumber[];
@@ -120,6 +127,7 @@ export function CampaignDetailPage() {
   const [brand, setBrand] = useState<BrandSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editForm, setEditForm] = useState({
@@ -194,14 +202,32 @@ export function CampaignDetailPage() {
     try {
       const response = await api.submitCampaign(campaign.id);
       if (response.success && response.data) {
-        setCampaign((current) => current ? { ...current, ...response.data } : response.data);
-        notify.success('Campaign submitted', 'The campaign is now pending approval. Provision numbers only after approval completes.');
+        await loadCampaign();
+        notify.success('Campaign submitted', 'The campaign was submitted to Signalmash. Approval can take time, so refresh the provider state while it is in review.');
       }
     } catch (error) {
       console.error('Failed to submit campaign:', error);
       notify.error('Submission failed', 'The campaign could not be submitted for approval.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleRefreshStatus = async () => {
+    if (!campaign?.signalmashCampaignId) return;
+
+    setIsRefreshing(true);
+    try {
+      const response = await api.refreshCampaignStatus(campaign.id);
+      if (response.success && response.data) {
+        setCampaign(response.data);
+        notify.success('Campaign status refreshed', 'The latest provider approval state was loaded successfully.');
+      }
+    } catch (error) {
+      console.error('Failed to refresh campaign status:', error);
+      notify.error('Refresh failed', 'The latest provider status could not be fetched right now.');
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -390,6 +416,16 @@ export function CampaignDetailPage() {
                   Submit for Approval
                 </Button>
               )}
+              {campaign.signalmashCampaignId && (
+                <Button
+                  variant="outline"
+                  onClick={handleRefreshStatus}
+                  isLoading={isRefreshing}
+                  leftIcon={<RefreshCw className="h-4 w-4" />}
+                >
+                  Refresh Status
+                </Button>
+              )}
             </div>
           </div>
         </PageSection>
@@ -405,7 +441,7 @@ export function CampaignDetailPage() {
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                     This campaign is still editable. Once the use case, description, sample messages,
-                    and compliance wording are correct, submit it for approval.
+                    and compliance wording are correct, submit it to Signalmash for approval.
                   </p>
                 </>
               ) : null}
@@ -415,8 +451,8 @@ export function CampaignDetailPage() {
                     Wait for campaign approval before provisioning numbers
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                    The campaign is in review. Number purchase and assignment should wait until
-                    approval is complete or the campaign comes back with corrections to make.
+                    The campaign is in review with Signalmash/TCR. Number purchase and assignment
+                    should wait until approval is complete or the campaign comes back with corrections to make.
                   </p>
                 </>
               ) : null}
@@ -437,8 +473,8 @@ export function CampaignDetailPage() {
                     Fix the campaign details and resubmit
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                    This campaign cannot move forward in its current state. Use the rejection or status
-                    details to correct the record, then submit again when it is ready.
+                    This campaign cannot move forward in its current state. Use the provider feedback
+                    to correct the record, then submit again when it is ready.
                   </p>
                 </>
               ) : null}
@@ -631,6 +667,58 @@ export function CampaignDetailPage() {
               <CardContent className="p-6">
                 <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Registry Metadata</h3>
                 <div className="mt-5 space-y-4">
+                  <div className="flex items-start gap-3">
+                    <RefreshCw className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Provider Status</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
+                        {campaign.providerStatus || 'Not submitted'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RefreshCw className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Provider Message</p>
+                      <p className="mt-1 break-words font-medium text-slate-950 dark:text-slate-50">
+                        {campaign.providerMessage || 'No provider message recorded'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RefreshCw className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Submit Attempts</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">{campaign.submitAttempts}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Calendar className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Last Submitted</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
+                        {campaign.lastSubmittedAt ? formatDateTime(campaign.lastSubmittedAt) : 'Not submitted'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Calendar className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Last Status Sync</p>
+                      <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
+                        {campaign.lastStatusSyncedAt ? formatDateTime(campaign.lastStatusSyncedAt) : 'Not synced yet'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="mt-0.5 h-4 w-4 text-slate-400" />
+                    <div>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Last Submission Error</p>
+                      <p className="mt-1 break-words font-medium text-slate-950 dark:text-slate-50">
+                        {campaign.lastSubmissionError || 'No submission error recorded'}
+                      </p>
+                    </div>
+                  </div>
                   <div className="flex items-start gap-3">
                     <Calendar className="mt-0.5 h-4 w-4 text-slate-400" />
                     <div>

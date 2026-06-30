@@ -8,6 +8,7 @@ import { NotFoundError, BadRequestError, ConflictError, AppError, ExternalServic
 import { logger } from '../utils/logger.js';
 import type { Brand, BrandStatus, EntityType, BusinessVertical, BrandRelationship } from '@prisma/client';
 import { integrationService } from './integration.service.js';
+import { providerOperationService } from './provider-operation.service.js';
 
 interface CreateBrandInput {
   organizationId: string;
@@ -73,6 +74,98 @@ interface UpdateBrandInput {
 }
 
 export class BrandService {
+  private mapEntityTypeToProvider(entityType: EntityType): string {
+    const map: Record<EntityType, string> = {
+      sole_proprietor: 'SOLE_PROPRIETOR',
+      partnership: 'PARTNERSHIP',
+      corporation: 'PRIVATE_PROFIT',
+      llc: 'LLC',
+      non_profit: 'NON_PROFIT',
+      government: 'GOVERNMENT',
+    };
+
+    return map[entityType];
+  }
+
+  private mapVerticalToProvider(vertical: BusinessVertical): string {
+    const map: Record<BusinessVertical, string> = {
+      retail: 'RETAIL',
+      healthcare: 'HEALTHCARE',
+      financial: 'FINANCIAL',
+      education: 'EDUCATION',
+      hospitality: 'HOSPITALITY',
+      real_estate: 'REAL_ESTATE',
+      technology: 'TECHNOLOGY',
+      professional_services: 'PROFESSIONAL_SERVICES',
+      other: 'OTHER',
+    };
+
+    return map[vertical];
+  }
+
+  private assertBrandReadyForSubmission(brand: Brand) {
+    if (!brand.legalName.trim()) {
+      throw new BadRequestError('Legal name is required before submitting this brand');
+    }
+
+    if (!brand.displayName.trim()) {
+      throw new BadRequestError('Display name is required before submitting this brand');
+    }
+
+    if (brand.entityType !== 'sole_proprietor' && !brand.ein?.trim()) {
+      throw new BadRequestError('Tax ID / EIN is required before submitting this brand');
+    }
+
+    if (
+      !brand.streetAddress.trim() ||
+      !brand.city.trim() ||
+      !brand.state.trim() ||
+      !brand.postalCode.trim() ||
+      !brand.country.trim()
+    ) {
+      throw new BadRequestError('Business address is required before submitting this brand');
+    }
+
+    if (!brand.website.trim() || !brand.phone.trim() || !brand.email.trim()) {
+      throw new BadRequestError('Website, phone, and email are required before submitting this brand');
+    }
+
+    if (!brand.businessContactEmail?.trim()) {
+      throw new BadRequestError('Business contact email is required before submitting this brand');
+    }
+  }
+
+  private buildProviderPayload(brand: Brand) {
+    return {
+      entityType: brand.providerEntityType ?? this.mapEntityTypeToProvider(brand.entityType),
+      firstName: brand.firstName ?? undefined,
+      lastName: brand.lastName ?? undefined,
+      displayName: brand.displayName,
+      companyName: brand.legalName,
+      ein: brand.ein ?? undefined,
+      einIssuingCountry: brand.einIssuingCountry ?? brand.country,
+      phone: brand.phone,
+      street: brand.streetAddress,
+      city: brand.city,
+      state: brand.state,
+      postalCode: brand.postalCode,
+      country: brand.country,
+      email: brand.email,
+      stockSymbol: brand.stockSymbol ?? undefined,
+      stockExchange: brand.stockExchange ?? undefined,
+      ipAddress: brand.ipAddress ?? undefined,
+      brandRelationship: brand.brandRelationship ?? 'BASIC_ACCOUNT',
+      website: brand.website,
+      vertical: brand.providerVertical ?? this.mapVerticalToProvider(brand.vertical),
+      altBusinessId: brand.altBusinessId ?? undefined,
+      altBusinessIdType: brand.altBusinessIdType ?? undefined,
+      referenceId: brand.referenceId ?? undefined,
+      tag: brand.tags as string[],
+      mobilePhone: brand.mobilePhone ?? undefined,
+      businessContactEmail: brand.businessContactEmail ?? brand.email,
+    };
+  }
+
   /**
    * Create a new brand (draft status)
    */
@@ -161,10 +254,111 @@ export class BrandService {
   /**
    * Submit brand for verification
    */
-  async submitForVerification(_id: string, _organizationId: string): Promise<Brand> {
-    throw new BadRequestError(
-      'In-app brand registration is disabled. Link an existing Signalmash brand from Phone Numbers instead.'
-    );
+  async submitForVerification(id: string, organizationId: string): Promise<Brand> {
+    const brand = await this.getById(id, organizationId);
+
+    if (!['draft', 'unverified', 'rejected'].includes(brand.status)) {
+      throw new BadRequestError('Brand cannot be submitted in its current state');
+    }
+
+    const installation = await integrationService.getPrimaryInstallationForOrganization(organizationId);
+    if (!installation || installation.status !== 'connected') {
+      throw new BadRequestError('Connect your GHL workspace before submitting a brand');
+    }
+
+    this.assertBrandReadyForSubmission(brand);
+    const requestPayload = this.buildProviderPayload(brand);
+
+    await prisma.brand.update({
+      where: { id: brand.id },
+      data: {
+        submitAttempts: {
+          increment: 1,
+        },
+        lastSubmittedAt: new Date(),
+        lastSubmissionError: null,
+        providerMessage: null,
+      },
+    });
+
+    try {
+      const result = await signalmashService.registerBrand(requestPayload);
+      const nextStatus = this.mapProviderBrandStatus(result.status, 'pending_verification');
+
+      const updatedBrand = await prisma.brand.update({
+        where: { id: brand.id },
+        data: {
+          signalmashBrandId: result.brandId,
+          tcrBrandId: result.tcrBrandId ?? brand.tcrBrandId,
+          status: nextStatus,
+          providerStatus: result.status,
+          providerMessage: result.message ?? null,
+          verificationScore: result.verificationScore ?? brand.verificationScore,
+          rejectionReason: nextStatus === 'rejected' ? brand.rejectionReason : null,
+          lastSubmissionError: null,
+          lastStatusSyncedAt: new Date(),
+        },
+      });
+
+      await integrationService.syncBrandMapping(updatedBrand);
+      await integrationService.setPrimaryOnboardingResources(organizationId, {
+        installationId: installation.id,
+        brandId: updatedBrand.id,
+      });
+
+      await providerOperationService.log({
+        organizationId,
+        installationId: installation.id,
+        operation: 'submit_brand',
+        localResourceType: 'Brand',
+        localResourceId: updatedBrand.id,
+        externalId: updatedBrand.signalmashBrandId,
+        status: 'success',
+        requestPayload,
+        responsePayload: result as unknown as Record<string, unknown>,
+      });
+
+      return updatedBrand;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown provider submission failure';
+
+      await prisma.brand.update({
+        where: { id: brand.id },
+        data: {
+          lastSubmissionError: errorMessage,
+          providerMessage: errorMessage,
+        },
+      });
+
+      await providerOperationService.log({
+        organizationId,
+        installationId: installation.id,
+        operation: 'submit_brand',
+        localResourceType: 'Brand',
+        localResourceId: brand.id,
+        externalId: brand.signalmashBrandId,
+        status: 'failed',
+        requestPayload,
+        errorMessage,
+      });
+
+      if (error instanceof ExternalServiceError) {
+        throw new AppError(
+          'Unable to submit the brand to Signalmash right now.',
+          'PROVIDER_BRAND_SUBMISSION_FAILED',
+          502,
+          true,
+          {
+            provider: 'signalmash',
+            operation: 'submit_brand',
+            brandId: brand.id,
+            upstreamMessage: error.message,
+          }
+        );
+      }
+
+      throw error;
+    }
   }
 
   /**
@@ -189,9 +383,13 @@ export class BrandService {
       where: { id: brand.id },
       data: {
         status,
+        providerStatus: status,
+        providerMessage: rejectionReason ?? null,
         verificationScore,
         rejectionReason,
         tcrBrandId: tcrBrandId ?? brand.tcrBrandId,
+        lastStatusSyncedAt: new Date(),
+        lastSubmissionError: status === 'rejected' ? rejectionReason ?? brand.lastSubmissionError : null,
       },
     });
 
@@ -201,6 +399,20 @@ export class BrandService {
     );
 
     await integrationService.syncBrandMapping(updatedBrand);
+    await providerOperationService.log({
+      organizationId: brand.organizationId,
+      operation: 'brand_webhook',
+      localResourceType: 'Brand',
+      localResourceId: brand.id,
+      externalId: signalmashBrandId,
+      status: 'success',
+      responsePayload: {
+        status,
+        verificationScore,
+        rejectionReason,
+        tcrBrandId,
+      },
+    });
 
     return updatedBrand;
   }
@@ -220,10 +432,14 @@ export class BrandService {
         where: { id: brand.id },
         data: {
           status: nextStatus,
+          providerStatus: providerStatus.status,
+          providerMessage: providerStatus.rejectionReason ?? null,
           verificationScore: providerStatus.verificationScore ?? brand.verificationScore,
           rejectionReason: providerStatus.rejectionReason ?? (nextStatus === 'rejected' ? brand.rejectionReason : null),
           tcrBrandId: providerStatus.tcrBrandId ?? brand.tcrBrandId,
           referenceId: providerStatus.referenceId ?? brand.referenceId,
+          lastStatusSyncedAt: new Date(),
+          lastSubmissionError: nextStatus === 'rejected' ? (providerStatus.rejectionReason ?? brand.lastSubmissionError) : null,
         },
       });
 
@@ -239,9 +455,29 @@ export class BrandService {
       );
 
       await integrationService.syncBrandMapping(updatedBrand);
+      await providerOperationService.log({
+        organizationId,
+        operation: 'refresh_brand_status',
+        localResourceType: 'Brand',
+        localResourceId: brand.id,
+        externalId: brand.signalmashBrandId,
+        status: 'success',
+        responsePayload: providerStatus as unknown as Record<string, unknown>,
+      });
 
       return updatedBrand;
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown provider refresh failure';
+      await providerOperationService.log({
+        organizationId,
+        operation: 'refresh_brand_status',
+        localResourceType: 'Brand',
+        localResourceId: brand.id,
+        externalId: brand.signalmashBrandId,
+        status: 'failed',
+        errorMessage,
+      });
+
       if (error instanceof ExternalServiceError) {
         throw new AppError(
           'Unable to refresh brand status from Signalmash right now.',

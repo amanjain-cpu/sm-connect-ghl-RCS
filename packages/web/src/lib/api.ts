@@ -281,6 +281,10 @@ class ApiClient {
     return this.post<any>(`/brands/${id}/submit`);
   }
 
+  async refreshBrandStatus(id: string) {
+    return this.post<any>(`/brands/${id}/refresh-status`);
+  }
+
   async deleteBrand(id: string) {
     return this.delete(`/brands/${id}`);
   }
@@ -308,6 +312,10 @@ class ApiClient {
 
   async submitCampaign(id: string) {
     return this.post<any>(`/campaigns/${id}/submit`);
+  }
+
+  async refreshCampaignStatus(id: string) {
+    return this.post<any>(`/campaigns/${id}/refresh-status`);
   }
 
   async deleteCampaign(id: string) {

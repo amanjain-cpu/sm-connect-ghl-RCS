@@ -328,6 +328,26 @@ class AdminApiClient {
     return this.get<{ success: boolean; data: any[]; meta: any }>(`/organizations?page=${page}&limit=${limit}`);
   }
 
+  async getOrganizationOnboarding(id: string) {
+    return this.get<{ success: boolean; data: any }>(`/organizations/${id}/onboarding`);
+  }
+
+  async submitOrganizationBrand(organizationId: string, brandId: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/brands/${brandId}/submit`);
+  }
+
+  async refreshOrganizationBrand(organizationId: string, brandId: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/brands/${brandId}/refresh-status`);
+  }
+
+  async submitOrganizationCampaign(organizationId: string, campaignId: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/campaigns/${campaignId}/submit`);
+  }
+
+  async refreshOrganizationCampaign(organizationId: string, campaignId: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/campaigns/${campaignId}/refresh-status`);
+  }
+
   async linkExistingSignalmashAssets(data: {
     organizationId: string;
     brandName: string;
