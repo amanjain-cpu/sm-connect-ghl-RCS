@@ -1,0 +1,127 @@
+name: Project status automation
+
+# Moves the ISSUE(s) a PR closes through the org Project #1 board:
+#   - PR opened / reopened / marked ready  -> Status = "In Review"
+#   - PR merged                            -> Status = "QA:Needs-Verify"
+#
+# GitHub's built-in project workflows can't reliably move an issue based on its
+# linked PR lifecycle across non-default branches, so this fills that gap.
+#
+# Requires repo/org secret PROJECTS_TOKEN: a fine-grained PAT or App token with
+# Organization permissions -> Projects: Read and write, plus read on this repo's
+# contents/issues/pull-requests. If absent, this job skips without red checks.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  move-linked-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          PROJECTS_TOKEN_PRESENT: ${{ secrets.PROJECTS_TOKEN != '' }}
+        with:
+          github-token: ${{ secrets.PROJECTS_TOKEN || github.token }}
+          script: |
+            if (process.env.PROJECTS_TOKEN_PRESENT !== 'true') {
+              core.info('PROJECTS_TOKEN not configured — skipping board automation.');
+              return;
+            }
+
+            const ORG = 'codeflex-labs';
+            const PROJECT_NUMBER = 1;
+            const STATUS_FIELD = 'Status';
+
+            const pr = context.payload.pull_request;
+            const action = context.payload.action;
+
+            let target;
+            if (action === 'closed') {
+              if (!pr.merged) { core.info('PR closed without merging — no move.'); return; }
+              target = 'QA:Needs-Verify';
+            } else {
+              if (pr.draft) { core.info('Draft PR — not moving to In Review yet.'); return; }
+              target = 'In Review';
+            }
+            core.info(`PR #${pr.number} (${action}) -> target status "${target}"`);
+
+            const projData = await github.graphql(`
+              query($org:String!, $num:Int!) {
+                organization(login:$org) {
+                  projectV2(number:$num) {
+                    id
+                    field(name:"${STATUS_FIELD}") {
+                      ... on ProjectV2SingleSelectField { id options { id name } }
+                    }
+                  }
+                }
+              }`, { org: ORG, num: PROJECT_NUMBER });
+
+            const project = projData.organization?.projectV2;
+            if (!project) { core.setFailed(`Project #${PROJECT_NUMBER} not found for org ${ORG}.`); return; }
+            const field = project.field;
+            if (!field?.id) { core.setFailed(`Single-select field "${STATUS_FIELD}" not found on the project.`); return; }
+            const option = field.options.find(o => o.name === target);
+            if (!option) { core.setFailed(`No "${STATUS_FIELD}" option named "${target}". Options: ${field.options.map(o => o.name).join(', ')}`); return; }
+
+            const numbers = new Set();
+            const closing = await github.graphql(`
+              query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$number) {
+                    closingIssuesReferences(first:20) { nodes { number } }
+                  }
+                }
+              }`, { owner: context.repo.owner, repo: context.repo.repo, number: pr.number });
+            for (const n of (closing.repository.pullRequest.closingIssuesReferences.nodes || [])) {
+              numbers.add(n.number);
+            }
+
+            const text = `${pr.title || ''}\n${pr.body || ''}`;
+            const re = /\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+#(\d+)\b/gi;
+            for (let m; (m = re.exec(text)); ) { numbers.add(Number(m[1])); }
+
+            if (numbers.size === 0) { core.info('PR references no closing issues — nothing to move.'); return; }
+
+            const issues = [];
+            for (const number of numbers) {
+              const q = await github.graphql(`
+                query($owner:String!, $repo:String!, $number:Int!) {
+                  repository(owner:$owner, name:$repo) { issue(number:$number) { id number } }
+                }`, { owner: context.repo.owner, repo: context.repo.repo, number });
+              if (q.repository.issue) issues.push(q.repository.issue);
+            }
+            if (!issues.length) { core.info('No matching issues found — nothing to move.'); return; }
+
+            for (const issue of issues) {
+              const itemData = await github.graphql(`
+                query($issueId:ID!) {
+                  node(id:$issueId) {
+                    ... on Issue { projectItems(first:20) { nodes { id project { id } } } }
+                  }
+                }`, { issueId: issue.id });
+
+              let itemId = itemData.node.projectItems.nodes.find(n => n.project.id === project.id)?.id;
+              if (!itemId) {
+                const added = await github.graphql(`
+                  mutation($projectId:ID!, $contentId:ID!) {
+                    addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) { item { id } }
+                  }`, { projectId: project.id, contentId: issue.id });
+                itemId = added.addProjectV2ItemById.item.id;
+              }
+
+              await github.graphql(`
+                mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                    value:{ singleSelectOptionId:$optionId }
+                  }) { projectV2Item { id } }
+                }`, { projectId: project.id, itemId, fieldId: field.id, optionId: option.id });
+
+              core.info(`Issue #${issue.number} -> "${target}"`);
+            }

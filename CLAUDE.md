@@ -3,6 +3,11 @@
 > **Read this file first when working on this project.**
 > For complete documentation, see [PROJECT_REFERENCE.md](./PROJECT_REFERENCE.md)
 
+> **QA task creation / handoff:** read `docs/runbooks/qa-agent-playbook.md` and
+> `docs/runbooks/qa-task-workflow.md` before creating, reviewing, or announcing
+> manual QA. GitHub issues are the source of truth; Slack is only the notification
+> layer.
+
 ## Project Summary
 
 **Signalmash Connect** is a CRM (CRM platform) marketplace app that integrates Signalmash SMS/MMS APIs with CRM sub-accounts for A2P 10DLC compliant messaging.

@@ -1,0 +1,165 @@
+name: QA Task
+description: Create a claimable QA task for manual, live, billing, or regression validation
+title: "QA Task: "
+labels: ["qa:needs-verify", "workflow:ready-for-agent"]
+projects: ["codeflex-labs/1"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for QA work that a teammate can pick up, execute, and report back on.
+
+        The issue should be the execution record. Reusable test instructions belong in a runbook under `docs/runbooks/`.
+
+        Security and data safety:
+        - Never paste credentials, API keys, tokens, webhook secrets, or provider portal passwords into the issue. Point to the approved secret manager or access owner instead.
+        - Prefer throwaway/dev fixtures for mutating QA. Production tests must call out what real customer, tenant, location, sender, asset, or billing data could be changed.
+
+        Claiming convention:
+        1. Comment `I am claiming this QA run.`
+        2. Assign yourself, or ask a maintainer to assign you.
+        3. Post evidence and results as comments.
+        4. If defects are found, open linked bug issues instead of burying them only in this thread.
+  - type: textarea
+    id: linked_work
+    attributes:
+      label: Linked work
+      description: Link the PRs, epic issues, runbooks, specs, dashboards, or related issues this QA task verifies.
+      placeholder: |
+        - PR:
+        - Epic / issue:
+        - Runbook:
+        - Related docs:
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What decision should this QA task allow us to make?
+      placeholder: |
+        Confirm that ...
+    validations:
+      required: true
+  - type: dropdown
+    id: qa_type
+    attributes:
+      label: QA type
+      description: Pick the closest type of validation.
+      options:
+        - Functional smoke
+        - Regression re-test
+        - Live provider validation
+        - Billing validation
+        - Release gate
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: environment_name
+    attributes:
+      label: Target environment
+      description: Where should this be tested?
+      options:
+        - local
+        - dev
+        - staging
+        - production
+        - provider portal
+        - multiple
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      description: Which product area or messaging channel is involved? Choose N/A if channel-agnostic.
+      options:
+        - "N/A"
+        - CRM integration
+        - Signalmash API
+        - 10DLC
+        - SMS
+        - MMS
+        - Billing
+        - Web
+        - Admin
+        - Multiple
+    validations:
+      required: true
+  - type: textarea
+    id: test_context
+    attributes:
+      label: Test context
+      description: Fill in the exact tenant, account, sender, device, flags, and data required to run this task. Reference provider portals/accounts without pasting secrets.
+      placeholder: |
+        - Customer / tenant / CRM location:
+        - Test account / user:
+        - Sender / channel / provider:
+        - Device / browser:
+        - Feature flags:
+        - Test data:
+        - Provider account / portal reference:
+        - Real data that could be changed:
+    validations:
+      required: true
+  - type: textarea
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      description: Access, setup, deployment, seed data, secret-manager references, or third-party state required before QA starts. Never paste credentials into the issue.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test plan
+      description: Numbered steps the assignee should execute. Include expected results inline.
+      placeholder: |
+        1. Do ...
+           Expected: ...
+        2. Do ...
+           Expected: ...
+    validations:
+      required: true
+  - type: textarea
+    id: pass_criteria
+    attributes:
+      label: Pass criteria
+      description: The minimum outcomes required to mark this QA task verified.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Required evidence
+      description: What screenshots, logs, exports, provider records, billing records, or diagnostics must be attached?
+      placeholder: |
+        - Screenshot:
+        - Logs:
+        - Provider evidence:
+        - Billing / analytics evidence:
+    validations:
+      required: true
+  - type: textarea
+    id: failure_handling
+    attributes:
+      label: Failure handling
+      description: Tell the assignee what to do if the task fails or is blocked.
+      value: |
+        If blocked, comment with `Blocked:` plus the exact blocker, environment, and evidence.
+        If a defect is found, open a separate bug issue, link it here, and leave this QA task open until the re-test passes.
+        Do not add `qa:verified` until every pass criterion is satisfied.
+    validations:
+      required: true
+  - type: textarea
+    id: assignment_notes
+    attributes:
+      label: Assignment notes
+      description: Optional notes about who can run this, special access, pairing, time window, or handoff details.
+    validations:
+      required: false
