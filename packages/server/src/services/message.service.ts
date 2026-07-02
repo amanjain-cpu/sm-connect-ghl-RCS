@@ -46,6 +46,64 @@ export class MessageService {
     return `${config.apiUrl}/api/webhooks/signalmash`;
   }
 
+  private async resolveApprovedSenderContext(input: {
+    organizationId: string;
+    from: string;
+    phoneNumberId?: string;
+    campaignId?: string;
+  }) {
+    const formattedFrom = formatPhoneE164(input.from);
+    const senderNumber = await prisma.phoneNumber.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        status: 'active',
+        ...(input.phoneNumberId ? { id: input.phoneNumberId } : { phoneNumber: formattedFrom }),
+      },
+      select: {
+        id: true,
+        phoneNumber: true,
+        campaignId: true,
+        campaign: {
+          select: {
+            id: true,
+            name: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    if (!senderNumber) {
+      throw new BadRequestError(
+        input.phoneNumberId
+          ? 'Selected sender number is not active for this organization'
+          : 'The selected from number is not an active sender for this organization'
+      );
+    }
+
+    if (input.phoneNumberId && senderNumber.phoneNumber !== formattedFrom) {
+      throw new BadRequestError('The selected sender number does not match the from number');
+    }
+
+    if (!senderNumber.campaignId || !senderNumber.campaign) {
+      throw new BadRequestError('Sender number must be linked to an approved campaign before sending');
+    }
+
+    if (senderNumber.campaign.status !== 'approved') {
+      throw new BadRequestError('This sender number is linked to a campaign that is not approved yet');
+    }
+
+    if (input.campaignId && senderNumber.campaignId !== input.campaignId) {
+      throw new BadRequestError('Selected sender number is not linked to the specified campaign');
+    }
+
+    return {
+      formattedFrom,
+      phoneNumberId: senderNumber.id,
+      campaignId: senderNumber.campaignId,
+    };
+  }
+
   /**
    * Send an outbound message
    */
@@ -63,64 +121,35 @@ export class MessageService {
       mediaUrls,
     } = input;
 
-    // Validate campaign if provided
-    if (campaignId) {
-      const campaign = await prisma.campaign.findFirst({
-        where: {
-          id: campaignId,
-          organizationId,
-          status: 'approved',
-        },
-      });
-
-      if (!campaign) {
-        throw new BadRequestError('Campaign not found or not approved');
-      }
-    }
-
     // Format phone numbers
-    const formattedFrom = formatPhoneE164(from);
     const formattedTo = formatPhoneE164(to);
 
     if (await complianceService.isSuppressed(organizationId, formattedTo)) {
       throw new BadRequestError('Recipient has opted out from messaging');
     }
 
+    const senderContext = await this.resolveApprovedSenderContext({
+      organizationId,
+      from,
+      phoneNumberId,
+      campaignId,
+    });
+
     await subscriptionBillingService.assertCanSendMessage(
       organizationId,
       mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms'
     );
-
-    const senderNumber =
-      phoneNumberId || !campaignId
-        ? await prisma.phoneNumber.findFirst({
-            where: {
-              organizationId,
-              status: 'active',
-              ...(phoneNumberId ? { id: phoneNumberId } : { phoneNumber: formattedFrom }),
-            },
-            select: {
-              id: true,
-              campaignId: true,
-              phoneNumber: true,
-            },
-          })
-        : null;
-
-    if (phoneNumberId && !senderNumber) {
-      throw new BadRequestError('Selected sender number is not active for this organization');
-    }
 
     // Create message record (queued status)
     const message = await prisma.message.create({
       data: {
         organizationId,
         platformConnectionId,
-        campaignId: campaignId ?? senderNumber?.campaignId ?? undefined,
-        phoneNumberId: phoneNumberId ?? senderNumber?.id ?? undefined,
+        campaignId: senderContext.campaignId,
+        phoneNumberId: senderContext.phoneNumberId,
         direction: 'outbound',
         type: mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms',
-        from: formattedFrom,
+        from: senderContext.formattedFrom,
         to: formattedTo,
         body,
         mediaUrls,
@@ -139,7 +168,7 @@ export class MessageService {
 
       // Send via Signalmash
       const result = await signalmashService.sendMessage({
-        from: formattedFrom,
+        from: senderContext.formattedFrom,
         to: formattedTo,
         body,
         mediaUrls,
@@ -218,31 +247,24 @@ export class MessageService {
 
     const formattedFrom = formatPhoneE164(input.from);
     const formattedTo = formatPhoneE164(input.to);
-    const senderNumber =
-      !input.phoneNumberId || !input.campaignId
-        ? await prisma.phoneNumber.findFirst({
-            where: {
-              organizationId: input.organizationId,
-              phoneNumber: formattedFrom,
-              status: 'active',
-            },
-            select: {
-              id: true,
-              campaignId: true,
-            },
-          })
-        : null;
 
     if (await complianceService.isSuppressed(input.organizationId, formattedTo)) {
       throw new BadRequestError('Recipient has opted out from messaging');
     }
 
+    const senderContext = await this.resolveApprovedSenderContext({
+      organizationId: input.organizationId,
+      from: input.from,
+      phoneNumberId: input.phoneNumberId,
+      campaignId: input.campaignId,
+    });
+
     return prisma.message.create({
       data: {
         organizationId: input.organizationId,
         platformConnectionId: input.platformConnectionId,
-        campaignId: input.campaignId ?? senderNumber?.campaignId ?? undefined,
-        phoneNumberId: input.phoneNumberId ?? senderNumber?.id ?? undefined,
+        campaignId: senderContext.campaignId,
+        phoneNumberId: senderContext.phoneNumberId,
         platformMessageId: input.platformMessageId,
         platformConversationId: input.platformConversationId,
         direction: 'outbound',
@@ -269,15 +291,27 @@ export class MessageService {
       return message;
     }
 
-    await prisma.message.update({
-      where: { id: message.id },
-      data: { status: 'sending' },
-    });
-
     try {
       if (await complianceService.isSuppressed(message.organizationId, message.to)) {
         throw new BadRequestError('Recipient has opted out from messaging');
       }
+
+      const senderContext = await this.resolveApprovedSenderContext({
+        organizationId: message.organizationId,
+        from: message.from,
+        phoneNumberId: message.phoneNumberId ?? undefined,
+        campaignId: message.campaignId ?? undefined,
+      });
+
+      await prisma.message.update({
+        where: { id: message.id },
+        data: {
+          status: 'sending',
+          campaignId: senderContext.campaignId,
+          phoneNumberId: senderContext.phoneNumberId,
+          from: senderContext.formattedFrom,
+        },
+      });
 
       await subscriptionBillingService.assertCanSendMessage(
         message.organizationId,
@@ -285,7 +319,7 @@ export class MessageService {
       );
 
       const result = await signalmashService.sendMessage({
-        from: message.from,
+        from: senderContext.formattedFrom,
         to: message.to,
         body: message.body,
         mediaUrls: Array.isArray(message.mediaUrls) ? message.mediaUrls as string[] : undefined,

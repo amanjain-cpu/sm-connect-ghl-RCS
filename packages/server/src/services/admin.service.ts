@@ -499,6 +499,21 @@ export class AdminService {
       await Promise.all([
         prisma.platformConnection.findMany({
           where: { organizationId },
+          select: {
+            id: true,
+            platform: true,
+            platformAccountId: true,
+            platformAccountName: true,
+            tokenExpiresAt: true,
+            scopes: true,
+            webhookUrl: true,
+            status: true,
+            metadata: true,
+            lastSyncAt: true,
+            createdAt: true,
+            updatedAt: true,
+            installationId: true,
+          },
           orderBy: { createdAt: 'desc' },
         }),
         integrationService.getInstallationOverview(organizationId),

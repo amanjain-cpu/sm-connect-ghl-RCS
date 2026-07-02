@@ -337,6 +337,7 @@ const updateBodySchema = z.object({
   friendlyName: z.string().max(100).optional(),
   campaignId: z.string().uuid().nullable().optional(),
   makeDefault: z.boolean().optional(),
+  confirmReassignment: z.boolean().optional(),
 });
 
 router.patch(

@@ -197,11 +197,26 @@ export function PhoneNumbersPage() {
   const handleSaveEdit = async () => {
     if (!selectedNumber) return;
 
+    const requiresReassignment =
+      Boolean(selectedNumber.campaign?.id) &&
+      Boolean(editForm.campaignId) &&
+      selectedNumber.campaign?.id !== editForm.campaignId;
+
+    if (
+      requiresReassignment &&
+      !window.confirm(
+        `This will move ${selectedNumber.formattedNumber} from ${selectedNumber.campaign?.name} to the selected campaign. Continue?`
+      )
+    ) {
+      return;
+    }
+
     setIsSavingEdit(true);
     try {
       const response = await api.updatePhoneNumber(selectedNumber.id, {
         friendlyName: editForm.friendlyName || undefined,
         campaignId: editForm.campaignId ? editForm.campaignId : null,
+        ...(requiresReassignment ? { confirmReassignment: true } : {}),
       });
 
       if (response.success) {
@@ -440,6 +455,11 @@ export function PhoneNumbersPage() {
                         <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
                           {number.campaign?.name || 'Unassigned'}
                         </p>
+                        {number.campaign && number.campaign.status !== 'approved' ? (
+                          <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                            Traffic is blocked until this campaign is approved.
+                          </p>
+                        ) : null}
                       </div>
                       <div className="text-sm">
                         <p className="text-slate-500 dark:text-slate-400">Area Code</p>
