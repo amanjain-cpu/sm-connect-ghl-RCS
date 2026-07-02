@@ -9,6 +9,7 @@ import { messageService } from '../services/message.service.js';
 import { validate, idParamSchema, phoneSchema, paginationSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { organizationRuntimeService } from '../services/organization-runtime.service.js';
 
 const router: RouterType = Router();
 
@@ -86,6 +87,10 @@ router.post(
   authenticate,
   validate({ body: sendMessageSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'send messages'
+    );
     const message = await messageService.send({
       organizationId: req.user!.organizationId,
       ...req.body,

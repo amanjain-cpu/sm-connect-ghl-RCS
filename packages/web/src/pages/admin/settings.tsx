@@ -38,6 +38,24 @@ interface SignalmashDiagnostic {
   status: number | null;
   ok: boolean;
   responseBody: string;
+  apiBaseUrl?: string;
+  tokenFingerprint?: string;
+  balanceStatus?: number | null;
+  balanceBody?: string;
+  sampleBrandIds?: string[];
+  sampleCampaignIds?: string[];
+  brandLookup?: {
+    requestedId: string;
+    found: boolean;
+    status?: string;
+    message?: string;
+  };
+  campaignLookup?: {
+    requestedId: string;
+    found: boolean;
+    status?: string;
+    message?: string;
+  };
 }
 
 const SETTING_LABELS: Record<string, { label: string; description: string; placeholder: string }> = {
@@ -123,6 +141,8 @@ export function AdminSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [successKey, setSuccessKey] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState<SignalmashDiagnostic | null>(null);
+  const [lookupBrandId, setLookupBrandId] = useState('');
+  const [lookupCampaignId, setLookupCampaignId] = useState('');
 
   const loadSettings = async () => {
     try {
@@ -194,7 +214,10 @@ export function AdminSettingsPage() {
     setError(null);
 
     try {
-      const response = await adminApi.testSignalmashConnection();
+      const response = await adminApi.testSignalmashConnection({
+        brandId: lookupBrandId.trim() || undefined,
+        campaignId: lookupCampaignId.trim() || undefined,
+      });
       if (response.success) {
         setDiagnostic(response.data);
         notify.success(
@@ -260,10 +283,22 @@ export function AdminSettingsPage() {
                 and visible here so upstream issues can be checked without opening the terminal.
               </p>
             </div>
-            <Button onClick={handleTestConnection} isLoading={isTestingConnection}>
-              <Activity className="mr-2 h-4 w-4" />
-              Test Signalmash Connection
-            </Button>
+            <div className="w-full max-w-md space-y-3">
+              <Input
+                value={lookupBrandId}
+                onChange={(e) => setLookupBrandId(e.target.value)}
+                placeholder="Optional brand ID to inspect"
+              />
+              <Input
+                value={lookupCampaignId}
+                onChange={(e) => setLookupCampaignId(e.target.value)}
+                placeholder="Optional campaign ID to inspect"
+              />
+              <Button onClick={handleTestConnection} isLoading={isTestingConnection} className="w-full">
+                <Activity className="mr-2 h-4 w-4" />
+                Test Signalmash Connection
+              </Button>
+            </div>
           </div>
 
           {diagnostic ? (
@@ -290,6 +325,63 @@ export function AdminSettingsPage() {
                   </div>
                 )}
               </div>
+
+              {(diagnostic.apiBaseUrl || diagnostic.tokenFingerprint || diagnostic.sampleBrandIds?.length || diagnostic.sampleCampaignIds?.length) && (
+                <div className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-sm dark:border-slate-800 dark:bg-slate-950/70 md:grid-cols-2">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">API Base</p>
+                    <p className="mt-1 text-slate-900 dark:text-slate-100">{diagnostic.apiBaseUrl || 'Unavailable'}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Token Fingerprint</p>
+                    <p className="mt-1 font-mono text-slate-900 dark:text-slate-100">{diagnostic.tokenFingerprint || 'Unavailable'}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Visible Brand IDs</p>
+                    <p className="mt-1 break-all text-slate-900 dark:text-slate-100">
+                      {diagnostic.sampleBrandIds?.length ? diagnostic.sampleBrandIds.join(', ') : 'None returned'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Visible Campaign IDs</p>
+                    <p className="mt-1 break-all text-slate-900 dark:text-slate-100">
+                      {diagnostic.sampleCampaignIds?.length ? diagnostic.sampleCampaignIds.join(', ') : 'None returned'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {(diagnostic.brandLookup || diagnostic.campaignLookup || diagnostic.balanceBody) && (
+                <div className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-sm dark:border-slate-800 dark:bg-slate-950/70 md:grid-cols-2">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Balance Check</p>
+                    <p className="mt-1 text-slate-900 dark:text-slate-100">
+                      {diagnostic.balanceStatus !== null && diagnostic.balanceStatus !== undefined
+                        ? `HTTP ${diagnostic.balanceStatus}`
+                        : 'No HTTP status'}
+                    </p>
+                    <p className="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">{diagnostic.balanceBody || 'No response body'}</p>
+                  </div>
+                  {diagnostic.brandLookup && (
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Brand Lookup</p>
+                      <p className="mt-1 text-slate-900 dark:text-slate-100">
+                        {diagnostic.brandLookup.requestedId}: {diagnostic.brandLookup.found ? diagnostic.brandLookup.status || 'found' : 'not found'}
+                      </p>
+                      <p className="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">{diagnostic.brandLookup.message || 'No provider message'}</p>
+                    </div>
+                  )}
+                  {diagnostic.campaignLookup && (
+                    <div>
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Campaign Lookup</p>
+                      <p className="mt-1 text-slate-900 dark:text-slate-100">
+                        {diagnostic.campaignLookup.requestedId}: {diagnostic.campaignLookup.found ? diagnostic.campaignLookup.status || 'found' : 'not found'}
+                      </p>
+                      <p className="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">{diagnostic.campaignLookup.message || 'No provider message'}</p>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="mt-4 space-y-2">
                 <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">

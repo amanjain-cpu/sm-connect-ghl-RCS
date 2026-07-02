@@ -130,6 +130,36 @@ export class OrganizationService {
     });
   }
 
+  async suspend(id: string, reason?: string): Promise<Organization> {
+    const organization = await this.getById(id);
+
+    if (organization.status === 'suspended') {
+      return organization;
+    }
+
+    return prisma.organization.update({
+      where: { id },
+      data: {
+        status: 'suspended',
+        suspendedAt: new Date(),
+        suspensionReason: reason?.trim() || null,
+      },
+    });
+  }
+
+  async unsuspend(id: string): Promise<Organization> {
+    await this.getById(id);
+
+    return prisma.organization.update({
+      where: { id },
+      data: {
+        status: 'active',
+        suspendedAt: null,
+        suspensionReason: null,
+      },
+    });
+  }
+
   /**
    * Get organization users
    */

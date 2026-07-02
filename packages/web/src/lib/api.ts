@@ -310,8 +310,30 @@ class ApiClient {
     return this.put<any>(`/campaigns/${id}`, data);
   }
 
-  async submitCampaign(id: string) {
-    return this.post<any>(`/campaigns/${id}/submit`);
+  async submitCampaign(id: string, data?: {
+    numberLinkIntent?: {
+      mode: 'existing';
+      phoneNumberId: string;
+      friendlyName?: string;
+    } | {
+      mode: 'buy_new';
+      phoneNumber: string;
+      friendlyName?: string;
+    };
+  }) {
+    return this.post<any>(`/campaigns/${id}/submit`, data);
+  }
+
+  async linkCampaignPhoneNumber(id: string, data: {
+    mode: 'existing';
+    phoneNumberId: string;
+    friendlyName?: string;
+  } | {
+    mode: 'buy_new';
+    phoneNumber: string;
+    friendlyName?: string;
+  }) {
+    return this.post<any>(`/campaigns/${id}/link-number`, data);
   }
 
   async refreshCampaignStatus(id: string) {
@@ -390,6 +412,17 @@ class ApiClient {
 
   async createBillingPortalSession() {
     return this.post<{ url: string }>('/billing/subscription/portal');
+  }
+
+  async createMessageCreditTopupCheckout(amountDollars: number) {
+    return this.post<{ checkoutUrl: string; sessionId: string; amountDollars: number }>(
+      '/billing/message-credits/checkout',
+      { amountDollars }
+    );
+  }
+
+  async completeMessageCreditTopupCheckout(data: { sessionId: string }) {
+    return this.post<any>('/billing/message-credits/checkout/complete', data);
   }
 
   async authorizeMarketplaceBillingInstall(data: {
@@ -519,7 +552,20 @@ class ApiClient {
   }
 
   async completePhoneNumberCheckout(data: { sessionId: string }) {
-    return this.post<any>('/phone-numbers/checkout/complete', data);
+    return this.post<
+      | {
+          id: string;
+          phoneNumber: string;
+          status: string;
+          campaignId?: string | null;
+        }
+      | {
+          pending: true;
+          campaignId: string;
+          phoneNumber: string;
+          message: string;
+        }
+    >('/phone-numbers/checkout/complete', data);
   }
 
   async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean }) {

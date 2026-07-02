@@ -159,9 +159,32 @@ export function OnboardingPage() {
     }
 
     if (lifecycle === 'brand_pending') {
+      const hasRejectedBrand = brands.some((brand) => ['rejected', 'suspended'].includes(brand.status));
+      const hasSubmittedBrand = brands.some((brand) => brand.status === 'pending_verification');
+
+      if (hasRejectedBrand) {
+        return {
+          title: 'Fix the rejected brand',
+          description: 'At least one brand needs correction before campaign registration can continue.',
+          href: '/brands',
+          cta: 'Fix brand',
+          icon: Building2,
+        };
+      }
+
+      if (hasSubmittedBrand) {
+        return {
+          title: 'Monitor brand review',
+          description: 'Brand verification is in progress. Keep the brand record accurate and watch for approval or rejection updates.',
+          href: '/brands',
+          cta: 'Review brands',
+          icon: Building2,
+        };
+      }
+
       return {
-        title: 'Monitor brand review',
-        description: 'Brand verification is in progress. Keep the brand record accurate and watch for approval or rejection updates.',
+        title: 'Review and submit the brand',
+        description: 'A verified brand is not available yet. Finish any missing business details and submit the brand before campaigns can be created.',
         href: '/brands',
         cta: 'Review brands',
         icon: Building2,

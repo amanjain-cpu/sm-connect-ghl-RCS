@@ -12,6 +12,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { prisma } from '../config/database.js';
 import { AppError } from '../utils/errors.js';
 import { subscriptionBillingService } from '../services/subscription-billing.service.js';
+import { organizationRuntimeService } from '../services/organization-runtime.service.js';
 
 const router: RouterType = Router();
 
@@ -33,6 +34,10 @@ router.get(
   '/available',
   validate({ query: searchQuerySchema }),
   asyncHandler(async (req: Request, res: Response) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'search number inventory'
+    );
     const { areaCode, contains, state, limit } = req.query as unknown as z.infer<typeof searchQuerySchema>;
 
     const numbers = await phoneNumberService.searchAvailableNumbers({
@@ -135,7 +140,11 @@ router.post(
   '/checkout',
   validate({ body: purchaseBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
-    const { phoneNumber, campaignId, friendlyName, monthlyPrice } = req.body as z.infer<typeof purchaseBodySchema>;
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'start number checkout'
+    );
+    const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
 
     const campaign = await prisma.campaign.findFirst({
       where: {
@@ -153,8 +162,8 @@ router.post(
       throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
     }
 
-    if (campaign.status !== 'approved' || !campaign.signalmashCampaignId) {
-      throw new AppError('Select an approved provider-linked campaign before checkout', 'CAMPAIGN_NOT_READY', 400);
+    if (!['pending_approval', 'approved'].includes(campaign.status) || !campaign.signalmashCampaignId) {
+      throw new AppError('Select a submitted provider-linked campaign before checkout', 'CAMPAIGN_NOT_READY', 400);
     }
 
     const result = await subscriptionBillingService.preparePhoneNumberCheckout({
@@ -179,6 +188,10 @@ router.post(
   '/checkout/complete',
   validate({ body: completeCheckoutBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'complete number checkout'
+    );
     const { sessionId } = req.body as z.infer<typeof completeCheckoutBodySchema>;
     const metadata = await subscriptionBillingService.completePhoneNumberCheckout(
       req.user!.organizationId,
@@ -223,6 +236,48 @@ router.post(
         }
       }
 
+      if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
+        const campaign = await prisma.campaign.findFirst({
+          where: {
+            id: metadata.campaignId,
+            organizationId: req.user!.organizationId,
+          },
+          select: {
+            id: true,
+            status: true,
+            signalmashCampaignId: true,
+          },
+        });
+
+        if (campaign?.status === 'pending_approval' && campaign.signalmashCampaignId) {
+          await prisma.campaign.update({
+            where: { id: campaign.id },
+            data: {
+              numberLinkIntent: {
+                mode: 'buy_new',
+                phoneNumber: metadata.phoneNumber,
+                ...(metadata.friendlyName ? { friendlyName: metadata.friendlyName } : {}),
+              } as any,
+              numberLinkStatus: 'requested',
+              numberLinkError: error.message,
+              numberLinkAttemptedAt: new Date(),
+              numberLinkCompletedAt: null,
+            },
+          });
+
+          res.status(202).json({
+            success: true,
+            data: {
+              pending: true,
+              campaignId: campaign.id,
+              phoneNumber: metadata.phoneNumber,
+              message: 'Payment completed. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
+            },
+          });
+          return;
+        }
+      }
+
       throw error;
     }
   })
@@ -232,6 +287,10 @@ router.post(
   '/purchase',
   validate({ body: purchaseBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'purchase numbers'
+    );
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
 
     const subscription = await subscriptionBillingService.assertCanProvisionPhoneNumber(
@@ -284,6 +343,10 @@ router.patch(
   '/:id',
   validate({ params: idParamSchema, body: updateBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'update number assignments'
+    );
     const number = await phoneNumberService.updateNumber(
       req.user!.organizationId,
       req.params.id,
@@ -306,6 +369,10 @@ router.delete(
   '/:id',
   validate({ params: idParamSchema }),
   asyncHandler(async (req: Request, res: Response) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'release numbers'
+    );
     await phoneNumberService.releaseNumber(
       req.user!.organizationId,
       req.params.id

@@ -20,6 +20,11 @@ import {
   Pencil,
   RefreshCw,
 } from 'lucide-react';
+import {
+  BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL,
+  SIGNALMASH_PROVIDER_VERTICAL_LABELS,
+  SIGNALMASH_PROVIDER_VERTICALS,
+} from '@signalmash-connect/shared';
 import { Header } from '@/components/layout/header';
 import { PageShell, PageSection } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
@@ -136,6 +141,20 @@ const brandRelationshipOptions = [
   'KEY_ACCOUNT',
 ] as const;
 
+function inferProviderVertical(brand: Pick<Brand, 'vertical' | 'providerVertical'>): string {
+  if (brand.providerVertical === 'PROFESSIONAL_SERVICES') {
+    return 'PROFESSIONAL';
+  }
+
+  if (brand.providerVertical === 'OTHER') {
+    return BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL[brand.vertical as keyof typeof BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL] ?? '';
+  }
+
+  return brand.providerVertical
+    ?? BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL[brand.vertical as keyof typeof BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL]
+    ?? '';
+}
+
 export function BrandDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -155,7 +174,7 @@ export function BrandDetailPage() {
     entityType: 'llc',
     providerEntityType: 'PRIVATE_PROFIT',
     vertical: 'professional_services',
-    providerVertical: 'PROFESSIONAL_SERVICES',
+    providerVertical: 'PROFESSIONAL',
     brandRelationship: 'BASIC_ACCOUNT',
     streetAddress: '',
     city: '',
@@ -243,7 +262,7 @@ export function BrandDetailPage() {
       entityType: brand.entityType,
       providerEntityType: brand.providerEntityType || 'PRIVATE_PROFIT',
       vertical: brand.vertical,
-      providerVertical: brand.providerVertical || 'PROFESSIONAL_SERVICES',
+      providerVertical: inferProviderVertical(brand),
       brandRelationship: brand.brandRelationship || 'BASIC_ACCOUNT',
       streetAddress: brand.streetAddress,
       city: brand.city,
@@ -858,7 +877,18 @@ export function BrandDetailPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Provider Vertical</label>
-              <Input value={editForm.providerVertical} onChange={(e) => setEditForm({ ...editForm, providerVertical: e.target.value.toUpperCase() })} />
+              <select
+                value={editForm.providerVertical}
+                onChange={(e) => setEditForm({ ...editForm, providerVertical: e.target.value })}
+                className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
+              >
+                <option value="">Select a provider vertical</option>
+                {SIGNALMASH_PROVIDER_VERTICALS.map((option) => (
+                  <option key={option} value={option}>
+                    {SIGNALMASH_PROVIDER_VERTICAL_LABELS[option]}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Brand Relationship</label>

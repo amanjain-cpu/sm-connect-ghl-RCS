@@ -34,6 +34,10 @@ const completeCheckoutSchema = z.object({
   sessionId: z.string().min(8),
 });
 
+const messageCreditTopupSchema = z.object({
+  amountDollars: z.coerce.number().positive().max(1000),
+});
+
 const authorizeMarketplaceBillingSchema = z.object({
   clientId: z.string().min(8),
   installType: z.string().min(1),
@@ -112,6 +116,30 @@ router.post(
       req.user!.organizationId
     );
     res.json({ success: true, data: portal });
+  })
+);
+
+router.post(
+  '/message-credits/checkout',
+  validate({ body: messageCreditTopupSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await subscriptionBillingService.prepareMessageCreditTopupCheckout({
+      organizationId: req.user!.organizationId,
+      amountDollars: req.body.amountDollars,
+    });
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  '/message-credits/checkout/complete',
+  validate({ body: completeCheckoutSchema }),
+  asyncHandler(async (req, res) => {
+    const summary = await subscriptionBillingService.completeMessageCreditTopupCheckout(
+      req.user!.organizationId,
+      req.body.sessionId
+    );
+    res.json({ success: true, data: summary });
   })
 );
 

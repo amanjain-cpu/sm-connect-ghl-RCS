@@ -46,9 +46,62 @@ interface LinkExistingAssetsInput {
   makeDefaultSender?: boolean;
 }
 
+const TOLL_FREE_NPAS = new Set(['800', '833', '844', '855', '866', '877', '888']);
+
 export class PhoneNumberService {
   private getSignalmashWebhookUrl(): string {
     return `${config.apiUrl}/api/webhooks/signalmash`;
+  }
+
+  private normalizeUsLongCode(phoneNumber: string) {
+    const normalized = formatPhoneE164(phoneNumber);
+    const digits = normalized.replace(/\D/g, '');
+    const nationalDigits = digits.length === 11 && digits.startsWith('1')
+      ? digits.slice(1)
+      : digits;
+    const areaCode = nationalDigits.slice(0, 3);
+
+    return {
+      normalized,
+      nationalDigits,
+      areaCode,
+      isUsLongCode: nationalDigits.length === 10,
+      isTollFree: TOLL_FREE_NPAS.has(areaCode),
+    };
+  }
+
+  private assertPurchasableLongCode(phoneNumber: string) {
+    const normalized = this.normalizeUsLongCode(phoneNumber);
+
+    if (!normalized.isUsLongCode || normalized.isTollFree) {
+      throw new AppError(
+        'Only US 10DLC long-code numbers can be assigned or purchased in this flow.',
+        'PHONE_NUMBER_NOT_10DLC_COMPATIBLE',
+        400
+      );
+    }
+
+    return normalized;
+  }
+
+  private async syncCampaignNumberLinkState(
+    organizationId: string,
+    campaignId: string,
+    status: 'linked' | 'failed',
+    error?: string | null
+  ) {
+    await prisma.campaign.updateMany({
+      where: {
+        id: campaignId,
+        organizationId,
+      },
+      data: {
+        numberLinkStatus: status,
+        numberLinkError: error ?? null,
+        numberLinkAttemptedAt: new Date(),
+        numberLinkCompletedAt: status === 'linked' ? new Date() : null,
+      },
+    });
   }
 
   // ===========================================
@@ -69,17 +122,22 @@ export class PhoneNumberService {
         limit: options.limit || 20,
       });
 
-      return numbers.map((n) => ({
-        phoneNumber: n.phoneNumber,
-        formattedNumber: n.formattedNumber,
-        areaCode: this.extractAreaCode(n.phoneNumber),
-        capabilities: {
-          sms: n.capabilities.sms,
-          mms: n.capabilities.mms,
-          voice: n.capabilities.voice,
-        },
-        monthlyPrice: n.monthlyPrice,
-      }));
+      return numbers
+        .filter((number) => {
+          const normalized = this.normalizeUsLongCode(number.phoneNumber);
+          return normalized.isUsLongCode && !normalized.isTollFree;
+        })
+        .map((n) => ({
+          phoneNumber: n.phoneNumber,
+          formattedNumber: n.formattedNumber,
+          areaCode: this.extractAreaCode(n.phoneNumber),
+          capabilities: {
+            sms: n.capabilities.sms,
+            mms: n.capabilities.mms,
+            voice: n.capabilities.voice,
+          },
+          monthlyPrice: n.monthlyPrice,
+        }));
     } catch (error) {
       if (error instanceof ExternalServiceError) {
         throw new AppError(
@@ -120,7 +178,8 @@ export class PhoneNumberService {
     } = {}
   ) {
     logger.info({ organizationId, phoneNumber }, 'Purchasing phone number');
-    const normalizedPhoneNumber = formatPhoneE164(phoneNumber);
+    const normalizedLongCode = this.assertPurchasableLongCode(phoneNumber);
+    const normalizedPhoneNumber = normalizedLongCode.normalized;
 
     // Check if number is already owned
     const existing = await prisma.phoneNumber.findUnique({
@@ -150,10 +209,10 @@ export class PhoneNumberService {
       throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
     }
 
-    if (campaign.status !== 'approved') {
+    if (!['pending_approval', 'approved'].includes(campaign.status)) {
       throw new AppError(
-        'Campaign must be approved before assigning phone numbers',
-        'CAMPAIGN_NOT_APPROVED',
+        'Campaign must be submitted to Signalmash before assigning phone numbers',
+        'CAMPAIGN_NOT_READY',
         400
       );
     }
@@ -212,6 +271,7 @@ export class PhoneNumberService {
       logger.info({ numberId: number.id, phoneNumber: normalizedPhoneNumber }, 'Phone number purchased');
 
       await integrationService.syncPhoneNumberMapping(number);
+      await this.syncCampaignNumberLinkState(organizationId, campaign.id, 'linked');
 
       return number;
     } catch (error) {
@@ -253,6 +313,16 @@ export class PhoneNumberService {
       }
 
       logger.error({ error, phoneNumber }, 'Failed to purchase phone number');
+
+      if (options.campaignId) {
+        await this.syncCampaignNumberLinkState(
+          organizationId,
+          options.campaignId,
+          'failed',
+          error instanceof Error ? error.message : 'Unknown number provisioning failure'
+        );
+      }
+
       throw error;
     }
   }
@@ -426,6 +496,10 @@ export class PhoneNumberService {
           signalmashCampaignId: input.signalmashCampaignId,
           tcrCampaignId: input.tcrCampaignId ?? campaign.tcrCampaignId,
           status: 'approved',
+          numberLinkStatus: 'linked',
+          numberLinkError: null,
+          numberLinkAttemptedAt: new Date(),
+          numberLinkCompletedAt: new Date(),
           rejectionReason: null,
         },
       });
@@ -660,6 +734,7 @@ export class PhoneNumberService {
 
     // Validate new campaign if provided
     if (data.campaignId) {
+      this.assertPurchasableLongCode(number.phoneNumber);
       const campaign = await prisma.campaign.findFirst({
         where: {
           id: data.campaignId,
@@ -671,10 +746,18 @@ export class PhoneNumberService {
         throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
       }
 
-      if (campaign.status !== 'approved') {
+      if (!['pending_approval', 'approved'].includes(campaign.status)) {
         throw new AppError(
-          'Campaign must be approved before assigning phone numbers',
-          'CAMPAIGN_NOT_APPROVED',
+          'Campaign must be submitted to Signalmash before assigning phone numbers',
+          'CAMPAIGN_NOT_READY',
+          400
+        );
+      }
+
+      if (!campaign.signalmashCampaignId) {
+        throw new AppError(
+          'Campaign is missing its Signalmash campaign ID',
+          'CAMPAIGN_PROVIDER_ID_MISSING',
           400
         );
       }
@@ -701,6 +784,10 @@ export class PhoneNumberService {
 
     await integrationService.syncPhoneNumberMapping(updated);
     await this.ensureDefaultSenderProfiles(updated, data.makeDefault === true, options.installationId);
+
+    if (data.campaignId) {
+      await this.syncCampaignNumberLinkState(organizationId, data.campaignId, 'linked');
+    }
 
     return updated;
   }

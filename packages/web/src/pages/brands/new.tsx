@@ -16,6 +16,10 @@ import {
   Phone,
   Users,
 } from 'lucide-react';
+import {
+  SIGNALMASH_PROVIDER_VERTICAL_LABELS,
+  SIGNALMASH_PROVIDER_VERTICALS,
+} from '@signalmash-connect/shared';
 import { Header } from '@/components/layout/header';
 import { PageShell } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
@@ -34,31 +38,13 @@ const legalForms = [
   { value: 'platform_free_trial', label: 'Platform Free Trial' },
 ] as const;
 
-const verticalTypes = [
-  { value: 'professional_services', label: 'Professional Services' },
-  { value: 'real_estate', label: 'Real Estate' },
-  { value: 'healthcare_and_life_sciences', label: 'Healthcare and Life Sciences' },
-  { value: 'hr_staffing_or_recruitment', label: 'HR, Staffing or Recruitment' },
-  { value: 'energy_and_utilities', label: 'Energy and Utilities' },
-  { value: 'entertainment', label: 'Entertainment' },
-  { value: 'retail_and_consumer_products', label: 'Retail and Consumer Products' },
-  { value: 'transportation_or_logistics', label: 'Transportation or Logistics' },
-  { value: 'agriculture', label: 'Agriculture' },
-  { value: 'insurance', label: 'Insurance' },
-  { value: 'postal_and_delivery', label: 'Postal and Delivery' },
-  { value: 'education', label: 'Education' },
-  { value: 'hospitality_and_travel', label: 'Hospitality and Travel' },
-  { value: 'financial_services', label: 'Financial Services' },
-  { value: 'political', label: 'Political' },
-  { value: 'gambling_and_lottery', label: 'Gambling and Lottery' },
-  { value: 'legal', label: 'Legal' },
-  { value: 'construction_materials_and_trade_services', label: 'Construction, Materials, and Trade Services' },
-  { value: 'non_profit_organization', label: 'Non-profit Organization' },
-  { value: 'manufacturing', label: 'Manufacturing' },
-  { value: 'government_services_and_agencies', label: 'Government Services and Agencies' },
-  { value: 'information_technology_services', label: 'Information Technology Services' },
-  { value: 'media_and_communication', label: 'Media and Communication' },
-] as const;
+const providerVerticalOptions = SIGNALMASH_PROVIDER_VERTICALS.map((value) => ({
+  value,
+  label: SIGNALMASH_PROVIDER_VERTICAL_LABELS[value],
+})) as Array<{
+  value: (typeof SIGNALMASH_PROVIDER_VERTICALS)[number];
+  label: string;
+}>;
 
 const identifierTypes = [
   { value: 'duns', label: 'DUNS' },
@@ -118,7 +104,7 @@ const formSchema = z.object({
   postalCode: z.string().min(1, 'Zip Code is required'),
   country: z.string().min(2, 'Country is required'),
   website: z.string().url('Valid website URL is required'),
-  verticalType: z.enum(verticalTypes.map((item) => item.value) as [string, ...string[]]),
+  verticalType: z.enum(SIGNALMASH_PROVIDER_VERTICALS),
   referenceId: z.string().optional(),
   firstName: z.string().optional(),
   lastName: z.string().optional(),
@@ -196,32 +182,6 @@ const legalFormToProviderEntityType: Record<BrandForm['legalForm'], 'PRIVATE_PRO
   platform_free_trial: 'PRIVATE_PROFIT',
 };
 
-const verticalTypeToProvider: Record<BrandForm['verticalType'], 'RETAIL' | 'HEALTHCARE' | 'FINANCIAL' | 'EDUCATION' | 'HOSPITALITY' | 'REAL_ESTATE' | 'TECHNOLOGY' | 'PROFESSIONAL_SERVICES' | 'OTHER'> = {
-  professional_services: 'PROFESSIONAL_SERVICES',
-  real_estate: 'REAL_ESTATE',
-  healthcare_and_life_sciences: 'HEALTHCARE',
-  hr_staffing_or_recruitment: 'OTHER',
-  energy_and_utilities: 'OTHER',
-  entertainment: 'OTHER',
-  retail_and_consumer_products: 'RETAIL',
-  transportation_or_logistics: 'OTHER',
-  agriculture: 'OTHER',
-  insurance: 'OTHER',
-  postal_and_delivery: 'OTHER',
-  education: 'EDUCATION',
-  hospitality_and_travel: 'HOSPITALITY',
-  financial_services: 'FINANCIAL',
-  political: 'OTHER',
-  gambling_and_lottery: 'OTHER',
-  legal: 'PROFESSIONAL_SERVICES',
-  construction_materials_and_trade_services: 'OTHER',
-  non_profit_organization: 'OTHER',
-  manufacturing: 'OTHER',
-  government_services_and_agencies: 'OTHER',
-  information_technology_services: 'TECHNOLOGY',
-  media_and_communication: 'OTHER',
-};
-
 const selectClassName =
   'h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 shadow-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50';
 
@@ -252,7 +212,7 @@ export function NewBrandPage() {
       registrationCountry: 'US',
       taxIssuingCountry: 'US',
       legalForm: 'private_company',
-      verticalType: 'professional_services',
+      verticalType: 'PROFESSIONAL',
       businessIdentifierType: 'duns',
       email: '',
       brandRelationship: 'BASIC_ACCOUNT',
@@ -329,7 +289,7 @@ export function NewBrandPage() {
         ipAddress: '',
         brandRelationship: data.brandRelationship,
         website: data.website.trim(),
-        vertical: verticalTypeToProvider[data.verticalType],
+        vertical: data.verticalType,
         altBusinessId: data.businessIdentifierValue?.trim() || 'NONE',
         altBusinessIdType: data.businessIdentifierType?.toUpperCase() || 'NONE',
         referenceId: data.referenceId?.trim() || 'NONE',
@@ -568,7 +528,7 @@ export function NewBrandPage() {
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">{requiredLabel('Vertical Type')}</label>
                         <select {...register('verticalType')} className={selectClassName}>
-                          {verticalTypes.map((option) => (
+                          {providerVerticalOptions.map((option) => (
                             <option key={option.value} value={option.value}>
                               {option.label}
                             </option>

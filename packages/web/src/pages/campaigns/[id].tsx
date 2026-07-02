@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Megaphone,
   ArrowLeft,
@@ -30,6 +30,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  CAMPAIGN_SUB_USE_CASE_VALUES,
+  CAMPAIGN_USE_CASES,
+  CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES,
+  CAMPAIGN_USE_CASE_VALUES,
+} from '@signalmash-connect/shared';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
@@ -39,6 +45,24 @@ interface PhoneNumber {
   phoneNumber: string;
   formattedNumber: string;
   status: string;
+  friendlyName?: string | null;
+  campaign?: {
+    id: string;
+    name: string;
+    status: string;
+  } | null;
+}
+
+interface AvailableNumber {
+  phoneNumber: string;
+  formattedNumber: string;
+  areaCode: string;
+  capabilities: {
+    sms: boolean;
+    mms: boolean;
+    voice: boolean;
+  };
+  monthlyPrice: number;
 }
 
 interface Campaign {
@@ -77,6 +101,8 @@ interface Campaign {
   tcrCampaignId: string | null;
   providerStatus: string | null;
   providerMessage: string | null;
+  numberLinkStatus: 'none' | 'requested' | 'checkout_required' | 'linked' | 'failed';
+  numberLinkError: string | null;
   status: 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'suspended' | 'expired';
   rejectionReason: string | null;
   dailyMessageLimit: number | null;
@@ -96,6 +122,17 @@ interface BrandSummary {
   displayName: string;
 }
 
+interface SubscriptionSummary {
+  subscription: {
+    plan: string | null;
+    phoneNumbersIncluded: number;
+  };
+  usage: {
+    activePhoneNumbers: number;
+    phoneNumbersIncluded: number;
+  };
+}
+
 const statusConfig = {
   draft: { label: 'Draft', icon: FileText, variant: 'secondary' as const },
   pending_approval: { label: 'Pending Approval', icon: Clock, variant: 'warning' as const },
@@ -105,36 +142,51 @@ const statusConfig = {
   expired: { label: 'Expired', icon: AlertCircle, variant: 'destructive' as const },
 };
 
-const useCaseOptions = [
-  'two_factor_auth',
-  'account_notifications',
-  'customer_care',
-  'delivery_notifications',
-  'fraud_alerts',
-  'higher_education',
-  'low_volume',
-  'marketing',
-  'mixed',
-  'polling_voting',
-  'public_service_announcement',
-  'security_alerts',
-] as const;
+const useCaseOptions = CAMPAIGN_USE_CASE_VALUES;
+const subUseCaseOptions = CAMPAIGN_SUB_USE_CASE_VALUES.map((value) => ({
+  value,
+  label: CAMPAIGN_USE_CASES[value],
+})) as Array<{
+  value: (typeof CAMPAIGN_SUB_USE_CASE_VALUES)[number];
+  label: string;
+}>;
+const useCasesRequiringSubUsecases = new Set<string>(CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES);
+
+function formatUseCaseLabel(value: string): string {
+  const key = value in CAMPAIGN_USE_CASES ? value : value.toLowerCase();
+  return CAMPAIGN_USE_CASES[key] ?? value.replace(/_/g, ' ');
+}
 
 export function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [brand, setBrand] = useState<BrandSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showSubmitDialog, setShowSubmitDialog] = useState(false);
+  const [numberFlowMode, setNumberFlowMode] = useState<'none' | 'existing' | 'buy_new'>('none');
+  const [existingNumbers, setExistingNumbers] = useState<PhoneNumber[]>([]);
+  const [selectedExistingNumberId, setSelectedExistingNumberId] = useState('');
+  const [numberFriendlyName, setNumberFriendlyName] = useState('');
+  const [numberSearch, setNumberSearch] = useState({
+    state: '',
+    areaCode: '',
+    contains: '',
+  });
+  const [availableNumbers, setAvailableNumbers] = useState<AvailableNumber[]>([]);
+  const [selectedAvailableNumber, setSelectedAvailableNumber] = useState('');
+  const [isSearchingNumbers, setIsSearchingNumbers] = useState(false);
+  const [subscriptionSummary, setSubscriptionSummary] = useState<SubscriptionSummary | null>(null);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editForm, setEditForm] = useState({
     name: '',
     description: '',
     useCase: 'marketing',
-    subUsecases: '',
+    subUsecases: [] as string[],
     messageFlow: '',
     referenceId: '',
     tags: '',
@@ -160,6 +212,8 @@ export function CampaignDetailPage() {
     optOutMessage: '',
     helpMessage: '',
   });
+  const requiresEditSubUsecases = useCasesRequiringSubUsecases.has(editForm.useCase);
+  const minimumEditSubUsecases = editForm.useCase === 'mixed' ? 2 : requiresEditSubUsecases ? 1 : 0;
 
   const loadCampaign = async () => {
     if (!id) return;
@@ -191,23 +245,203 @@ export function CampaignDetailPage() {
     }
   };
 
+  const loadNumberSetupData = async () => {
+    try {
+      const [numbersResponse, billingResponse] = await Promise.all([
+        api.getPhoneNumbers({ status: 'active', limit: 100 }),
+        api.getSubscriptionBillingSummary(),
+      ]);
+
+      if (numbersResponse.success && numbersResponse.data) {
+        setExistingNumbers(numbersResponse.data);
+      }
+
+      if (billingResponse.success && billingResponse.data) {
+        setSubscriptionSummary(billingResponse.data);
+      }
+    } catch (error) {
+      console.error('Failed to load campaign number setup data:', error);
+    }
+  };
+
   useEffect(() => {
     loadCampaign();
   }, [id]);
 
+  useEffect(() => {
+    loadNumberSetupData();
+  }, [id]);
+
+  useEffect(() => {
+    const handlePhoneCheckoutReturn = async () => {
+      if (!id) return;
+
+      const checkoutStatus = searchParams.get('number_checkout');
+      const sessionId = searchParams.get('session_id');
+
+      if (checkoutStatus === 'success' && sessionId) {
+        try {
+          const response = await api.completePhoneNumberCheckout({ sessionId });
+          if (response.success && response.data && 'pending' in response.data && response.data.pending) {
+            notify.success('Checkout completed', response.data.message);
+          } else {
+            notify.success('Number linked', 'The phone number purchase completed for this campaign.');
+          }
+          await Promise.all([loadCampaign(), loadNumberSetupData()]);
+        } catch (error) {
+          console.error('Failed to complete campaign number checkout:', error);
+          notify.error('Number checkout failed', 'The Stripe checkout completed, but the phone number could not be linked automatically.');
+        } finally {
+          window.history.replaceState({}, '', `/campaigns/${id}`);
+        }
+      } else if (checkoutStatus === 'cancelled') {
+        notify.error('Checkout cancelled', 'The campaign number purchase was not completed.');
+        window.history.replaceState({}, '', `/campaigns/${id}`);
+      }
+    };
+
+    handlePhoneCheckoutReturn();
+  }, [id, searchParams]);
+
+  const openSubmitDialog = async () => {
+    setNumberFlowMode('none');
+    setSelectedExistingNumberId('');
+    setNumberFriendlyName('');
+    setAvailableNumbers([]);
+    setSelectedAvailableNumber('');
+    setShowSubmitDialog(true);
+    await loadNumberSetupData();
+  };
+
+  const handleSearchNumbers = async () => {
+    if (!numberSearch.state && !numberSearch.areaCode && !numberSearch.contains) {
+      notify.error('Search required', 'Enter a state, area code, or digit pattern before searching.');
+      return;
+    }
+
+    setIsSearchingNumbers(true);
+    try {
+      const response = await api.searchAvailableNumbers({
+        state: numberSearch.state || undefined,
+        areaCode: numberSearch.areaCode || undefined,
+        contains: numberSearch.contains || undefined,
+        limit: 20,
+      });
+
+      if (response.success && response.data) {
+        setAvailableNumbers(response.data);
+      }
+    } catch (error) {
+      console.error('Failed to search numbers for campaign:', error);
+      notify.error('Number search failed', error instanceof Error ? error.message : 'Unable to load available numbers.');
+    } finally {
+      setIsSearchingNumbers(false);
+    }
+  };
+
+  const buildNumberLinkIntent = () => {
+    if (numberFlowMode === 'none') {
+      return undefined;
+    }
+
+    if (numberFlowMode === 'existing') {
+      if (!selectedExistingNumberId) {
+        notify.error('Number required', 'Select an active number to link to this campaign.');
+        return null;
+      }
+
+      return {
+        mode: 'existing' as const,
+        phoneNumberId: selectedExistingNumberId,
+        friendlyName: numberFriendlyName || undefined,
+      };
+    }
+
+    if (!selectedAvailableNumber) {
+      notify.error('Number required', 'Select an available 10DLC number to buy for this campaign.');
+      return null;
+    }
+
+    return {
+      mode: 'buy_new' as const,
+      phoneNumber: selectedAvailableNumber,
+      friendlyName: numberFriendlyName || undefined,
+    };
+  };
+
+  const handleNumberLinkResponse = async (responseData: any, successMessage: string) => {
+    if (responseData?.numberLinkAction?.mode === 'checkout' && responseData.numberLinkAction.checkoutUrl) {
+      window.location.href = responseData.numberLinkAction.checkoutUrl;
+      return;
+    }
+
+    await Promise.all([loadCampaign(), loadNumberSetupData()]);
+
+    if (responseData?.numberLinkAction?.mode === 'linked') {
+      notify.success(successMessage, 'The campaign and phone number are now linked.');
+      return;
+    }
+
+    if (responseData?.numberLinkAction?.mode === 'pending_provider') {
+      notify.success(successMessage, responseData.numberLinkAction.message);
+      return;
+    }
+
+    if (responseData?.numberLinkAction?.mode === 'failed') {
+      notify.error('Number link needs attention', responseData.numberLinkAction.message);
+      return;
+    }
+
+    notify.success(successMessage, 'The campaign request was saved successfully.');
+  };
+
   const handleSubmitForApproval = async () => {
     if (!campaign) return;
 
+    const numberLinkIntent = buildNumberLinkIntent();
+    if (numberLinkIntent === null) {
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      const response = await api.submitCampaign(campaign.id);
+      const response = await api.submitCampaign(campaign.id, numberLinkIntent ? { numberLinkIntent } : undefined);
       if (response.success && response.data) {
-        await loadCampaign();
-        notify.success('Campaign submitted', 'The campaign was submitted to Signalmash. Approval can take time, so refresh the provider state while it is in review.');
+        setShowSubmitDialog(false);
+        await handleNumberLinkResponse(
+          response.data,
+          'Campaign submitted'
+        );
       }
     } catch (error) {
       console.error('Failed to submit campaign:', error);
       notify.error('Submission failed', 'The campaign could not be submitted for approval.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleLinkPhoneNumber = async () => {
+    if (!campaign) return;
+
+    const numberLinkIntent = buildNumberLinkIntent();
+    if (!numberLinkIntent) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await api.linkCampaignPhoneNumber(campaign.id, numberLinkIntent);
+      if (response.success && response.data) {
+        setShowSubmitDialog(false);
+        await handleNumberLinkResponse(
+          response.data,
+          'Campaign number link updated'
+        );
+      }
+    } catch (error) {
+      console.error('Failed to link campaign phone number:', error);
+      notify.error('Number link failed', error instanceof Error ? error.message : 'The campaign phone number could not be linked.');
     } finally {
       setIsSubmitting(false);
     }
@@ -238,7 +472,7 @@ export function CampaignDetailPage() {
       name: campaign.name,
       description: campaign.description,
       useCase: campaign.useCase,
-      subUsecases: campaign.subUsecases.join(', '),
+      subUsecases: campaign.subUsecases,
       messageFlow: campaign.messageFlow,
       referenceId: campaign.referenceId ?? '',
       tags: campaign.tags.join(', '),
@@ -281,7 +515,7 @@ export function CampaignDetailPage() {
         name: editForm.name,
         description: editForm.description,
         useCase: editForm.useCase,
-        subUsecases: editForm.subUsecases.split(',').map((value) => value.trim()).filter(Boolean),
+        subUsecases: requiresEditSubUsecases ? editForm.subUsecases : [],
         messageFlow: editForm.messageFlow,
         referenceId: editForm.referenceId || undefined,
         tags: editForm.tags.split(',').map((value) => value.trim()).filter(Boolean),
@@ -321,6 +555,14 @@ export function CampaignDetailPage() {
     }
   };
 
+  const toggleEditSubUsecase = (value: (typeof CAMPAIGN_SUB_USE_CASE_VALUES)[number]) => {
+    const next = editForm.subUsecases.includes(value)
+      ? editForm.subUsecases.filter((item) => item !== value)
+      : [...editForm.subUsecases, value];
+
+    setEditForm({ ...editForm, subUsecases: next });
+  };
+
   if (isLoading) {
     return (
       <div>
@@ -355,7 +597,7 @@ export function CampaignDetailPage() {
     <div>
       <Header
         title={campaign.name}
-        subtitle={`Use case: ${campaign.useCase.replace(/_/g, ' ')}`}
+        subtitle={`Use case: ${formatUseCaseLabel(campaign.useCase)}`}
       />
 
       <PageShell>
@@ -409,11 +651,11 @@ export function CampaignDetailPage() {
               )}
               {campaign.status === 'draft' && (
                 <Button
-                  onClick={handleSubmitForApproval}
+                  onClick={openSubmitDialog}
                   isLoading={isSubmitting}
                   leftIcon={<Send className="h-4 w-4" />}
                 >
-                  Submit for Approval
+                  Register Campaign
                 </Button>
               )}
               {campaign.signalmashCampaignId && (
@@ -437,33 +679,31 @@ export function CampaignDetailPage() {
               {campaign.status === 'draft' ? (
                 <>
                   <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">
-                    Review the campaign and submit it for approval
+                    Review the campaign, then register it with an optional sender number
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                     This campaign is still editable. Once the use case, description, sample messages,
-                    and compliance wording are correct, submit it to Signalmash for approval.
+                    and compliance wording are correct, submit it to Signalmash and optionally link an existing number or buy a new 10DLC sender in the same flow.
                   </p>
                 </>
               ) : null}
               {campaign.status === 'pending_approval' ? (
                 <>
                   <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">
-                    Wait for campaign approval before provisioning numbers
+                    Campaign review is in progress
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                    The campaign is in review with Signalmash/TCR. Number purchase and assignment
-                    should wait until approval is complete or the campaign comes back with corrections to make.
+                    Signalmash/TCR is still reviewing this campaign. If a new number was selected during registration and provider provisioning is not ready yet, the app will retry it automatically after approval.
                   </p>
                 </>
               ) : null}
               {campaign.status === 'approved' ? (
                 <>
                   <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">
-                    Campaign approved. Assign or buy sender numbers next
+                    Campaign approved. Manage the sender number from this page
                   </h3>
                   <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                    The campaign is ready for number assignment. Move into phone number management
-                    to buy a number or attach an existing sender to this campaign.
+                    This campaign is ready for sender assignment. Link an existing active number or buy a new 10DLC long-code number directly against this campaign.
                   </p>
                 </>
               ) : null}
@@ -486,9 +726,9 @@ export function CampaignDetailPage() {
                   Edit Campaign
                 </Button>
               )}
-              {campaign.status === 'approved' ? (
-                <Button onClick={() => navigate('/phone-numbers')} leftIcon={<Phone className="h-4 w-4" />}>
-                  Manage Numbers
+              {['pending_approval', 'approved'].includes(campaign.status) ? (
+                <Button onClick={openSubmitDialog} leftIcon={<Phone className="h-4 w-4" />}>
+                  {campaign.phoneNumbers.length > 0 ? 'Update Number Link' : 'Link Phone Number'}
                 </Button>
               ) : null}
             </div>
@@ -503,7 +743,7 @@ export function CampaignDetailPage() {
                 <div className="mt-5 grid gap-4 md:grid-cols-2">
                   <div>
                     <p className="text-sm text-slate-500 dark:text-slate-400">Use Case</p>
-                    <p className="mt-1 font-medium capitalize text-slate-950 dark:text-slate-50">{campaign.useCase.replace(/_/g, ' ')}</p>
+                    <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">{formatUseCaseLabel(campaign.useCase)}</p>
                   </div>
                   <div>
                     <p className="text-sm text-slate-500 dark:text-slate-400">Daily Message Limit</p>
@@ -597,7 +837,11 @@ export function CampaignDetailPage() {
                   </div>
                   <div>
                     <p className="text-sm text-slate-500 dark:text-slate-400">Sub-usecases</p>
-                    <p className="mt-1 text-sm leading-6 text-slate-700 dark:text-slate-300">{campaign.subUsecases.length ? campaign.subUsecases.join(', ') : 'None'}</p>
+                    <p className="mt-1 text-sm leading-6 text-slate-700 dark:text-slate-300">
+                      {campaign.subUsecases.length
+                        ? campaign.subUsecases.map((value) => formatUseCaseLabel(value)).join(', ')
+                        : 'None'}
+                    </p>
                   </div>
                   <div>
                     <p className="text-sm text-slate-500 dark:text-slate-400">Privacy Policy</p>
@@ -638,6 +882,23 @@ export function CampaignDetailPage() {
                   <Phone className="h-5 w-5" />
                   Assigned Phone Numbers
                 </h3>
+
+                {campaign.numberLinkStatus !== 'none' && (
+                  <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+                    <p className="font-medium text-slate-950 dark:text-slate-50">
+                      Number link status: {campaign.numberLinkStatus.replace(/_/g, ' ')}
+                    </p>
+                    <p className="mt-1">
+                      {campaign.numberLinkError
+                        ? campaign.numberLinkError
+                        : campaign.numberLinkStatus === 'linked'
+                          ? 'A sender number is linked to this campaign.'
+                          : campaign.numberLinkStatus === 'checkout_required'
+                            ? 'This campaign is waiting on the extra-number Stripe checkout before the new number can be provisioned.'
+                            : 'A number selection is saved for this campaign and will be retried automatically when provider conditions are met.'}
+                    </p>
+                  </div>
+                )}
 
                 {campaign.phoneNumbers.length === 0 ? (
                   <div className="mt-5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
@@ -780,6 +1041,181 @@ export function CampaignDetailPage() {
         </div>
       </PageShell>
 
+      <Dialog open={showSubmitDialog} onOpenChange={setShowSubmitDialog}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              {campaign.status === 'draft' ? 'Register Campaign' : 'Link Campaign Number'}
+            </DialogTitle>
+            <DialogDescription>
+              {campaign.status === 'draft'
+                ? 'Submit this campaign to Signalmash and optionally link an existing sender or buy a new 10DLC number.'
+                : 'Link an existing active sender or buy a new 10DLC number for this campaign.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid max-h-[70vh] gap-5 overflow-y-auto pr-1">
+            {subscriptionSummary && (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+                <p className="font-medium text-slate-950 dark:text-slate-50">
+                  Plan: {subscriptionSummary.subscription.plan || 'No active plan'}
+                </p>
+                <p className="mt-1">
+                  Active numbers: {subscriptionSummary.usage.activePhoneNumbers} / {subscriptionSummary.usage.phoneNumbersIncluded}
+                </p>
+              </div>
+            )}
+
+            <div className="grid gap-3 md:grid-cols-3">
+              {[
+                ['none', 'No number now', 'Register the campaign first and handle number setup later.'],
+                ['existing', 'Use existing number', 'Link an active number that already belongs to this organization.'],
+                ['buy_new', 'Buy new number', 'Search 10DLC long-code inventory and buy a new sender.'],
+              ].map(([value, label, helper]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setNumberFlowMode(value as 'none' | 'existing' | 'buy_new')}
+                  className={`rounded-2xl border px-4 py-4 text-left transition ${
+                    numberFlowMode === value
+                      ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:border-slate-700'
+                  }`}
+                >
+                  <p className="font-medium">{label}</p>
+                  <p className={`mt-2 text-sm ${numberFlowMode === value ? 'text-white/80 dark:text-slate-700' : 'text-slate-500 dark:text-slate-400'}`}>
+                    {helper}
+                  </p>
+                </button>
+              ))}
+            </div>
+
+            {numberFlowMode === 'existing' && (
+              <div className="grid gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Existing Active Number</label>
+                  <select
+                    value={selectedExistingNumberId}
+                    onChange={(e) => setSelectedExistingNumberId(e.target.value)}
+                    className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
+                  >
+                    <option value="">Select a number</option>
+                    {existingNumbers.map((number) => (
+                      <option key={number.id} value={number.id}>
+                        {number.formattedNumber} {number.campaign ? `- currently ${number.campaign.name}` : '- unassigned'}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Friendly Name (optional)</label>
+                  <Input
+                    value={numberFriendlyName}
+                    onChange={(e) => setNumberFriendlyName(e.target.value)}
+                    placeholder="Support line, onboarding, default sender"
+                  />
+                </div>
+              </div>
+            )}
+
+            {numberFlowMode === 'buy_new' && (
+              <div className="grid gap-5">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">State</label>
+                    <Input
+                      value={numberSearch.state}
+                      onChange={(e) => setNumberSearch((current) => ({ ...current, state: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2) }))}
+                      placeholder="CA"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Area Code</label>
+                    <Input
+                      value={numberSearch.areaCode}
+                      onChange={(e) => setNumberSearch((current) => ({ ...current, areaCode: e.target.value.replace(/\D/g, '').slice(0, 3) }))}
+                      placeholder="415"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Contains</label>
+                    <Input
+                      value={numberSearch.contains}
+                      onChange={(e) => setNumberSearch((current) => ({ ...current, contains: e.target.value.replace(/\D/g, '').slice(0, 7) }))}
+                      placeholder="1234"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-slate-950 dark:text-slate-50">10DLC inventory only</p>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                      Toll-free and short-code inventory is excluded from this search.
+                    </p>
+                  </div>
+                  <Button variant="outline" onClick={handleSearchNumbers} isLoading={isSearchingNumbers}>
+                    Search Numbers
+                  </Button>
+                </div>
+
+                <div className="space-y-3">
+                  {availableNumbers.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+                      Search provider inventory to select a 10DLC long-code sender.
+                    </div>
+                  ) : (
+                    availableNumbers.map((number) => (
+                      <button
+                        key={number.phoneNumber}
+                        type="button"
+                        onClick={() => setSelectedAvailableNumber(number.phoneNumber)}
+                        className={`flex w-full items-center justify-between rounded-2xl border px-4 py-4 text-left transition ${
+                          selectedAvailableNumber === number.phoneNumber
+                            ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:border-slate-700'
+                        }`}
+                      >
+                        <div>
+                          <p className="font-medium">{number.formattedNumber}</p>
+                          <p className={`mt-1 text-sm ${selectedAvailableNumber === number.phoneNumber ? 'text-white/80 dark:text-slate-700' : 'text-slate-500 dark:text-slate-400'}`}>
+                            {number.phoneNumber} · Area code {number.areaCode}
+                          </p>
+                        </div>
+                        <Badge variant={selectedAvailableNumber === number.phoneNumber ? 'success' : 'secondary'}>
+                          {number.monthlyPrice ? `$${number.monthlyPrice.toFixed(2)}/mo` : 'Provider rate'}
+                        </Badge>
+                      </button>
+                    ))
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Friendly Name (optional)</label>
+                  <Input
+                    value={numberFriendlyName}
+                    onChange={(e) => setNumberFriendlyName(e.target.value)}
+                    placeholder="Primary sender, customer care, onboarding"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowSubmitDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={campaign.status === 'draft' ? handleSubmitForApproval : handleLinkPhoneNumber}
+              isLoading={isSubmitting}
+            >
+              {campaign.status === 'draft' ? 'Submit Campaign' : 'Save Number Link'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
@@ -798,11 +1234,17 @@ export function CampaignDetailPage() {
               <label className="text-sm font-medium">Use Case</label>
               <select
                 value={editForm.useCase}
-                onChange={(e) => setEditForm({ ...editForm, useCase: e.target.value })}
+                onChange={(e) =>
+                  setEditForm({
+                    ...editForm,
+                    useCase: e.target.value,
+                    subUsecases: useCasesRequiringSubUsecases.has(e.target.value) ? editForm.subUsecases : [],
+                  })
+                }
                 className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
               >
                 {useCaseOptions.map((option) => (
-                  <option key={option} value={option}>{option.replace(/_/g, ' ')}</option>
+                  <option key={option} value={option}>{formatUseCaseLabel(option)}</option>
                 ))}
               </select>
             </div>
@@ -825,7 +1267,44 @@ export function CampaignDetailPage() {
             <div className="grid gap-5 md:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Sub-usecases</label>
-                <Input value={editForm.subUsecases} onChange={(e) => setEditForm({ ...editForm, subUsecases: e.target.value })} />
+                {requiresEditSubUsecases ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {subUseCaseOptions.map((option) => {
+                        const checked = editForm.subUsecases.includes(option.value);
+
+                        return (
+                          <label
+                            key={option.value}
+                            className={`cursor-pointer rounded-2xl border px-4 py-3 transition ${
+                              checked
+                                ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950'
+                                : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-700'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleEditSubUsecase(option.value)}
+                              className="sr-only"
+                            />
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="font-medium">{option.label}</span>
+                              {checked ? <CheckCircle className="h-4 w-4 shrink-0" /> : null}
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Select at least {minimumEditSubUsecases} sub-use-case{minimumEditSubUsecases === 1 ? '' : 's'} for this campaign type.
+                    </p>
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+                    Standard campaign types are submitted under their primary use case automatically.
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Reference ID</label>

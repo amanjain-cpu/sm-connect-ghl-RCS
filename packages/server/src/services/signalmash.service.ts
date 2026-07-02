@@ -8,7 +8,12 @@ import { prisma } from '../config/database.js';
 import { decrypt } from '../utils/crypto.js';
 import { ExternalServiceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { retry } from '@signalmash-connect/shared';
+import {
+  CAMPAIGN_SUB_USE_CASE_VALUES,
+  CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES,
+  retry,
+} from '@signalmash-connect/shared';
+import { createHash } from 'crypto';
 
 // Settings keys (must match admin.service.ts)
 const SETTINGS_KEYS = {
@@ -52,6 +57,7 @@ interface BrandRegistrationResult {
   brandId: string;
   tcrBrandId?: string;
   status: string;
+  providerCode?: string;
   verificationScore?: number;
   message?: string;
 }
@@ -59,9 +65,14 @@ interface BrandRegistrationResult {
 interface RawBrandRegistrationResult {
   brandId?: string;
   tcrBrandId?: string;
+  tcr_brand_id?: string;
   status?: string | number;
   verificationScore?: number;
+  verification_score?: number;
+  identityStatus?: string;
+  identity_status?: string;
   message?: string;
+  data?: unknown;
 }
 
 interface BrandStatusResult {
@@ -71,27 +82,27 @@ interface BrandStatusResult {
   verificationScore?: number;
   rejectionReason?: string;
   referenceId?: string;
+  providerCode?: string;
+  providerMessage?: string;
 }
 
 interface RawBrandStatusResult {
   status?: string | number;
+  message?: string;
   brandId?: string;
   tcrBrandId?: string;
+  tcr_brand_id?: string;
   verificationScore?: number;
+  verification_score?: number;
   rejectionReason?: string;
+  rejection_reason?: string;
   referenceId?: string;
+  reference_id?: string;
+  identityStatus?: string;
+  identity_status?: string;
   data?: {
-    status?: string | number;
-    brandId?: string;
-    tcrBrandId?: string;
-    tcr_brand_id?: string;
-    verificationScore?: number;
-    verification_score?: number;
-    rejectionReason?: string;
-    rejection_reason?: string;
-    referenceId?: string;
-    reference_id?: string;
-  };
+    [key: string]: unknown;
+  } | Array<Record<string, unknown>>;
 }
 
 interface CampaignRegistrationInput {
@@ -131,6 +142,7 @@ interface CampaignRegistrationResult {
   campaignId: string;
   tcrCampaignId?: string;
   status: string;
+  providerCode?: string;
   dailyMessageLimit?: number;
   messagesPerSecond?: number;
   message?: string;
@@ -138,36 +150,87 @@ interface CampaignRegistrationResult {
 
 interface RawCampaignRegistrationResult {
   campaignId?: string;
+  campaign_key?: string;
+  sm_reference_no?: string;
   tcrCampaignId?: string;
+  tcr_campaign_id?: string;
   status?: string | number;
   dailyMessageLimit?: number;
+  daily_message_limit?: number;
   messagesPerSecond?: number;
+  messages_per_second?: number;
   message?: string;
+  campaignStatus?: string;
+  campaign_status?: string;
+  data?: unknown;
 }
 
-interface RawCampaignStatusResult {
-  status?: string | number;
-  campaignId?: string;
+interface CampaignStatusResult {
+  status: string;
+  signalmashCampaignId?: string;
   tcrCampaignId?: string;
   rejectionReason?: string;
   dailyMessageLimit?: number;
   messagesPerSecond?: number;
+  providerCode?: string;
+  providerMessage?: string;
+}
+
+interface RawCampaignStatusResult {
+  status?: string | number;
+  message?: string;
+  campaignId?: string;
+  tcrCampaignId?: string;
+  tcr_campaign_id?: string;
+  rejectionReason?: string;
+  rejection_reason?: string;
+  dailyMessageLimit?: number;
+  daily_message_limit?: number;
+  messagesPerSecond?: number;
+  messages_per_second?: number;
+  campaignStatus?: string;
+  campaign_status?: string;
   data?: {
-    status?: string | number;
-    campaignId?: string;
-    tcrCampaignId?: string;
-    tcr_campaign_id?: string;
-    rejectionReason?: string;
-    rejection_reason?: string;
-    dailyMessageLimit?: number;
-    daily_message_limit?: number;
-    messagesPerSecond?: number;
-    messages_per_second?: number;
-  };
+    [key: string]: unknown;
+  } | Array<Record<string, unknown>>;
 }
 
 interface CampaignUpdateInput extends CampaignRegistrationInput {
   campaignId: string;
+}
+
+interface RawCollectionResult {
+  status?: string | number;
+  message?: string;
+  data?: unknown;
+}
+
+interface SignalmashListedBrand {
+  brandId: string;
+  displayName?: string;
+  status?: string;
+}
+
+interface SignalmashListedCampaign {
+  campaignId: string;
+  brandId?: string;
+  status?: string;
+}
+
+interface SignalmashCampaignQualificationResult {
+  qualified: boolean;
+  status: string;
+  message?: string;
+  providerCode?: string;
+  eligibleMnoIds?: string[];
+  minimumSampleMessages?: number;
+  requiresSubscriberOptin?: boolean;
+  requiresSubscriberOptout?: boolean;
+  requiresSubscriberHelp?: boolean;
+  disallowEmbeddedLink?: boolean;
+  disallowEmbeddedPhone?: boolean;
+  restrictions?: Record<string, unknown>;
+  raw: Record<string, unknown>;
 }
 
 interface SendMessageInput {
@@ -256,11 +319,68 @@ export interface SignalmashConnectionDiagnostic {
   status: number | null;
   ok: boolean;
   responseBody: string;
+  apiBaseUrl?: string;
+  tokenFingerprint?: string;
+  balanceStatus?: number | null;
+  balanceBody?: string;
+  sampleBrandIds?: string[];
+  sampleCampaignIds?: string[];
+  brandLookup?: {
+    requestedId: string;
+    found: boolean;
+    status?: string;
+    message?: string;
+  };
+  campaignLookup?: {
+    requestedId: string;
+    found: boolean;
+    status?: string;
+    message?: string;
+  };
 }
 
 export class SignalmashService {
   private static readonly PURCHASE_CONNECTION_KEY =
     'XI-ohLkyE_WkXgU-ivW0HNoR9p1-Fg';
+  private readonly campaignSubUseCaseValues = new Set<string>(CAMPAIGN_SUB_USE_CASE_VALUES);
+  private readonly campaignUseCasesRequiringSubUseCases = new Set<string>(
+    CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES
+  );
+
+  private readonly brandLifecycleStatuses = new Set([
+    'SELF_DECLARED',
+    'UNVERIFIED',
+    'VERIFIED',
+    'VETTED_VERIFIED',
+    'REJECTED',
+    'DECLINED',
+    'FAILED',
+    'SUSPENDED',
+    'PENDING',
+    'PENDING_VERIFICATION',
+    'IN_REVIEW',
+    'REVIEW',
+    'NEEDS_INFO',
+    'MANUAL_REVIEW',
+  ]);
+
+  private readonly campaignLifecycleStatuses = new Set([
+    'APPROVED',
+    'ACTIVE',
+    'VERIFIED',
+    'REJECTED',
+    'DECLINED',
+    'FAILED',
+    'SUSPENDED',
+    'EXPIRED',
+    'PENDING',
+    'PENDING_APPROVAL',
+    'SUBMITTED',
+    'IN_REVIEW',
+    'REVIEW',
+    'MANUAL_REVIEW',
+    'NEEDS_INFO',
+  ]);
 
   private extractResponseMessage(responseText: string, fallback: string): string {
     const trimmed = responseText.trim();
@@ -307,23 +427,269 @@ export class SignalmashService {
     return JSON.parse(responseText) as T;
   }
 
+  private asRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  }
+
+  private asRecordArray(value: unknown): Record<string, unknown>[] {
+    if (Array.isArray(value)) {
+      return value.filter(
+        (item): item is Record<string, unknown> =>
+          !!item && typeof item === 'object' && !Array.isArray(item)
+      );
+    }
+
+    const record = this.asRecord(value);
+    return record ? [record] : [];
+  }
+
+  private pickString(...values: unknown[]): string | undefined {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        return value.trim();
+      }
+
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return String(value);
+      }
+    }
+
+    return undefined;
+  }
+
+  private pickNumber(...values: unknown[]): number | undefined {
+    for (const value of values) {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+      }
+
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private normalizeProviderCode(value: unknown): string | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+
+    return undefined;
+  }
+
+  private normalizeLifecycleCandidate(value: unknown): string | undefined {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      return undefined;
+    }
+
+    return value.trim().replace(/[\s-]+/g, '_').toUpperCase();
+  }
+
+  private resolveBrandLifecycleStatus(
+    detail: Record<string, unknown> | null,
+    result?: Pick<RawBrandRegistrationResult & RawBrandStatusResult, 'status' | 'identityStatus' | 'identity_status'>,
+    fallback = 'PENDING_VERIFICATION'
+  ): string {
+    const candidates = [
+      detail?.identityStatus,
+      detail?.identity_status,
+      detail?.status,
+      result?.identityStatus,
+      result?.identity_status,
+      result?.status,
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizeLifecycleCandidate(candidate);
+      if (normalized && this.brandLifecycleStatuses.has(normalized)) {
+        return normalized;
+      }
+    }
+
+    return fallback;
+  }
+
+  private resolveCampaignLifecycleStatus(
+    detail: Record<string, unknown> | null,
+    result?: Pick<RawCampaignRegistrationResult & RawCampaignStatusResult, 'status' | 'campaignStatus' | 'campaign_status'>,
+    fallback = 'PENDING_APPROVAL'
+  ): string {
+    const candidates = [
+      detail?.campaignStatus,
+      detail?.campaign_status,
+      detail?.approvalStatus,
+      detail?.approval_status,
+      detail?.status,
+      result?.campaignStatus,
+      result?.campaign_status,
+      result?.status,
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizeLifecycleCandidate(candidate);
+      if (normalized && this.campaignLifecycleStatuses.has(normalized)) {
+        return normalized;
+      }
+    }
+
+    return fallback;
+  }
+
+  private normalizeProviderMessage(message?: string): string | undefined {
+    if (!message?.trim()) {
+      return undefined;
+    }
+
+    if (/fetched successfully/i.test(message)) {
+      return undefined;
+    }
+
+    return message.trim();
+  }
+
+  private responseSignalsNoResult(status: unknown, message?: string): boolean {
+    const numericStatus = this.pickNumber(status);
+    if (numericStatus !== undefined && numericStatus >= 400) {
+      return true;
+    }
+
+    return typeof message === 'string' && /no result found/i.test(message);
+  }
+
+  private brandDetailFromStatusResult(result: RawBrandStatusResult): Record<string, unknown> | null {
+    const records = this.asRecordArray(result.data);
+    if (records.length > 0) {
+      return records[0];
+    }
+
+    return this.asRecord(result.data);
+  }
+
+  private campaignDetailFromStatusResult(result: RawCampaignStatusResult): Record<string, unknown> | null {
+    const records = this.asRecordArray(result.data);
+    if (records.length > 0) {
+      return records[0];
+    }
+
+    return this.asRecord(result.data);
+  }
+
+  private tokenFingerprint(apiKey: string): string {
+    const digest = createHash('sha256').update(apiKey).digest('hex');
+    return `${digest.slice(0, 8)}...${digest.slice(-6)}`;
+  }
+
+  private normalizeCampaignUseCaseKey(useCase: string): string {
+    const normalized = useCase.trim().replace(/[\s-]+/g, '_').toLowerCase();
+    const aliases: Record<string, string> = {
+      '2fa': 'two_factor_auth',
+      account_notification: 'account_notifications',
+      delivery_notification: 'delivery_notifications',
+      fraud_alert: 'fraud_alerts',
+      security_alert: 'security_alerts',
+    };
+
+    return aliases[normalized] ?? normalized;
+  }
+
   private mapCampaignUseCase(useCase: string): string {
     const mappings: Record<string, string> = {
       two_factor_auth: '2FA',
-      account_notifications: 'ACCOUNT_NOTIFICATIONS',
+      account_notifications: 'ACCOUNT_NOTIFICATION',
       customer_care: 'CUSTOMER_CARE',
-      delivery_notifications: 'DELIVERY_NOTIFICATIONS',
-      fraud_alerts: 'FRAUD_ALERTS',
+      delivery_notifications: 'DELIVERY_NOTIFICATION',
+      fraud_alerts: 'FRAUD_ALERT',
       higher_education: 'HIGHER_EDUCATION',
       low_volume: 'LOW_VOLUME',
       marketing: 'MARKETING',
       mixed: 'MIXED',
       polling_voting: 'POLLING_VOTING',
       public_service_announcement: 'PUBLIC_SERVICE_ANNOUNCEMENT',
-      security_alerts: 'SECURITY_ALERTS',
+      security_alerts: 'SECURITY_ALERT',
     };
 
-    return mappings[useCase] ?? useCase;
+    const normalizedUseCase = this.normalizeCampaignUseCaseKey(useCase);
+    return mappings[normalizedUseCase] ?? useCase;
+  }
+
+  private buildProviderCampaignSubUseCases(
+    useCase: string,
+    subUsecases?: string[]
+  ): string[] {
+    const normalizedUseCase = this.normalizeCampaignUseCaseKey(useCase);
+    const normalizedSubUsecases = Array.from(
+      new Set(
+        (subUsecases ?? [])
+          .map((value) => this.normalizeCampaignUseCaseKey(value))
+          .filter((value) => this.campaignSubUseCaseValues.has(value))
+      )
+    );
+
+    if (this.campaignUseCasesRequiringSubUseCases.has(normalizedUseCase)) {
+      return normalizedSubUsecases.map((value) => this.mapCampaignUseCase(value));
+    }
+
+    const effectiveSubUsecases =
+      normalizedSubUsecases.length > 0 ? normalizedSubUsecases : [normalizedUseCase];
+
+    return effectiveSubUsecases.map((value) => this.mapCampaignUseCase(value));
+  }
+
+  private buildCampaignRegistrationPayload(
+    input: CampaignRegistrationInput | CampaignUpdateInput
+  ): Record<string, unknown> {
+    const [sample1, sample2, sample3, sample4, sample5] = input.sampleMessages;
+    const isCampaignUpdate = 'campaignId' in input;
+
+    return {
+      brandId: input.brandId,
+      usecase: this.mapCampaignUseCase(input.useCase),
+      subUsecases: this.buildProviderCampaignSubUseCases(input.useCase, input.subUsecases),
+      description: input.description,
+      embeddedLink: input.embeddedLink ?? false,
+      embeddedPhone: input.embeddedPhone ?? false,
+      affiliateMarketing: input.affiliateMarketing ?? false,
+      termsAndConditions: input.termsAndConditions ?? true,
+      numberPool: input.numberPool ?? false,
+      ageGated: input.ageGated ?? false,
+      directLending: input.directLending ?? false,
+      subscriberOptin: input.subscriberOptin ?? true,
+      subscriberOptout: input.subscriberOptout ?? true,
+      subscriberHelp: input.subscriberHelp ?? true,
+      sample1: sample1 ?? '',
+      sample2: sample2 ?? '',
+      sample3: sample3 ?? '',
+      sample4: sample4 ?? '',
+      sample5: sample5 ?? '',
+      messageFlow: input.messageFlow ?? input.description,
+      helpMessage: input.helpMessage,
+      mnoIds: input.mnoIds ?? [],
+      referenceId:
+        input.referenceId ??
+        input.name ??
+        (isCampaignUpdate ? input.campaignId : `campaign-${Date.now()}`),
+      autoRenewal: input.autoRenewal ?? true,
+      tag: input.tag ?? [],
+      optinKeywords: input.optInKeywords.join(','),
+      optoutKeywords: input.optOutKeywords.join(','),
+      helpKeywords: input.helpKeywords.join(','),
+      optinMessage: input.optInMessage,
+      optoutMessage: input.optOutMessage,
+      privacyPolicyLink: input.privacyPolicyLink ?? '',
+      termsAndConditionsLink: input.termsAndConditionsLink ?? '',
+      embeddedLinkSample: input.embeddedLinkSample ?? '',
+    };
   }
 
   private formatPhoneNumber(phoneNumber: string): string {
@@ -458,7 +824,7 @@ export class SignalmashService {
             );
           }
 
-          if (endpoint === '/registerbrand') {
+          if (endpoint === '/registerbrand' || endpoint === '/registercampaign' || endpoint.startsWith('/updateCampaign')) {
             logger.info(
               {
                 endpoint,
@@ -625,16 +991,26 @@ export class SignalmashService {
       );
     }
 
+    const detail = this.asRecord(result.data);
+    const lifecycleStatus = this.resolveBrandLifecycleStatus(detail, result);
+    const providerCode = this.normalizeProviderCode(result.status);
+
     logger.info(
-      { brandId: result.brandId, status: result.status },
+      { brandId: result.brandId, status: lifecycleStatus, providerCode },
       'Brand registered with Signalmash'
     );
 
     return {
       brandId: result.brandId,
-      tcrBrandId: result.tcrBrandId,
-      status: String(result.status ?? 'submitted'),
-      verificationScore: result.verificationScore,
+      tcrBrandId: result.tcrBrandId ?? result.tcr_brand_id,
+      status: lifecycleStatus,
+      providerCode,
+      verificationScore: this.pickNumber(
+        result.verificationScore,
+        result.verification_score,
+        detail?.verificationScore,
+        detail?.verification_score
+      ),
       message: result.message,
     };
   }
@@ -642,27 +1018,40 @@ export class SignalmashService {
   /**
    * Get brand status
    */
-  async getBrandStatus(brandId: string): Promise<{
-    status: string;
-    signalmashBrandId?: string;
-    tcrBrandId?: string;
-    verificationScore?: number;
-    rejectionReason?: string;
-    referenceId?: string;
-  }> {
+  async getBrandStatus(brandId: string): Promise<BrandStatusResult> {
     const result = await this.request<RawBrandStatusResult>(
       'GET',
       `/brand?brandId=${encodeURIComponent(brandId)}`
     );
-    const data = result.data ?? {};
+    const data = this.brandDetailFromStatusResult(result);
+    const providerMessage = this.normalizeProviderMessage(result.message);
+
+    if (this.responseSignalsNoResult(result.status, result.message)) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        providerMessage ?? 'No Result Found!'
+      );
+    }
 
     return {
-      status: String(data.status ?? result.status ?? 'unknown'),
-      signalmashBrandId: data.brandId ?? result.brandId ?? brandId,
-      tcrBrandId: data.tcrBrandId ?? data.tcr_brand_id ?? result.tcrBrandId,
-      verificationScore: data.verificationScore ?? data.verification_score ?? result.verificationScore,
-      rejectionReason: data.rejectionReason ?? data.rejection_reason ?? result.rejectionReason,
-      referenceId: data.referenceId ?? data.reference_id ?? result.referenceId,
+      status: this.resolveBrandLifecycleStatus(data, result, 'UNKNOWN'),
+      signalmashBrandId: this.pickString(data?.brandId, data?.brand_id, result.brandId, brandId),
+      tcrBrandId: this.pickString(data?.tcrBrandId, data?.tcr_brand_id, result.tcrBrandId, result.tcr_brand_id),
+      verificationScore: this.pickNumber(
+        data?.verificationScore,
+        data?.verification_score,
+        result.verificationScore,
+        result.verification_score
+      ),
+      rejectionReason: this.pickString(
+        data?.rejectionReason,
+        data?.rejection_reason,
+        result.rejectionReason,
+        result.rejection_reason
+      ),
+      referenceId: this.pickString(data?.referenceId, data?.reference_id, result.referenceId, result.reference_id),
+      providerCode: this.normalizeProviderCode(result.status),
+      providerMessage,
     };
   }
 
@@ -672,66 +1061,60 @@ export class SignalmashService {
   async registerCampaign(input: CampaignRegistrationInput): Promise<CampaignRegistrationResult> {
     logger.info({ name: input.name, brandId: input.brandId }, 'Registering campaign with Signalmash');
 
-    const [sample1, sample2, sample3, sample4, sample5] = input.sampleMessages;
+    const payload = this.buildCampaignRegistrationPayload(input);
 
     const result = await this.request<RawCampaignRegistrationResult>(
       'POST',
       '/registercampaign',
-      {
-        brandId: input.brandId,
-        usecase: this.mapCampaignUseCase(input.useCase),
-        subUsecases: input.subUsecases ?? [],
-        description: input.description,
-        embeddedLink: input.embeddedLink ?? false,
-        embeddedPhone: input.embeddedPhone ?? false,
-        affiliateMarketing: input.affiliateMarketing ?? false,
-        termsAndConditions: input.termsAndConditions ?? true,
-        numberPool: input.numberPool ?? false,
-        ageGated: input.ageGated ?? false,
-        directLending: input.directLending ?? false,
-        subscriberOptin: input.subscriberOptin ?? true,
-        subscriberOptout: input.subscriberOptout ?? true,
-        subscriberHelp: input.subscriberHelp ?? true,
-        sample1: sample1 ?? '',
-        sample2: sample2 ?? '',
-        sample3: sample3 ?? '',
-        sample4: sample4 ?? '',
-        sample5: sample5 ?? '',
-        messageFlow: input.messageFlow ?? input.description,
-        helpMessage: input.helpMessage,
-        mnoIds: input.mnoIds ?? [],
-        referenceId: input.referenceId ?? input.name ?? `campaign-${Date.now()}`,
-        autoRenewal: input.autoRenewal ?? true,
-        tag: input.tag ?? [],
-        optinKeywords: input.optInKeywords.join(','),
-        optoutKeywords: input.optOutKeywords.join(','),
-        helpKeywords: input.helpKeywords.join(','),
-        optinMessage: input.optInMessage,
-        optoutMessage: input.optOutMessage,
-        privacyPolicyLink: input.privacyPolicyLink ?? '',
-        termsAndConditionsLink: input.termsAndConditionsLink ?? '',
-        embeddedLinkSample: input.embeddedLinkSample ?? '',
-      }
+      payload
+    );
+    const detail = this.asRecord(result.data);
+    const campaignId = this.pickString(
+      result.campaignId,
+      result.campaign_key,
+      result.sm_reference_no,
+      detail?.campaignId,
+      detail?.campaign_key,
+      detail?.sm_reference_no
     );
 
-    if ((typeof result.status === 'number' && result.status >= 400) || !result.campaignId) {
+    if ((typeof result.status === 'number' && result.status >= 400) || !campaignId) {
       throw new ExternalServiceError(
         'Signalmash',
         result.message || 'Campaign registration did not return a campaign ID'
       );
     }
 
+    const lifecycleStatus = this.resolveCampaignLifecycleStatus(detail, result);
+    const providerCode = this.normalizeProviderCode(result.status);
+
     logger.info(
-      { campaignId: result.campaignId, status: result.status },
+      { campaignId, status: lifecycleStatus, providerCode },
       'Campaign registered with Signalmash'
     );
 
     return {
-      campaignId: result.campaignId,
-      tcrCampaignId: result.tcrCampaignId,
-      status: String(result.status ?? 'submitted'),
-      dailyMessageLimit: result.dailyMessageLimit,
-      messagesPerSecond: result.messagesPerSecond,
+      campaignId,
+      tcrCampaignId: this.pickString(
+        result.tcrCampaignId,
+        result.tcr_campaign_id,
+        detail?.tcrCampaignId,
+        detail?.tcr_campaign_id
+      ),
+      status: lifecycleStatus,
+      providerCode,
+      dailyMessageLimit: this.pickNumber(
+        result.dailyMessageLimit,
+        result.daily_message_limit,
+        detail?.dailyMessageLimit,
+        detail?.daily_message_limit
+      ),
+      messagesPerSecond: this.pickNumber(
+        result.messagesPerSecond,
+        result.messages_per_second,
+        detail?.messagesPerSecond,
+        detail?.messages_per_second
+      ),
       message: result.message,
     };
   }
@@ -739,67 +1122,61 @@ export class SignalmashService {
   async updateCampaign(input: CampaignUpdateInput): Promise<CampaignRegistrationResult> {
     logger.info({ campaignId: input.campaignId, brandId: input.brandId }, 'Updating campaign with Signalmash');
 
-    const [sample1, sample2, sample3, sample4, sample5] = input.sampleMessages;
+    const payload = this.buildCampaignRegistrationPayload(input);
 
     const result = await this.request<RawCampaignRegistrationResult>(
-      'POST',
-      '/updateCampaign',
-      {
-        campaignId: input.campaignId,
-        brandId: input.brandId,
-        usecase: this.mapCampaignUseCase(input.useCase),
-        subUsecases: input.subUsecases ?? [],
-        description: input.description,
-        embeddedLink: input.embeddedLink ?? false,
-        embeddedPhone: input.embeddedPhone ?? false,
-        affiliateMarketing: input.affiliateMarketing ?? false,
-        termsAndConditions: input.termsAndConditions ?? true,
-        numberPool: input.numberPool ?? false,
-        ageGated: input.ageGated ?? false,
-        directLending: input.directLending ?? false,
-        subscriberOptin: input.subscriberOptin ?? true,
-        subscriberOptout: input.subscriberOptout ?? true,
-        subscriberHelp: input.subscriberHelp ?? true,
-        sample1: sample1 ?? '',
-        sample2: sample2 ?? '',
-        sample3: sample3 ?? '',
-        sample4: sample4 ?? '',
-        sample5: sample5 ?? '',
-        messageFlow: input.messageFlow ?? input.description,
-        helpMessage: input.helpMessage,
-        mnoIds: input.mnoIds ?? [],
-        referenceId: input.referenceId ?? input.name ?? input.campaignId,
-        autoRenewal: input.autoRenewal ?? true,
-        tag: input.tag ?? [],
-        optinKeywords: input.optInKeywords.join(','),
-        optoutKeywords: input.optOutKeywords.join(','),
-        helpKeywords: input.helpKeywords.join(','),
-        optinMessage: input.optInMessage,
-        optoutMessage: input.optOutMessage,
-        privacyPolicyLink: input.privacyPolicyLink ?? '',
-        termsAndConditionsLink: input.termsAndConditionsLink ?? '',
-        embeddedLinkSample: input.embeddedLinkSample ?? '',
-      }
+      'PUT',
+      `/updateCampaign?campaignId=${encodeURIComponent(input.campaignId)}`,
+      payload
+    );
+    const detail = this.asRecord(result.data);
+    const campaignId = this.pickString(
+      result.campaignId,
+      result.campaign_key,
+      result.sm_reference_no,
+      detail?.campaignId,
+      detail?.campaign_key,
+      detail?.sm_reference_no,
+      input.campaignId
     );
 
-    if ((typeof result.status === 'number' && result.status >= 400) || !result.campaignId) {
+    if ((typeof result.status === 'number' && result.status >= 400) || !campaignId) {
       throw new ExternalServiceError(
         'Signalmash',
         result.message || 'Campaign update did not return a campaign ID'
       );
     }
 
+    const lifecycleStatus = this.resolveCampaignLifecycleStatus(detail, result);
+    const providerCode = this.normalizeProviderCode(result.status);
+
     logger.info(
-      { campaignId: result.campaignId, status: result.status },
+      { campaignId, status: lifecycleStatus, providerCode },
       'Campaign updated with Signalmash'
     );
 
     return {
-      campaignId: result.campaignId,
-      tcrCampaignId: result.tcrCampaignId,
-      status: String(result.status ?? 'updated'),
-      dailyMessageLimit: result.dailyMessageLimit,
-      messagesPerSecond: result.messagesPerSecond,
+      campaignId,
+      tcrCampaignId: this.pickString(
+        result.tcrCampaignId,
+        result.tcr_campaign_id,
+        detail?.tcrCampaignId,
+        detail?.tcr_campaign_id
+      ),
+      status: lifecycleStatus,
+      providerCode,
+      dailyMessageLimit: this.pickNumber(
+        result.dailyMessageLimit,
+        result.daily_message_limit,
+        detail?.dailyMessageLimit,
+        detail?.daily_message_limit
+      ),
+      messagesPerSecond: this.pickNumber(
+        result.messagesPerSecond,
+        result.messages_per_second,
+        detail?.messagesPerSecond,
+        detail?.messages_per_second
+      ),
       message: result.message,
     };
   }
@@ -807,28 +1184,229 @@ export class SignalmashService {
   /**
    * Get campaign status
    */
-  async getCampaignStatus(campaignId: string): Promise<{
-    status: string;
-    signalmashCampaignId?: string;
-    tcrCampaignId?: string;
-    rejectionReason?: string;
-    dailyMessageLimit?: number;
-    messagesPerSecond?: number;
-  }> {
+  async getCampaignStatus(campaignId: string): Promise<CampaignStatusResult> {
     const result = await this.request<RawCampaignStatusResult>(
       'GET',
-      `/campaign?campaignId=${encodeURIComponent(campaignId)}`
+      `/campaignDetails?campaignId=${encodeURIComponent(campaignId)}`
     );
-    const data = result.data ?? {};
+    const data = this.campaignDetailFromStatusResult(result);
+    const providerMessage = this.normalizeProviderMessage(result.message);
+
+    if (this.responseSignalsNoResult(result.status, result.message)) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        providerMessage ?? 'No Result Found!'
+      );
+    }
 
     return {
-      status: String(data.status ?? result.status ?? 'unknown'),
-      signalmashCampaignId: data.campaignId ?? result.campaignId ?? campaignId,
-      tcrCampaignId: data.tcrCampaignId ?? data.tcr_campaign_id ?? result.tcrCampaignId,
-      rejectionReason: data.rejectionReason ?? data.rejection_reason ?? result.rejectionReason,
-      dailyMessageLimit: data.dailyMessageLimit ?? data.daily_message_limit ?? result.dailyMessageLimit,
-      messagesPerSecond: data.messagesPerSecond ?? data.messages_per_second ?? result.messagesPerSecond,
+      status: this.resolveCampaignLifecycleStatus(data, result, 'UNKNOWN'),
+      signalmashCampaignId: this.pickString(
+        data?.campaignId,
+        data?.campaign_id,
+        result.campaignId,
+        campaignId
+      ),
+      tcrCampaignId: this.pickString(
+        data?.tcrCampaignId,
+        data?.tcr_campaign_id,
+        result.tcrCampaignId,
+        result.tcr_campaign_id
+      ),
+      rejectionReason: this.pickString(
+        data?.rejectionReason,
+        data?.rejection_reason,
+        result.rejectionReason,
+        result.rejection_reason
+      ),
+      dailyMessageLimit: this.pickNumber(
+        data?.dailyMessageLimit,
+        data?.daily_message_limit,
+        result.dailyMessageLimit,
+        result.daily_message_limit
+      ),
+      messagesPerSecond: this.pickNumber(
+        data?.messagesPerSecond,
+        data?.messages_per_second,
+        result.messagesPerSecond,
+        result.messages_per_second
+      ),
+      providerCode: this.normalizeProviderCode(result.status),
+      providerMessage,
     };
+  }
+
+  async qualifyBrandByUseCase(
+    brandId: string,
+    useCase: string
+  ): Promise<SignalmashCampaignQualificationResult> {
+    const mappedUseCase = this.mapCampaignUseCase(useCase);
+    const result = await this.request<RawCollectionResult>(
+      'GET',
+      `/qualifyBrandByUsecas?brandId=${encodeURIComponent(brandId)}&usecase=${encodeURIComponent(mappedUseCase)}`
+    );
+
+    const detail = this.asRecord(result.data) ?? {};
+    const providerCode = this.normalizeProviderCode(result.status);
+    const message = this.pickString(
+      detail.message,
+      detail.reason,
+      detail.rejectionReason,
+      detail.rejection_reason,
+      result.message
+    );
+    const explicitFlag = [detail.qualified, detail.isQualified, detail.allowed, detail.eligible].find(
+      (value) => typeof value === 'boolean'
+    ) as boolean | undefined;
+    const statusCandidate = this.pickString(
+      detail.qualificationStatus,
+      detail.qualification_status,
+      detail.status,
+      result.message
+    );
+    const mnoEntries = Object.entries(detail)
+      .map(([mnoId, value]) => ({ mnoId, value: this.asRecord(value) }))
+      .filter(
+        (entry): entry is { mnoId: string; value: Record<string, unknown> } =>
+          !!entry.value && /^\d+$/.test(entry.mnoId)
+      );
+    const eligibleMnoIds = mnoEntries
+      .filter((entry) => entry.value.qualify === true && entry.value.mnoSupport !== false)
+      .map((entry) => entry.mnoId);
+    const minimumSampleMessages = mnoEntries.reduce<number | undefined>((currentMinimum, entry) => {
+      if (!(entry.value.qualify === true && entry.value.mnoSupport !== false)) {
+        return currentMinimum;
+      }
+
+      const candidate = this.pickNumber(entry.value.minMsgSamples);
+      if (candidate === undefined) {
+        return currentMinimum;
+      }
+
+      return currentMinimum === undefined ? candidate : Math.max(currentMinimum, candidate);
+    }, undefined);
+    const isExplicitFailure =
+      explicitFlag === false ||
+      /unrecognized[_\s-]*usecase/i.test(`${statusCandidate ?? ''} ${message ?? ''}`) ||
+      /not[_\s-]*qualified|ineligible|not[_\s-]*eligible|rejected|blocked/i.test(
+        `${statusCandidate ?? ''} ${message ?? ''}`
+      ) ||
+      (mnoEntries.length > 0 && eligibleMnoIds.length === 0);
+    const status = isExplicitFailure
+      ? /unrecognized[_\s-]*usecase/i.test(`${statusCandidate ?? ''} ${message ?? ''}`)
+        ? 'UNRECOGNIZED_USECASE'
+        : 'NOT_QUALIFIED'
+      : 'QUALIFIED';
+
+    return {
+      qualified:
+        explicitFlag === undefined
+          ? eligibleMnoIds.length > 0 && !isExplicitFailure
+          : explicitFlag && !isExplicitFailure,
+      status,
+      message,
+      providerCode,
+      eligibleMnoIds,
+      minimumSampleMessages,
+      requiresSubscriberOptin: mnoEntries.some(
+        (entry) => entry.value.qualify === true && entry.value.reqSubscriberOptin === true
+      ),
+      requiresSubscriberOptout: mnoEntries.some(
+        (entry) => entry.value.qualify === true && entry.value.reqSubscriberOptout === true
+      ),
+      requiresSubscriberHelp: mnoEntries.some(
+        (entry) => entry.value.qualify === true && entry.value.reqSubscriberHelp === true
+      ),
+      disallowEmbeddedLink: mnoEntries.some(
+        (entry) => entry.value.qualify === true && entry.value.noEmbeddedLink === true
+      ),
+      disallowEmbeddedPhone: mnoEntries.some(
+        (entry) => entry.value.qualify === true && entry.value.noEmbeddedPhone === true
+      ),
+      restrictions: Object.keys(detail).length > 0 ? detail : undefined,
+      raw: {
+        status: result.status ?? null,
+        message: result.message ?? null,
+        data: result.data ?? null,
+      },
+    };
+  }
+
+  async listBrands(): Promise<SignalmashListedBrand[]> {
+    const result = await this.request<RawCollectionResult>('GET', '/getbrands');
+    const brands: SignalmashListedBrand[] = [];
+
+    for (const brand of this.asRecordArray(result.data)) {
+      const brandId = this.pickString(brand.brandId, brand.brand_id);
+      if (!brandId) {
+        continue;
+      }
+
+      brands.push({
+        brandId,
+        displayName: this.pickString(brand.displayName, brand.display_name, brand.brand_name),
+        status: this.resolveBrandLifecycleStatus(brand, undefined, 'UNKNOWN'),
+      });
+    }
+
+    return brands;
+  }
+
+  async listCampaigns(): Promise<SignalmashListedCampaign[]> {
+    const result = await this.request<RawCollectionResult>('GET', '/campaigns');
+    const campaigns: SignalmashListedCampaign[] = [];
+
+    for (const campaign of this.asRecordArray(result.data)) {
+      const campaignId = this.pickString(
+        campaign.campaignId,
+        campaign.campaign_id,
+        campaign.campaign_key,
+        campaign.sm_reference_no
+      );
+      if (!campaignId) {
+        continue;
+      }
+
+      campaigns.push({
+        campaignId,
+        brandId: this.pickString(campaign.brandId, campaign.brand_id),
+        status: this.resolveCampaignLifecycleStatus(campaign, undefined, 'UNKNOWN'),
+      });
+    }
+
+    return campaigns;
+  }
+
+  async getAccountBalanceDiagnostic(): Promise<{ status: number | null; body: string }> {
+    const signalmashConfig = await this.getConfig();
+    const requestUrl = `${signalmashConfig.apiUrl}/checkBalance`;
+
+    if (!signalmashConfig.apiKey) {
+      return {
+        status: null,
+        body: 'API key not configured',
+      };
+    }
+
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': signalmashConfig.apiKey,
+        },
+      });
+
+      return {
+        status: response.status,
+        body: (await response.text()).slice(0, 500),
+      };
+    } catch (error) {
+      return {
+        status: null,
+        body: error instanceof Error ? error.message : 'Unknown balance diagnostic error',
+      };
+    }
   }
 
   /**
@@ -1025,40 +1603,56 @@ export class SignalmashService {
       );
     }
 
-    const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
-      'POST',
-      '/enablesms',
-      new URLSearchParams({
-        DID: purchasedDid,
-        CampaignId: campaignId,
-      })
-    );
-
-    if ((enableSmsResult.status ?? 500) >= 400) {
-      throw new ExternalServiceError(
-        'Signalmash',
-        enableSmsResult.error?.message ||
-          enableSmsResult.message ||
-          `SMS enablement failed for DID ${purchasedDid}`
+    try {
+      const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
+        'POST',
+        '/enablesms',
+        new URLSearchParams({
+          DID: purchasedDid,
+          CampaignId: campaignId,
+        })
       );
-    }
 
-    const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
-      'PUT',
-      '/setConnection',
-      new URLSearchParams({
-        DID: purchasedDid,
-        ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
-      })
-    );
+      if ((enableSmsResult.status ?? 500) >= 400) {
+        throw new ExternalServiceError(
+          'Signalmash',
+          enableSmsResult.error?.message ||
+            enableSmsResult.message ||
+            `SMS enablement failed for DID ${purchasedDid}`
+        );
+      }
 
-    if ((setConnectionResult.status ?? 200) >= 400) {
-      throw new ExternalServiceError(
-        'Signalmash',
-        setConnectionResult.error?.message ||
-          setConnectionResult.message ||
-          `Connection assignment failed for DID ${purchasedDid}`
+      const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
+        'PUT',
+        '/setConnection',
+        new URLSearchParams({
+          DID: purchasedDid,
+          ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
+        })
       );
+
+      if ((setConnectionResult.status ?? 200) >= 400) {
+        throw new ExternalServiceError(
+          'Signalmash',
+          setConnectionResult.error?.message ||
+            setConnectionResult.message ||
+            `Connection assignment failed for DID ${purchasedDid}`
+        );
+      }
+    } catch (error) {
+      try {
+        await this.releaseNumber(purchasedDid);
+      } catch (releaseError) {
+        logger.warn(
+          {
+            numberId: purchasedDid,
+            error: releaseError instanceof Error ? releaseError.message : releaseError,
+          },
+          'Failed to release purchased DID after downstream provisioning error'
+        );
+      }
+
+      throw error;
     }
 
     return {
@@ -1094,7 +1688,10 @@ export class SignalmashService {
     );
   }
 
-  async runConnectionDiagnostic(): Promise<SignalmashConnectionDiagnostic> {
+  async runConnectionDiagnostic(lookups?: {
+    brandId?: string;
+    campaignId?: string;
+  }): Promise<SignalmashConnectionDiagnostic> {
     const signalmashConfig = await this.getConfig();
     const requestUrl = `${signalmashConfig.apiUrl}/searchbystate?State=NJ&Qty=1`;
 
@@ -1106,6 +1703,7 @@ export class SignalmashService {
         status: null,
         ok: false,
         responseBody: 'API key not configured',
+        apiBaseUrl: signalmashConfig.apiUrl,
       };
     }
 
@@ -1119,15 +1717,63 @@ export class SignalmashService {
       });
 
       const responseBody = (await response.text()).slice(0, 500);
-
-      return {
+      const [balanceDiagnostic, brands, campaigns] = await Promise.all([
+        this.getAccountBalanceDiagnostic(),
+        this.listBrands().catch(() => []),
+        this.listCampaigns().catch(() => []),
+      ]);
+      const diagnostic: SignalmashConnectionDiagnostic = {
         testedAt: new Date().toISOString(),
         method: 'GET',
         requestUrl,
         status: response.status,
         ok: response.ok,
         responseBody,
+        apiBaseUrl: signalmashConfig.apiUrl,
+        tokenFingerprint: this.tokenFingerprint(signalmashConfig.apiKey),
+        balanceStatus: balanceDiagnostic.status,
+        balanceBody: balanceDiagnostic.body,
+        sampleBrandIds: brands.slice(0, 10).map((brand) => brand.brandId),
+        sampleCampaignIds: campaigns.slice(0, 10).map((campaign) => campaign.campaignId),
       };
+
+      if (lookups?.brandId?.trim()) {
+        try {
+          const brand = await this.getBrandStatus(lookups.brandId.trim());
+          diagnostic.brandLookup = {
+            requestedId: lookups.brandId.trim(),
+            found: true,
+            status: brand.status,
+            message: brand.providerMessage ?? brand.rejectionReason,
+          };
+        } catch (error) {
+          diagnostic.brandLookup = {
+            requestedId: lookups.brandId.trim(),
+            found: false,
+            message: error instanceof Error ? error.message : 'Unknown lookup failure',
+          };
+        }
+      }
+
+      if (lookups?.campaignId?.trim()) {
+        try {
+          const campaign = await this.getCampaignStatus(lookups.campaignId.trim());
+          diagnostic.campaignLookup = {
+            requestedId: lookups.campaignId.trim(),
+            found: true,
+            status: campaign.status,
+            message: campaign.providerMessage ?? campaign.rejectionReason,
+          };
+        } catch (error) {
+          diagnostic.campaignLookup = {
+            requestedId: lookups.campaignId.trim(),
+            found: false,
+            message: error instanceof Error ? error.message : 'Unknown lookup failure',
+          };
+        }
+      }
+
+      return diagnostic;
     } catch (error) {
       return {
         testedAt: new Date().toISOString(),
@@ -1136,6 +1782,8 @@ export class SignalmashService {
         status: null,
         ok: false,
         responseBody: error instanceof Error ? error.message : 'Unknown diagnostic error',
+        apiBaseUrl: signalmashConfig.apiUrl,
+        tokenFingerprint: this.tokenFingerprint(signalmashConfig.apiKey),
       };
     }
   }

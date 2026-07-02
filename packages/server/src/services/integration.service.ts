@@ -440,7 +440,10 @@ export class IntegrationService {
   private async getResourceCounts(organizationId: string) {
     const [
       totalBrands,
+      draftBrands,
       pendingBrands,
+      unverifiedBrands,
+      verifiedBrands,
       rejectedBrands,
       totalCampaigns,
       pendingCampaigns,
@@ -454,7 +457,25 @@ export class IntegrationService {
       prisma.brand.count({
         where: {
           organizationId,
-          status: { in: ['pending_verification', 'unverified'] },
+          status: 'draft',
+        },
+      }),
+      prisma.brand.count({
+        where: {
+          organizationId,
+          status: 'pending_verification',
+        },
+      }),
+      prisma.brand.count({
+        where: {
+          organizationId,
+          status: 'unverified',
+        },
+      }),
+      prisma.brand.count({
+        where: {
+          organizationId,
+          status: 'verified',
         },
       }),
       prisma.brand.count({
@@ -505,7 +526,10 @@ export class IntegrationService {
 
     return {
       totalBrands,
+      draftBrands,
       pendingBrands,
+      unverifiedBrands,
+      verifiedBrands,
       rejectedBrands,
       totalCampaigns,
       pendingCampaigns,
@@ -519,7 +543,10 @@ export class IntegrationService {
 
   private deriveLifecycleState(resourceCounts: {
     totalBrands: number;
+    draftBrands: number;
     pendingBrands: number;
+    unverifiedBrands: number;
+    verifiedBrands: number;
     rejectedBrands: number;
     totalCampaigns: number;
     pendingCampaigns: number;
@@ -541,7 +568,7 @@ export class IntegrationService {
       return 'business_details_needed';
     }
 
-    if (resourceCounts.pendingBrands > 0) {
+    if (resourceCounts.verifiedBrands === 0) {
       return 'brand_pending';
     }
 
@@ -571,7 +598,10 @@ export class IntegrationService {
   private buildChecklist(
     resourceCounts: {
       totalBrands: number;
+      draftBrands: number;
       pendingBrands: number;
+      unverifiedBrands: number;
+      verifiedBrands: number;
       rejectedBrands: number;
       totalCampaigns: number;
       pendingCampaigns: number;
@@ -593,19 +623,29 @@ export class IntegrationService {
         key: 'business_details',
         label: 'Brand linked or created',
         complete: resourceCounts.totalBrands > 0,
-        helper: resourceCounts.totalBrands > 0
-          ? 'A brand record is linked to this organization and ready for campaign assignment.'
-          : 'Create a brand record with your business details to begin 10DLC onboarding.',
+        helper: resourceCounts.totalBrands === 0
+          ? 'Create a brand record with your business details to begin 10DLC onboarding.'
+          : resourceCounts.verifiedBrands > 0
+            ? 'A verified brand record is linked to this organization.'
+            : resourceCounts.draftBrands > 0
+              ? 'A brand draft exists. Review it and submit it for verification.'
+              : 'A brand record exists for this organization and still needs verification work.',
       },
       {
         key: 'brand',
         label: 'Brand ready',
-        complete: resourceCounts.totalBrands > 0 && resourceCounts.pendingBrands === 0 && resourceCounts.rejectedBrands === 0,
+        complete: resourceCounts.verifiedBrands > 0 && resourceCounts.rejectedBrands === 0,
         helper: resourceCounts.rejectedBrands > 0
           ? 'At least one brand is rejected or suspended and needs correction.'
           : resourceCounts.pendingBrands > 0
             ? 'Brand registration is still pending verification.'
-            : 'A verified brand is ready for campaign registration.',
+            : resourceCounts.unverifiedBrands > 0
+              ? 'Brand verification is incomplete and needs updated details or provider follow-up.'
+              : resourceCounts.draftBrands > 0
+                ? 'Submit the saved brand for verification before campaigns can be created.'
+                : resourceCounts.verifiedBrands > 0
+                  ? 'A verified brand is ready for campaign registration.'
+                  : 'Create and verify a brand before campaigns can be created.',
       },
       {
         key: 'campaign',
