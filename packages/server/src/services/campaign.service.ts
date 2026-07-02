@@ -84,6 +84,7 @@ interface CampaignNumberLinkIntentInput {
   phoneNumberId?: string;
   phoneNumber?: string;
   friendlyName?: string;
+  confirmReassignment?: boolean;
 }
 
 interface CampaignNumberLinkIntent {
@@ -91,6 +92,7 @@ interface CampaignNumberLinkIntent {
   phoneNumberId?: string;
   phoneNumber?: string;
   friendlyName?: string;
+  confirmReassignment?: boolean;
 }
 
 type CampaignNumberLinkAction =
@@ -98,6 +100,13 @@ type CampaignNumberLinkAction =
       mode: 'linked';
       phoneNumberId: string;
       phoneNumber: string;
+    }
+  | {
+      mode: 'reassigned';
+      phoneNumberId: string;
+      phoneNumber: string;
+      previousCampaignId: string;
+      previousCampaignName?: string | null;
     }
   | {
       mode: 'checkout';
@@ -109,6 +118,12 @@ type CampaignNumberLinkAction =
     }
   | {
       mode: 'pending_provider';
+      message: string;
+    }
+  | {
+      mode: 'blocked_until_campaign_approved';
+      phoneNumberId: string;
+      phoneNumber: string;
       message: string;
     }
   | {
@@ -373,6 +388,7 @@ export class CampaignService {
       typeof record.friendlyName === 'string' && record.friendlyName.trim().length > 0
         ? record.friendlyName.trim()
         : undefined;
+    const confirmReassignment = record.confirmReassignment === true;
 
     if (mode === 'existing' && !phoneNumberId) {
       return null;
@@ -387,6 +403,7 @@ export class CampaignService {
       ...(phoneNumberId ? { phoneNumberId } : {}),
       ...(phoneNumber ? { phoneNumber } : {}),
       ...(friendlyName ? { friendlyName } : {}),
+      ...(confirmReassignment ? { confirmReassignment: true } : {}),
     };
   }
 
@@ -412,6 +429,7 @@ export class CampaignService {
         mode,
         phoneNumberId,
         ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
+        ...(value.confirmReassignment ? { confirmReassignment: true } : {}),
       };
     }
 
@@ -431,6 +449,45 @@ export class CampaignService {
     return {
       successUrl: `${config.webUrl}/campaigns/${campaignId}?number_checkout=success&session_id={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${config.webUrl}/campaigns/${campaignId}?number_checkout=cancelled`,
+    };
+  }
+
+  private buildLinkedNumberAction(
+    campaign: Campaign,
+    number: {
+      id: string;
+      phoneNumber: string;
+      reassignedFromCampaignId?: string | null;
+      reassignedFromCampaignName?: string | null;
+    }
+  ): CampaignNumberLinkAction {
+    if (campaign.status !== 'approved') {
+      const movedFrom = number.reassignedFromCampaignName
+        ? ` It was moved from ${number.reassignedFromCampaignName}.`
+        : '';
+
+      return {
+        mode: 'blocked_until_campaign_approved',
+        phoneNumberId: number.id,
+        phoneNumber: number.phoneNumber,
+        message: `The number is linked, but SMS/MMS stays blocked until this campaign is approved.${movedFrom}`,
+      };
+    }
+
+    if (number.reassignedFromCampaignId) {
+      return {
+        mode: 'reassigned',
+        phoneNumberId: number.id,
+        phoneNumber: number.phoneNumber,
+        previousCampaignId: number.reassignedFromCampaignId,
+        previousCampaignName: number.reassignedFromCampaignName,
+      };
+    }
+
+    return {
+      mode: 'linked',
+      phoneNumberId: number.id,
+      phoneNumber: number.phoneNumber,
     };
   }
 
@@ -481,6 +538,7 @@ export class CampaignService {
           {
             friendlyName: intent.friendlyName,
             campaignId: campaign.id,
+            confirmReassignment: intent.confirmReassignment,
           }
         );
         const updatedCampaign = await prisma.campaign.update({
@@ -495,11 +553,7 @@ export class CampaignService {
 
         return {
           ...updatedCampaign,
-          numberLinkAction: {
-            mode: 'linked',
-            phoneNumberId: linkedNumber.id,
-            phoneNumber: linkedNumber.phoneNumber,
-          },
+          numberLinkAction: this.buildLinkedNumberAction(updatedCampaign, linkedNumber as any),
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to link the existing phone number';
@@ -567,11 +621,7 @@ export class CampaignService {
 
       return {
         ...updatedCampaign,
-        numberLinkAction: {
-          mode: 'linked',
-          phoneNumberId: number.id,
-          phoneNumber: number.phoneNumber,
-        },
+        numberLinkAction: this.buildLinkedNumberAction(updatedCampaign, number as any),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to purchase and link the phone number';

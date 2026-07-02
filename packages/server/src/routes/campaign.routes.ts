@@ -60,6 +60,7 @@ const numberLinkIntentSchema = z.discriminatedUnion('mode', [
     mode: z.literal('existing'),
     phoneNumberId: z.string().uuid('Invalid phone number ID'),
     friendlyName: z.string().max(100).optional(),
+    confirmReassignment: z.boolean().optional(),
   }),
   z.object({
     mode: z.literal('buy_new'),

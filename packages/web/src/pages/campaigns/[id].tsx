@@ -214,6 +214,7 @@ export function CampaignDetailPage() {
   });
   const requiresEditSubUsecases = useCasesRequiringSubUsecases.has(editForm.useCase);
   const minimumEditSubUsecases = editForm.useCase === 'mixed' ? 2 : requiresEditSubUsecases ? 1 : 0;
+  const selectedExistingNumber = existingNumbers.find((number) => number.id === selectedExistingNumberId) ?? null;
 
   const loadCampaign = async () => {
     if (!id) return;
@@ -350,10 +351,23 @@ export function CampaignDetailPage() {
         return null;
       }
 
+      const requiresReassignment =
+        selectedExistingNumber?.campaign && selectedExistingNumber.campaign.id !== campaign?.id;
+
+      if (
+        requiresReassignment &&
+        !window.confirm(
+          `This will move ${selectedExistingNumber.formattedNumber} from ${selectedExistingNumber.campaign?.name} to ${campaign?.name}. Continue?`
+        )
+      ) {
+        return null;
+      }
+
       return {
         mode: 'existing' as const,
         phoneNumberId: selectedExistingNumberId,
         friendlyName: numberFriendlyName || undefined,
+        ...(requiresReassignment ? { confirmReassignment: true } : {}),
       };
     }
 
@@ -379,6 +393,21 @@ export function CampaignDetailPage() {
 
     if (responseData?.numberLinkAction?.mode === 'linked') {
       notify.success(successMessage, 'The campaign and phone number are now linked.');
+      return;
+    }
+
+    if (responseData?.numberLinkAction?.mode === 'reassigned') {
+      notify.success(
+        successMessage,
+        responseData.numberLinkAction.previousCampaignName
+          ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName} and linked to this campaign.`
+          : 'The existing number was reassigned and linked to this campaign.'
+      );
+      return;
+    }
+
+    if (responseData?.numberLinkAction?.mode === 'blocked_until_campaign_approved') {
+      notify.success(successMessage, responseData.numberLinkAction.message);
       return;
     }
 
@@ -892,7 +921,9 @@ export function CampaignDetailPage() {
                       {campaign.numberLinkError
                         ? campaign.numberLinkError
                         : campaign.numberLinkStatus === 'linked'
-                          ? 'A sender number is linked to this campaign.'
+                          ? campaign.status === 'approved'
+                            ? 'A sender number is linked to this campaign.'
+                            : 'A sender number is linked, but SMS/MMS stays blocked until this campaign is approved.'
                           : campaign.numberLinkStatus === 'checkout_required'
                             ? 'This campaign is waiting on the extra-number Stripe checkout before the new number can be provisioned.'
                             : 'A number selection is saved for this campaign and will be retried automatically when provider conditions are met.'}
@@ -913,6 +944,11 @@ export function CampaignDetailPage() {
                         <div>
                           <p className="font-medium text-slate-950 dark:text-slate-50">{phoneNumber.formattedNumber}</p>
                           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{phoneNumber.phoneNumber}</p>
+                          {campaign.status !== 'approved' ? (
+                            <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                              Traffic stays blocked until this campaign is approved.
+                            </p>
+                          ) : null}
                         </div>
                         <Badge variant="secondary">{phoneNumber.status}</Badge>
                       </div>
@@ -1107,6 +1143,12 @@ export function CampaignDetailPage() {
                     ))}
                   </select>
                 </div>
+                {selectedExistingNumber?.campaign && selectedExistingNumber.campaign.id !== campaign.id ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                    {selectedExistingNumber.formattedNumber} is currently linked to{' '}
+                    <span className="font-medium">{selectedExistingNumber.campaign.name}</span>. Continuing will reassign it to this campaign.
+                  </div>
+                ) : null}
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Friendly Name (optional)</label>
                   <Input

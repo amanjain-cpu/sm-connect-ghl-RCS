@@ -53,6 +53,70 @@ export class PhoneNumberService {
     return `${config.apiUrl}/api/webhooks/signalmash`;
   }
 
+  private async reconcileCampaignNumberLinkState(
+    organizationId: string,
+    campaignId?: string | null
+  ) {
+    if (!campaignId) {
+      return;
+    }
+
+    const [campaign, linkedNumberCount] = await Promise.all([
+      prisma.campaign.findFirst({
+        where: {
+          id: campaignId,
+          organizationId,
+        },
+        select: {
+          id: true,
+          numberLinkStatus: true,
+          numberLinkIntent: true,
+        },
+      }),
+      prisma.phoneNumber.count({
+        where: {
+          organizationId,
+          campaignId,
+          status: { not: 'released' },
+        },
+      }),
+    ]);
+
+    if (!campaign) {
+      return;
+    }
+
+    if (linkedNumberCount > 0) {
+      await this.syncCampaignNumberLinkState(organizationId, campaignId, 'linked');
+      return;
+    }
+
+    if (campaign.numberLinkStatus === 'requested' || campaign.numberLinkStatus === 'checkout_required') {
+      await prisma.campaign.updateMany({
+        where: {
+          id: campaignId,
+          organizationId,
+        },
+        data: {
+          numberLinkCompletedAt: null,
+        },
+      });
+      return;
+    }
+
+    await prisma.campaign.updateMany({
+      where: {
+        id: campaignId,
+        organizationId,
+      },
+      data: {
+        numberLinkStatus: 'none',
+        numberLinkError: null,
+        numberLinkCompletedAt: null,
+      },
+    });
+  }
+
   private normalizeUsLongCode(phoneNumber: string) {
     const normalized = formatPhoneE164(phoneNumber);
     const digits = normalized.replace(/\D/g, '');
@@ -825,12 +889,15 @@ export class PhoneNumberService {
       friendlyName?: string;
       campaignId?: string | null;
       makeDefault?: boolean;
+      confirmReassignment?: boolean;
     },
     options: {
       installationId?: string | null;
     } = {}
   ) {
     const number = await this.getNumber(organizationId, numberId);
+    const previousCampaignId = number.campaign?.id ?? null;
+    const previousCampaignName = number.campaign?.name ?? null;
 
     // Validate new campaign if provided
     if (data.campaignId) {
@@ -861,6 +928,14 @@ export class PhoneNumberService {
           400
         );
       }
+
+      if (previousCampaignId && previousCampaignId !== data.campaignId && data.confirmReassignment !== true) {
+        throw new AppError(
+          'This number is already linked to another campaign. Confirm reassignment before moving it.',
+          'PHONE_NUMBER_REASSIGN_CONFIRMATION_REQUIRED',
+          409
+        );
+      }
     }
 
     const updated = await prisma.phoneNumber.update({
@@ -889,7 +964,17 @@ export class PhoneNumberService {
       await this.syncCampaignNumberLinkState(organizationId, data.campaignId, 'linked');
     }
 
-    return updated;
+    if (previousCampaignId && previousCampaignId !== data.campaignId) {
+      await this.reconcileCampaignNumberLinkState(organizationId, previousCampaignId);
+    }
+
+    return {
+      ...updated,
+      reassignedFromCampaignId:
+        previousCampaignId && previousCampaignId !== data.campaignId ? previousCampaignId : null,
+      reassignedFromCampaignName:
+        previousCampaignId && previousCampaignId !== data.campaignId ? previousCampaignName : null,
+    };
   }
 
   // ===========================================
@@ -932,6 +1017,7 @@ export class PhoneNumberService {
       logger.info({ numberId, phoneNumber: number.phoneNumber }, 'Phone number released');
 
       await integrationService.markPhoneNumberReleased(numberId);
+      await this.reconcileCampaignNumberLinkState(organizationId, number.campaign?.id ?? null);
 
       return { success: true };
     } catch (error) {

@@ -315,6 +315,7 @@ class ApiClient {
       mode: 'existing';
       phoneNumberId: string;
       friendlyName?: string;
+      confirmReassignment?: boolean;
     } | {
       mode: 'buy_new';
       phoneNumber: string;
@@ -328,6 +329,7 @@ class ApiClient {
     mode: 'existing';
     phoneNumberId: string;
     friendlyName?: string;
+    confirmReassignment?: boolean;
   } | {
     mode: 'buy_new';
     phoneNumber: string;
@@ -568,7 +570,7 @@ class ApiClient {
     >('/phone-numbers/checkout/complete', data);
   }
 
-  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean }) {
+  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean; confirmReassignment?: boolean }) {
     return this.patch<any>(`/phone-numbers/${id}`, data);
   }
 
