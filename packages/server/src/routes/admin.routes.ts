@@ -17,6 +17,20 @@ import { organizationService } from '../services/organization.service.js';
 
 const router: RouterType = Router();
 
+const ASSIGNABLE_BRAND_PROVIDER_STATUSES = new Set(['VERIFIED', 'APPROVED', 'ACTIVE']);
+const ASSIGNABLE_CAMPAIGN_PROVIDER_STATUSES = new Set(['APPROVED', 'ACTIVE']);
+
+const normalizeProviderLifecycleStatus = (status?: string | null) =>
+  status?.trim().replace(/[\s-]+/g, '_').toUpperCase() || undefined;
+
+const isAssignableBrandProviderStatus = (status?: string | null) =>
+  !!normalizeProviderLifecycleStatus(status) &&
+  ASSIGNABLE_BRAND_PROVIDER_STATUSES.has(normalizeProviderLifecycleStatus(status)!);
+
+const isAssignableCampaignProviderStatus = (status?: string | null) =>
+  !!normalizeProviderLifecycleStatus(status) &&
+  ASSIGNABLE_CAMPAIGN_PROVIDER_STATUSES.has(normalizeProviderLifecycleStatus(status)!);
+
 // ===========================================
 // Admin Auth Middleware
 // ===========================================
@@ -283,6 +297,132 @@ router.post('/settings/signalmash/test-connection', requireSuperAdmin, async (re
   }
 });
 
+router.get('/settings/signalmash/brands', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const brands = await signalmashService.listBrands();
+
+    res.json({
+      success: true,
+      data: brands
+        .map((brand) => ({
+          ...brand,
+          assignable: isAssignableBrandProviderStatus(brand.status),
+        }))
+        .sort((left, right) => {
+          if (left.assignable !== right.assignable) {
+            return left.assignable ? -1 : 1;
+          }
+
+          return (left.displayName ?? left.brandId).localeCompare(right.displayName ?? right.brandId);
+        }),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/settings/signalmash/brands/:brandId/campaigns', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      brandId: z.string().trim().min(1),
+    }).parse(req.params);
+
+    const listedCampaigns = await signalmashService.listCampaigns();
+    const candidates = listedCampaigns.filter((campaign) =>
+      !campaign.brandId || campaign.brandId === params.brandId
+    );
+
+    const campaigns = await Promise.all(
+      candidates.map(async (campaign) => {
+        try {
+          const detail = await signalmashService.getCampaignStatus(campaign.campaignId);
+          const resolvedBrandId = detail.brandId ?? campaign.brandId;
+
+          if (!resolvedBrandId || resolvedBrandId !== params.brandId) {
+            return null;
+          }
+
+          return {
+            campaignId: campaign.campaignId,
+            brandId: resolvedBrandId,
+            name: detail.name ?? campaign.name,
+            status: detail.status ?? campaign.status,
+            tcrCampaignId: detail.tcrCampaignId,
+            providerMessage: detail.providerMessage,
+            assignable: isAssignableCampaignProviderStatus(detail.status ?? campaign.status),
+          };
+        } catch (error) {
+          if (!campaign.brandId || campaign.brandId !== params.brandId) {
+            return null;
+          }
+
+          return {
+            campaignId: campaign.campaignId,
+            brandId: campaign.brandId,
+            name: campaign.name,
+            status: campaign.status ?? 'UNKNOWN',
+            providerMessage: error instanceof Error ? error.message : 'Unable to load campaign details',
+            assignable: isAssignableCampaignProviderStatus(campaign.status),
+          };
+        }
+      })
+    );
+    const visibleCampaigns = campaigns.filter((campaign) => campaign !== null);
+
+    res.json({
+      success: true,
+      data: visibleCampaigns
+        .sort((left, right) => {
+          if (left.assignable !== right.assignable) {
+            return left.assignable ? -1 : 1;
+          }
+
+          return (left.name ?? left.campaignId).localeCompare(right.name ?? right.campaignId);
+        }),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/settings/signalmash/assign-brand-campaign', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const data = z.object({
+      organizationId: z.string().uuid(),
+      signalmashBrandId: z.string().trim().min(1),
+      signalmashCampaignId: z.string().trim().min(1),
+    }).parse(req.body ?? {});
+    const linked = await phoneNumberService.linkVerifiedBrandCampaignFromProvider(data);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ASSIGN_SIGNALMASH_BRAND_CAMPAIGN',
+      'organization',
+      data.organizationId,
+      {
+        brandId: linked.brand.id,
+        campaignId: linked.campaign.id,
+        signalmashBrandId: data.signalmashBrandId,
+        signalmashCampaignId: data.signalmashCampaignId,
+        providerBrandStatus: linked.providerBrandStatus,
+        providerCampaignStatus: linked.providerCampaignStatus,
+      },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.status(201).json({
+      success: true,
+      data: linked,
+      message: 'Verified Signalmash brand and campaign assigned to organization',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ===========================================
 // Dashboard Routes
 // ===========================================
@@ -434,7 +574,7 @@ router.post('/organizations/link-existing-assets', requireSuperAdmin, async (req
       {
         brandId: linked.brand.id,
         campaignId: linked.campaign.id,
-        phoneNumberId: linked.phoneNumber.id,
+        phoneNumberId: linked.phoneNumber?.id,
         signalmashBrandId: data.signalmashBrandId,
         signalmashCampaignId: data.signalmashCampaignId,
         signalmashNumberId: data.signalmashNumberId,

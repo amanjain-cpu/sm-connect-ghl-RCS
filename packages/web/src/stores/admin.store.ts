@@ -318,6 +318,22 @@ class AdminApiClient {
     return this.post<{ success: boolean; data: any }>('/settings/signalmash/test-connection', lookups);
   }
 
+  async getSignalmashBrands() {
+    return this.get<{ success: boolean; data: any[] }>('/settings/signalmash/brands');
+  }
+
+  async getSignalmashBrandCampaigns(brandId: string) {
+    return this.get<{ success: boolean; data: any[] }>(`/settings/signalmash/brands/${encodeURIComponent(brandId)}/campaigns`);
+  }
+
+  async assignSignalmashBrandCampaign(data: {
+    organizationId: string;
+    signalmashBrandId: string;
+    signalmashCampaignId: string;
+  }) {
+    return this.post<{ success: boolean; data: any; message?: string }>('/settings/signalmash/assign-brand-campaign', data);
+  }
+
   // Dashboard
   async getDashboard() {
     return this.get<{ success: boolean; data: any }>('/dashboard');
@@ -392,7 +408,7 @@ class AdminApiClient {
     campaignName: string;
     signalmashCampaignId: string;
     tcrCampaignId?: string;
-    phoneNumber: string;
+    phoneNumber?: string;
     signalmashNumberId?: string;
     friendlyName?: string;
     configureWebhook?: boolean;

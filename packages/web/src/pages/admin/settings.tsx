@@ -9,11 +9,20 @@ import {
   RefreshCw,
   Activity,
   AlertTriangle,
+  Building2,
+  Link2,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { adminApi } from '@/stores/admin.store';
 import { AdminHeader } from '@/components/layout/admin-header';
@@ -56,6 +65,30 @@ interface SignalmashDiagnostic {
     status?: string;
     message?: string;
   };
+}
+
+interface AdminOrganizationOption {
+  id: string;
+  name: string;
+  email: string;
+  status: 'active' | 'suspended';
+  suspensionReason?: string | null;
+}
+
+interface SignalmashBrandOption {
+  brandId: string;
+  displayName?: string;
+  status?: string;
+  assignable: boolean;
+}
+
+interface SignalmashCampaignOption {
+  campaignId: string;
+  brandId?: string;
+  name?: string;
+  status?: string;
+  providerMessage?: string;
+  assignable: boolean;
 }
 
 const SETTING_LABELS: Record<string, { label: string; description: string; placeholder: string }> = {
@@ -143,6 +176,15 @@ export function AdminSettingsPage() {
   const [diagnostic, setDiagnostic] = useState<SignalmashDiagnostic | null>(null);
   const [lookupBrandId, setLookupBrandId] = useState('');
   const [lookupCampaignId, setLookupCampaignId] = useState('');
+  const [organizations, setOrganizations] = useState<AdminOrganizationOption[]>([]);
+  const [providerBrands, setProviderBrands] = useState<SignalmashBrandOption[]>([]);
+  const [providerCampaigns, setProviderCampaigns] = useState<SignalmashCampaignOption[]>([]);
+  const [isLoadingAssignments, setIsLoadingAssignments] = useState(false);
+  const [isLoadingCampaigns, setIsLoadingCampaigns] = useState(false);
+  const [isAssigningAssets, setIsAssigningAssets] = useState(false);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState('');
+  const [selectedBrandId, setSelectedBrandId] = useState('');
+  const [selectedCampaignId, setSelectedCampaignId] = useState('');
 
   const loadSettings = async () => {
     try {
@@ -174,10 +216,70 @@ export function AdminSettingsPage() {
     }
   };
 
+  const loadAssignmentOptions = async () => {
+    setIsLoadingAssignments(true);
+    try {
+      const [organizationResponse, brandResponse] = await Promise.all([
+        adminApi.getOrganizations(1, 200),
+        adminApi.getSignalmashBrands(),
+      ]);
+
+      if (organizationResponse.success) {
+        setOrganizations(organizationResponse.data);
+      }
+
+      if (brandResponse.success) {
+        setProviderBrands(brandResponse.data);
+      }
+    } catch (loadError) {
+      console.error('Failed to load Signalmash assignment options:', loadError);
+      notify.error(
+        'Unable to load Signalmash assets',
+        loadError instanceof Error ? loadError.message : 'Provider-backed assignment options could not be loaded.'
+      );
+    } finally {
+      setIsLoadingAssignments(false);
+    }
+  };
+
+  const loadBrandCampaigns = async (brandId: string) => {
+    if (!brandId) {
+      setProviderCampaigns([]);
+      return;
+    }
+
+    setIsLoadingCampaigns(true);
+    try {
+      const response = await adminApi.getSignalmashBrandCampaigns(brandId);
+      if (response.success) {
+        setProviderCampaigns(response.data);
+      }
+    } catch (loadError) {
+      console.error('Failed to load Signalmash campaigns:', loadError);
+      notify.error(
+        'Unable to load campaigns',
+        loadError instanceof Error ? loadError.message : 'The selected brand campaigns could not be loaded.'
+      );
+      setProviderCampaigns([]);
+    } finally {
+      setIsLoadingCampaigns(false);
+    }
+  };
+
   useEffect(() => {
     loadSettings();
     loadDiagnostic();
+    loadAssignmentOptions();
   }, []);
+
+  useEffect(() => {
+    setSelectedCampaignId('');
+    setProviderCampaigns([]);
+
+    if (selectedBrandId) {
+      loadBrandCampaigns(selectedBrandId);
+    }
+  }, [selectedBrandId]);
 
   const handleSave = async (key: string) => {
     setSavingKey(key);
@@ -236,6 +338,42 @@ export function AdminSettingsPage() {
       setIsTestingConnection(false);
     }
   };
+
+  const handleAssignBrandCampaign = async () => {
+    if (!selectedOrganizationId || !selectedBrandId || !selectedCampaignId) {
+      notify.error('Assignment incomplete', 'Choose an organization, brand, and campaign before assigning.');
+      return;
+    }
+
+    setIsAssigningAssets(true);
+    try {
+      const response = await adminApi.assignSignalmashBrandCampaign({
+        organizationId: selectedOrganizationId,
+        signalmashBrandId: selectedBrandId,
+        signalmashCampaignId: selectedCampaignId,
+      });
+
+      if (response.success) {
+        notify.success(
+          'Assets assigned',
+          response.message || 'The verified Signalmash brand and campaign are now linked to the selected organization.'
+        );
+        await loadAssignmentOptions();
+        await loadBrandCampaigns(selectedBrandId);
+      }
+    } catch (assignError) {
+      notify.error(
+        'Assignment failed',
+        assignError instanceof Error ? assignError.message : 'The verified Signalmash assets could not be assigned.'
+      );
+    } finally {
+      setIsAssigningAssets(false);
+    }
+  };
+
+  const selectedOrganization = organizations.find((organization) => organization.id === selectedOrganizationId) ?? null;
+  const selectedBrand = providerBrands.find((brand) => brand.brandId === selectedBrandId) ?? null;
+  const selectedCampaign = providerCampaigns.find((campaign) => campaign.campaignId === selectedCampaignId) ?? null;
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950">
@@ -397,6 +535,159 @@ export function AdminSettingsPage() {
               No Signalmash diagnostic has been recorded yet.
             </div>
           )}
+        </section>
+
+        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="max-w-3xl space-y-2">
+              <div className="flex items-center gap-2">
+                <Link2 className="h-4 w-4 text-emerald-500" />
+                <h2 className="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">
+                  Signalmash Org Assignment
+                </h2>
+              </div>
+              <p className="text-sm leading-6 text-slate-600 dark:text-slate-400">
+                Fetch live Signalmash brands and campaigns, then assign only verified and approved assets to a GHL organization without manually typing provider IDs.
+              </p>
+            </div>
+            <Button variant="outline" onClick={loadAssignmentOptions} isLoading={isLoadingAssignments}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Refresh Assets
+            </Button>
+          </div>
+
+          <div className="mt-6 grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-800 dark:bg-slate-900/60 md:grid-cols-3">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Organizations</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950 dark:text-slate-50">{organizations.length}</p>
+            </div>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Visible Brands</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950 dark:text-slate-50">{providerBrands.length}</p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                {providerBrands.filter((brand) => brand.assignable).length} assignable
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Brand Campaigns</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950 dark:text-slate-50">{providerCampaigns.length}</p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                {providerCampaigns.filter((campaign) => campaign.assignable).length} assignable
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-4 lg:grid-cols-3">
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Organization</p>
+              <Select value={selectedOrganizationId} onValueChange={setSelectedOrganizationId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a GHL organization" />
+                </SelectTrigger>
+                <SelectContent>
+                  {organizations.map((organization) => (
+                    <SelectItem key={organization.id} value={organization.id}>
+                      {organization.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedOrganization && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  {selectedOrganization.email}
+                  {selectedOrganization.status === 'suspended' && selectedOrganization.suspensionReason
+                    ? ` • Suspended: ${selectedOrganization.suspensionReason}`
+                    : selectedOrganization.status === 'suspended'
+                      ? ' • Suspended'
+                      : ' • Active'}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Verified Brand</p>
+              <Select value={selectedBrandId} onValueChange={setSelectedBrandId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a Signalmash brand" />
+                </SelectTrigger>
+                <SelectContent>
+                  {providerBrands.map((brand) => (
+                    <SelectItem key={brand.brandId} value={brand.brandId}>
+                      {(brand.displayName || brand.brandId)} • {brand.status || 'UNKNOWN'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedBrand && (
+                <div className="flex items-center gap-2">
+                  <Badge variant={selectedBrand.assignable ? 'default' : 'secondary'}>
+                    {selectedBrand.status || 'UNKNOWN'}
+                  </Badge>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {selectedBrand.assignable ? 'Eligible for assignment' : 'Not assignable until provider verification completes'}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Approved Campaign</p>
+              <Select value={selectedCampaignId} onValueChange={setSelectedCampaignId} disabled={!selectedBrandId || isLoadingCampaigns}>
+                <SelectTrigger>
+                  <SelectValue placeholder={selectedBrandId ? 'Select a Signalmash campaign' : 'Select a brand first'} />
+                </SelectTrigger>
+                <SelectContent>
+                  {providerCampaigns.map((campaign) => (
+                    <SelectItem key={campaign.campaignId} value={campaign.campaignId}>
+                      {(campaign.name || campaign.campaignId)} • {campaign.status || 'UNKNOWN'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedCampaign && (
+                <div className="flex items-center gap-2">
+                  <Badge variant={selectedCampaign.assignable ? 'default' : 'secondary'}>
+                    {selectedCampaign.status || 'UNKNOWN'}
+                  </Badge>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {selectedCampaign.providerMessage || (selectedCampaign.assignable
+                      ? 'Eligible for assignment'
+                      : 'Not assignable until provider approval completes')}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-6 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950/70 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-1 text-sm text-slate-600 dark:text-slate-400">
+              <div className="flex items-center gap-2 text-slate-900 dark:text-slate-100">
+                <Building2 className="h-4 w-4 text-sky-500" />
+                <span className="font-medium">
+                  {selectedOrganization?.name || 'Choose an organization'} 
+                  {selectedBrand ? ` ← ${selectedBrand.displayName || selectedBrand.brandId}` : ''}
+                  {selectedCampaign ? ` ← ${selectedCampaign.name || selectedCampaign.campaignId}` : ''}
+                </span>
+              </div>
+              <p>
+                This links the verified brand and approved campaign into the selected org. Phone numbers are handled separately.
+              </p>
+            </div>
+            <Button
+              onClick={handleAssignBrandCampaign}
+              isLoading={isAssigningAssets}
+              disabled={
+                !selectedOrganizationId ||
+                !selectedBrandId ||
+                !selectedCampaignId ||
+                !selectedBrand?.assignable ||
+                !selectedCampaign?.assignable
+              }
+            >
+              <Link2 className="mr-2 h-4 w-4" />
+              Assign Brand and Campaign
+            </Button>
+          </div>
         </section>
 
         {isLoading ? (
