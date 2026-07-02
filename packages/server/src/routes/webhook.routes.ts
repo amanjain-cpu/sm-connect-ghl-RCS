@@ -75,6 +75,39 @@ function normalizeSignalmashStatus(rawStatus: unknown, rawNetworkDesc: unknown) 
   return 'sent' as const;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function pickString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function pickNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalmashEvent {
   const body = (payload ?? {}) as Record<string, unknown>;
   const type = typeof body.type === 'string' ? body.type : null;
@@ -155,6 +188,135 @@ function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalma
               : undefined,
       },
     };
+  }
+
+  const nestedBrand = asRecord(body.brand);
+  const nestedCampaign = asRecord(body.campaign);
+  const brandId = pickString(
+    body.brand_id,
+    body.brandId,
+    nestedBrand?.brand_id,
+    nestedBrand?.brandId,
+    data?.brand_id,
+    data?.brandId
+  );
+  const campaignId = pickString(
+    body.campaign_id,
+    body.campaignId,
+    nestedCampaign?.campaign_id,
+    nestedCampaign?.campaignId,
+    data?.campaign_id,
+    data?.campaignId
+  );
+
+  if (brandId) {
+    const brandStatus = pickString(
+      body.identityStatus,
+      body.identity_status,
+      body.status,
+      nestedBrand?.identityStatus,
+      nestedBrand?.identity_status,
+      nestedBrand?.status,
+      data?.identityStatus,
+      data?.identity_status,
+      data?.status
+    );
+
+    if (brandStatus) {
+      return {
+        type: 'brand.status',
+        data: {
+          brand_id: brandId,
+          status: brandStatus,
+          verification_score: pickNumber(
+            body.verification_score,
+            body.verificationScore,
+            nestedBrand?.verification_score,
+            nestedBrand?.verificationScore,
+            data?.verification_score,
+            data?.verificationScore
+          ),
+          rejection_reason: pickString(
+            body.rejection_reason,
+            body.rejectionReason,
+            nestedBrand?.rejection_reason,
+            nestedBrand?.rejectionReason,
+            data?.rejection_reason,
+            data?.rejectionReason
+          ),
+          tcr_brand_id: pickString(
+            body.tcr_brand_id,
+            body.tcrBrandId,
+            nestedBrand?.tcr_brand_id,
+            nestedBrand?.tcrBrandId,
+            data?.tcr_brand_id,
+            data?.tcrBrandId
+          ),
+        },
+      };
+    }
+  }
+
+  if (campaignId) {
+    const campaignStatus = pickString(
+      body.campaignStatus,
+      body.campaign_status,
+      body.approvalStatus,
+      body.approval_status,
+      body.status,
+      nestedCampaign?.campaignStatus,
+      nestedCampaign?.campaign_status,
+      nestedCampaign?.approvalStatus,
+      nestedCampaign?.approval_status,
+      nestedCampaign?.status,
+      data?.campaignStatus,
+      data?.campaign_status,
+      data?.approvalStatus,
+      data?.approval_status,
+      data?.status
+    );
+
+    if (campaignStatus) {
+      return {
+        type: 'campaign.status',
+        data: {
+          campaign_id: campaignId,
+          status: campaignStatus,
+          rejection_reason: pickString(
+            body.rejection_reason,
+            body.rejectionReason,
+            nestedCampaign?.rejection_reason,
+            nestedCampaign?.rejectionReason,
+            data?.rejection_reason,
+            data?.rejectionReason
+          ),
+          daily_message_limit: pickNumber(
+            body.daily_message_limit,
+            body.dailyMessageLimit,
+            nestedCampaign?.daily_message_limit,
+            nestedCampaign?.dailyMessageLimit,
+            data?.daily_message_limit,
+            data?.dailyMessageLimit
+          ),
+          messages_per_second: pickNumber(
+            body.messages_per_second,
+            body.messagesPerSecond,
+            nestedCampaign?.messages_per_second,
+            nestedCampaign?.messagesPerSecond,
+            data?.messages_per_second,
+            data?.messagesPerSecond
+          ),
+          tcr_campaign_id: pickString(
+            body.tcr_campaign_id,
+            body.tcrCampaignId,
+            nestedCampaign?.tcr_campaign_id,
+            nestedCampaign?.tcrCampaignId,
+            data?.tcr_campaign_id,
+            data?.tcrCampaignId
+          ),
+        },
+      };
+    }
   }
 
   return {

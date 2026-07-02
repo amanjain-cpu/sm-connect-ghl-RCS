@@ -3,6 +3,11 @@
 // ===========================================
 
 import { prisma } from '../config/database.js';
+import {
+  BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL,
+  SIGNALMASH_PROVIDER_VERTICALS,
+  type SignalmashProviderVertical,
+} from '@signalmash-connect/shared';
 import { signalmashService } from './signalmash.service.js';
 import { NotFoundError, BadRequestError, ConflictError, AppError, ExternalServiceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
@@ -87,20 +92,38 @@ export class BrandService {
     return map[entityType];
   }
 
-  private mapVerticalToProvider(vertical: BusinessVertical): string {
-    const map: Record<BusinessVertical, string> = {
-      retail: 'RETAIL',
-      healthcare: 'HEALTHCARE',
-      financial: 'FINANCIAL',
-      education: 'EDUCATION',
-      hospitality: 'HOSPITALITY',
-      real_estate: 'REAL_ESTATE',
-      technology: 'TECHNOLOGY',
-      professional_services: 'PROFESSIONAL_SERVICES',
-      other: 'OTHER',
-    };
+  private mapVerticalToProvider(vertical: BusinessVertical): SignalmashProviderVertical {
+    const providerVertical = BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL[vertical];
+    if (!providerVertical) {
+      throw new BadRequestError('Select a specific Signalmash provider vertical before submitting this brand');
+    }
 
-    return map[vertical];
+    return providerVertical;
+  }
+
+  private resolveProviderVertical(brand: Pick<Brand, 'vertical' | 'providerVertical'>): SignalmashProviderVertical {
+    if (brand.providerVertical) {
+      if (brand.providerVertical === 'PROFESSIONAL_SERVICES') {
+        return 'PROFESSIONAL';
+      }
+
+      if (brand.providerVertical === 'OTHER') {
+        const mapped = BUSINESS_VERTICAL_TO_SIGNALMASH_PROVIDER_VERTICAL[brand.vertical];
+        if (mapped) {
+          return mapped;
+        }
+
+        throw new BadRequestError('Select a specific Signalmash provider vertical before submitting this brand');
+      }
+
+      if (SIGNALMASH_PROVIDER_VERTICALS.includes(brand.providerVertical as SignalmashProviderVertical)) {
+        return brand.providerVertical as SignalmashProviderVertical;
+      }
+
+      throw new BadRequestError('Select a supported Signalmash provider vertical before submitting this brand');
+    }
+
+    return this.mapVerticalToProvider(brand.vertical);
   }
 
   private assertBrandReadyForSubmission(brand: Brand) {
@@ -136,6 +159,8 @@ export class BrandService {
   }
 
   private buildProviderPayload(brand: Brand) {
+    const providerVertical = this.resolveProviderVertical(brand);
+
     return {
       entityType: brand.providerEntityType ?? this.mapEntityTypeToProvider(brand.entityType),
       firstName: brand.firstName ?? undefined,
@@ -156,7 +181,7 @@ export class BrandService {
       ipAddress: brand.ipAddress ?? undefined,
       brandRelationship: brand.brandRelationship ?? 'BASIC_ACCOUNT',
       website: brand.website,
-      vertical: brand.providerVertical ?? this.mapVerticalToProvider(brand.vertical),
+      vertical: providerVertical,
       altBusinessId: brand.altBusinessId ?? undefined,
       altBusinessIdType: brand.altBusinessIdType ?? undefined,
       referenceId: brand.referenceId ?? undefined,
@@ -272,6 +297,7 @@ export class BrandService {
     await prisma.brand.update({
       where: { id: brand.id },
       data: {
+        providerVertical: requestPayload.vertical,
         submitAttempts: {
           increment: 1,
         },
@@ -291,6 +317,7 @@ export class BrandService {
           signalmashBrandId: result.brandId,
           tcrBrandId: result.tcrBrandId ?? brand.tcrBrandId,
           status: nextStatus,
+          providerVertical: requestPayload.vertical,
           providerStatus: result.status,
           providerMessage: result.message ?? null,
           verificationScore: result.verificationScore ?? brand.verificationScore,
@@ -366,7 +393,7 @@ export class BrandService {
    */
   async handleVerificationResult(
     signalmashBrandId: string,
-    status: 'verified' | 'unverified' | 'rejected',
+    status: string,
     verificationScore?: number,
     rejectionReason?: string,
     tcrBrandId?: string
@@ -379,22 +406,24 @@ export class BrandService {
       throw new NotFoundError('Brand not found');
     }
 
+    const nextStatus = this.mapProviderBrandStatus(status, brand.status);
     const updatedBrand = await prisma.brand.update({
       where: { id: brand.id },
       data: {
-        status,
+        status: nextStatus,
         providerStatus: status,
         providerMessage: rejectionReason ?? null,
         verificationScore,
-        rejectionReason,
+        rejectionReason: nextStatus === 'rejected' ? rejectionReason ?? brand.rejectionReason : null,
         tcrBrandId: tcrBrandId ?? brand.tcrBrandId,
         lastStatusSyncedAt: new Date(),
-        lastSubmissionError: status === 'rejected' ? rejectionReason ?? brand.lastSubmissionError : null,
+        lastSubmissionError:
+          nextStatus === 'rejected' ? rejectionReason ?? brand.lastSubmissionError : null,
       },
     });
 
     logger.info(
-      { brandId: brand.id, status, verificationScore },
+      { brandId: brand.id, providerStatus: status, nextStatus, verificationScore },
       'Brand verification status updated'
     );
 
@@ -408,6 +437,7 @@ export class BrandService {
       status: 'success',
       responsePayload: {
         status,
+        nextStatus,
         verificationScore,
         rejectionReason,
         tcrBrandId,
@@ -433,13 +463,22 @@ export class BrandService {
         data: {
           status: nextStatus,
           providerStatus: providerStatus.status,
-          providerMessage: providerStatus.rejectionReason ?? null,
+          providerMessage:
+            providerStatus.rejectionReason ??
+            providerStatus.providerMessage ??
+            brand.providerMessage,
           verificationScore: providerStatus.verificationScore ?? brand.verificationScore,
-          rejectionReason: providerStatus.rejectionReason ?? (nextStatus === 'rejected' ? brand.rejectionReason : null),
+          rejectionReason:
+            nextStatus === 'rejected'
+              ? providerStatus.rejectionReason ?? brand.rejectionReason
+              : null,
           tcrBrandId: providerStatus.tcrBrandId ?? brand.tcrBrandId,
           referenceId: providerStatus.referenceId ?? brand.referenceId,
           lastStatusSyncedAt: new Date(),
-          lastSubmissionError: nextStatus === 'rejected' ? (providerStatus.rejectionReason ?? brand.lastSubmissionError) : null,
+          lastSubmissionError:
+            nextStatus === 'rejected'
+              ? providerStatus.rejectionReason ?? brand.lastSubmissionError
+              : null,
         },
       });
 
@@ -498,10 +537,56 @@ export class BrandService {
     }
   }
 
-  private mapProviderBrandStatus(providerStatus: string, currentStatus: BrandStatus): BrandStatus {
-    const normalized = providerStatus.trim().toLowerCase();
+  async setManualVerificationStatus(
+    id: string,
+    organizationId: string,
+    status: Extract<BrandStatus, 'verified' | 'rejected'>,
+    reason?: string
+  ): Promise<Brand> {
+    const brand = await this.getById(id, organizationId);
 
-    if (['active', 'verified', 'approved'].includes(normalized)) {
+    if (!brand.signalmashBrandId) {
+      throw new BadRequestError('Brand must be linked to Signalmash before admin approval can be set');
+    }
+
+    const normalizedReason = reason?.trim() || undefined;
+    const rejectionReason =
+      status === 'rejected'
+        ? normalizedReason ??
+          brand.rejectionReason ??
+          brand.providerMessage ??
+          brand.lastSubmissionError ??
+          'Marked rejected manually by admin.'
+        : null;
+
+    const updatedBrand = await prisma.brand.update({
+      where: { id: brand.id },
+      data: {
+        status,
+        rejectionReason,
+        lastSubmissionError: status === 'rejected' ? rejectionReason : null,
+      },
+    });
+
+    logger.info(
+      {
+        brandId: brand.id,
+        signalmashBrandId: brand.signalmashBrandId,
+        previousStatus: brand.status,
+        nextStatus: status,
+      },
+      'Brand verification status updated manually'
+    );
+
+    await integrationService.syncBrandMapping(updatedBrand);
+
+    return updatedBrand;
+  }
+
+  private mapProviderBrandStatus(providerStatus: string, currentStatus: BrandStatus): BrandStatus {
+    const normalized = providerStatus.trim().replace(/[\s-]+/g, '_').toLowerCase();
+
+    if (['active', 'verified', 'approved', 'vetted_verified'].includes(normalized)) {
       return 'verified';
     }
 
@@ -509,11 +594,23 @@ export class BrandService {
       return 'rejected';
     }
 
-    if (['unverified', 'needs_info'].includes(normalized)) {
-      return 'unverified';
+    if (['suspended'].includes(normalized)) {
+      return 'suspended';
     }
 
-    if (['pending', 'pending_verification', 'in_review', 'submitted', 'review'].includes(normalized)) {
+    if (
+      [
+        'self_declared',
+        'unverified',
+        'needs_info',
+        'pending',
+        'pending_verification',
+        'in_review',
+        'submitted',
+        'review',
+        'manual_review',
+      ].includes(normalized)
+    ) {
       return 'pending_verification';
     }
 

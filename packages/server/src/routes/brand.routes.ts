@@ -5,10 +5,15 @@
 import { Router } from 'express';
 import type { Router as RouterType } from 'express';
 import { z } from 'zod';
+import {
+  SIGNALMASH_PROVIDER_VERTICALS,
+  SIGNALMASH_PROVIDER_VERTICAL_TO_BUSINESS_VERTICAL,
+} from '@signalmash-connect/shared';
 import { brandService } from '../services/brand.service.js';
 import { validate, idParamSchema, einSchema, urlSchema, phoneSchema, emailSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { organizationRuntimeService } from '../services/organization-runtime.service.js';
 
 const router: RouterType = Router();
 
@@ -22,17 +27,7 @@ const providerEntityTypeToInternal = {
   LLC: 'llc',
 } as const;
 
-const providerVerticalToInternal = {
-  RETAIL: 'retail',
-  HEALTHCARE: 'healthcare',
-  FINANCIAL: 'financial',
-  EDUCATION: 'education',
-  HOSPITALITY: 'hospitality',
-  REAL_ESTATE: 'real_estate',
-  TECHNOLOGY: 'technology',
-  PROFESSIONAL_SERVICES: 'professional_services',
-  OTHER: 'other',
-} as const;
+const providerVerticalToInternal = SIGNALMASH_PROVIDER_VERTICAL_TO_BUSINESS_VERTICAL;
 
 // Validation schemas
 const createBrandSchema = z.object({
@@ -73,7 +68,7 @@ const updateBrandSchema = createBrandSchema.extend({
   lastName: z.string().optional(),
   einIssuingCountry: z.string().min(2).max(2).optional(),
   providerEntityType: z.enum(['PRIVATE_PROFIT', 'PUBLIC_PROFIT', 'NON_PROFIT', 'GOVERNMENT', 'SOLE_PROPRIETOR', 'PARTNERSHIP', 'LLC']).optional(),
-  providerVertical: z.enum(['RETAIL', 'HEALTHCARE', 'FINANCIAL', 'EDUCATION', 'HOSPITALITY', 'REAL_ESTATE', 'TECHNOLOGY', 'PROFESSIONAL_SERVICES', 'OTHER']).optional(),
+  providerVertical: z.enum(SIGNALMASH_PROVIDER_VERTICALS).optional(),
   brandRelationship: z.enum(['BASIC_ACCOUNT', 'SMALL_ACCOUNT', 'MEDIUM_ACCOUNT', 'LARGE_ACCOUNT', 'KEY_ACCOUNT']).optional(),
   mobilePhone: z.string().optional(),
   businessContactEmail: emailSchema.optional(),
@@ -106,7 +101,7 @@ const createBrandProviderSchema = z.object({
   ipAddress: z.string().optional().default(''),
   brandRelationship: z.enum(['BASIC_ACCOUNT', 'SMALL_ACCOUNT', 'MEDIUM_ACCOUNT', 'LARGE_ACCOUNT', 'KEY_ACCOUNT']).default('BASIC_ACCOUNT'),
   website: urlSchema,
-  vertical: z.enum(['RETAIL', 'HEALTHCARE', 'FINANCIAL', 'EDUCATION', 'HOSPITALITY', 'REAL_ESTATE', 'TECHNOLOGY', 'PROFESSIONAL_SERVICES', 'OTHER']),
+  vertical: z.enum(SIGNALMASH_PROVIDER_VERTICALS),
   altBusinessId: z.string().optional().default('NONE'),
   altBusinessIdType: z.string().optional().default('NONE'),
   referenceId: z.string().optional().default('NONE'),
@@ -117,7 +112,7 @@ const createBrandProviderSchema = z.object({
 
 const createBrandRequestSchema = z.union([createBrandSchema, createBrandProviderSchema]);
 
-function normalizeCreateBrandPayload(body: unknown) {
+function normalizeCreateBrandPayload(body: unknown): Omit<Parameters<typeof brandService.create>[0], 'organizationId'> {
   const providerParsed = createBrandProviderSchema.safeParse(body);
   if (providerParsed.success) {
     const data = providerParsed.data;
@@ -131,7 +126,7 @@ function normalizeCreateBrandPayload(body: unknown) {
       einIssuingCountry: data.einIssuingCountry,
       entityType: providerEntityTypeToInternal[data.entityType],
       providerEntityType: data.entityType,
-      vertical: providerVerticalToInternal[data.vertical],
+      vertical: providerVerticalToInternal[data.vertical] as Omit<Parameters<typeof brandService.create>[0], 'organizationId'>['vertical'],
       providerVertical: data.vertical,
       brandRelationship: data.brandRelationship,
       streetAddress: data.street,
@@ -183,6 +178,10 @@ router.post(
   authenticate,
   validate({ body: createBrandRequestSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'create brands'
+    );
     const brand = await brandService.create({
       ...normalizeCreateBrandPayload(req.body),
       organizationId: req.user!.organizationId,
@@ -225,6 +224,10 @@ router.put(
   authenticate,
   validate({ params: idParamSchema, body: updateBrandSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'update brands'
+    );
     const brand = await brandService.update(
       req.params.id,
       req.user!.organizationId,
@@ -247,6 +250,10 @@ router.post(
   authenticate,
   validate({ params: idParamSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'submit brands'
+    );
     const brand = await brandService.submitForVerification(
       req.params.id,
       req.user!.organizationId
@@ -269,6 +276,10 @@ router.post(
   authenticate,
   validate({ params: idParamSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'refresh brand status'
+    );
     const brand = await brandService.refreshVerificationStatus(
       req.params.id,
       req.user!.organizationId
@@ -291,6 +302,10 @@ router.delete(
   authenticate,
   validate({ params: idParamSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'delete brands'
+    );
     await brandService.delete(req.params.id, req.user!.organizationId);
 
     res.json({

@@ -314,8 +314,8 @@ class AdminApiClient {
     return this.get<{ success: boolean; data: any | null }>('/settings/signalmash/diagnostic');
   }
 
-  async testSignalmashConnection() {
-    return this.post<{ success: boolean; data: any }>('/settings/signalmash/test-connection');
+  async testSignalmashConnection(lookups?: { brandId?: string; campaignId?: string }) {
+    return this.post<{ success: boolean; data: any }>('/settings/signalmash/test-connection', lookups);
   }
 
   // Dashboard
@@ -332,6 +332,14 @@ class AdminApiClient {
     return this.get<{ success: boolean; data: any }>(`/organizations/${id}/onboarding`);
   }
 
+  async suspendOrganization(id: string, reason?: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${id}/suspend`, reason ? { reason } : {});
+  }
+
+  async unsuspendOrganization(id: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${id}/unsuspend`);
+  }
+
   async submitOrganizationBrand(organizationId: string, brandId: string) {
     return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/brands/${brandId}/submit`);
   }
@@ -340,12 +348,40 @@ class AdminApiClient {
     return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/brands/${brandId}/refresh-status`);
   }
 
+  async setOrganizationBrandStatus(
+    organizationId: string,
+    brandId: string,
+    data: {
+      status: 'verified' | 'rejected';
+      reason?: string;
+    }
+  ) {
+    return this.post<{ success: boolean; data: any; message?: string }>(
+      `/organizations/${organizationId}/brands/${brandId}/manual-status`,
+      data
+    );
+  }
+
   async submitOrganizationCampaign(organizationId: string, campaignId: string) {
     return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/campaigns/${campaignId}/submit`);
   }
 
   async refreshOrganizationCampaign(organizationId: string, campaignId: string) {
     return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${organizationId}/campaigns/${campaignId}/refresh-status`);
+  }
+
+  async setOrganizationCampaignStatus(
+    organizationId: string,
+    campaignId: string,
+    data: {
+      status: 'approved' | 'rejected';
+      reason?: string;
+    }
+  ) {
+    return this.post<{ success: boolean; data: any; message?: string }>(
+      `/organizations/${organizationId}/campaigns/${campaignId}/manual-status`,
+      data
+    );
   }
 
   async linkExistingSignalmashAssets(data: {

@@ -132,7 +132,7 @@ export type CampaignStatus =
   | 'expired';
 
 export type CampaignUseCase =
-  | '2fa'
+  | 'two_factor_auth'
   | 'account_notifications'
   | 'customer_care'
   | 'delivery_notifications'

@@ -3,12 +3,15 @@
 // ===========================================
 
 import { prisma } from '../config/database.js';
+import { config } from '../config/index.js';
 import { signalmashService } from './signalmash.service.js';
 import { NotFoundError, BadRequestError, AppError, ExternalServiceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import type { Campaign, CampaignStatus, CampaignUseCase } from '@prisma/client';
+import { Prisma, type Campaign, type CampaignStatus, type CampaignUseCase } from '@prisma/client';
 import { integrationService } from './integration.service.js';
 import { providerOperationService } from './provider-operation.service.js';
+import { phoneNumberService } from './phoneNumber.service.js';
+import { subscriptionBillingService } from './subscription-billing.service.js';
 
 interface CreateCampaignInput {
   organizationId: string;
@@ -76,13 +79,98 @@ interface UpdateCampaignInput {
   embeddedLinkSample?: string;
 }
 
+interface CampaignNumberLinkIntentInput {
+  mode: 'existing' | 'buy_new';
+  phoneNumberId?: string;
+  phoneNumber?: string;
+  friendlyName?: string;
+}
+
+interface CampaignNumberLinkIntent {
+  mode: 'existing' | 'buy_new';
+  phoneNumberId?: string;
+  phoneNumber?: string;
+  friendlyName?: string;
+}
+
+type CampaignNumberLinkAction =
+  | {
+      mode: 'linked';
+      phoneNumberId: string;
+      phoneNumber: string;
+    }
+  | {
+      mode: 'checkout';
+      checkoutUrl: string;
+      sessionId: string;
+      activePhoneNumbers: number;
+      includedPhoneNumbers: number;
+      immediateChargeAmount: number;
+    }
+  | {
+      mode: 'pending_provider';
+      message: string;
+    }
+  | {
+      mode: 'failed';
+      message: string;
+    };
+
+type CampaignResultWithNumberLink = Campaign & {
+  numberLinkAction?: CampaignNumberLinkAction;
+};
+
 export class CampaignService {
+  private readonly useCasesRequiringSubUseCases = new Set(['low_volume', 'mixed']);
+  private readonly supportedSubUseCases = new Set([
+    'two_factor_auth',
+    'account_notifications',
+    'customer_care',
+    'delivery_notifications',
+    'fraud_alerts',
+    'higher_education',
+    'marketing',
+    'polling_voting',
+    'public_service_announcement',
+    'security_alerts',
+  ]);
+
   private asStringArray(value: unknown): string[] {
     if (!Array.isArray(value)) {
       return [];
     }
 
     return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  }
+
+  private normalizeCampaignUseCaseToken(value: string): string {
+    const normalized = value.trim().replace(/[\s-]+/g, '_').toLowerCase();
+    const aliases: Record<string, string> = {
+      '2fa': 'two_factor_auth',
+      account_notification: 'account_notifications',
+      delivery_notification: 'delivery_notifications',
+      fraud_alert: 'fraud_alerts',
+      security_alert: 'security_alerts',
+    };
+
+    return aliases[normalized] ?? normalized;
+  }
+
+  private normalizeCampaignSubUsecases(useCase: string, value: unknown): string[] {
+    const normalizedUseCase = this.normalizeCampaignUseCaseToken(useCase);
+    const requested = Array.from(
+      new Set(
+        this.asStringArray(value)
+          .map((item) => this.normalizeCampaignUseCaseToken(item))
+          .filter((item) => this.supportedSubUseCases.has(item))
+      )
+    );
+
+    if (this.useCasesRequiringSubUseCases.has(normalizedUseCase)) {
+      return requested;
+    }
+
+    return requested.length > 0 ? requested : [normalizedUseCase];
   }
 
   private buildDefaultHelpMessage(input: {
@@ -120,6 +208,24 @@ export class CampaignService {
       throw new BadRequestError('No more than 5 sample messages can be submitted');
     }
 
+    const subUsecases = this.normalizeCampaignSubUsecases(campaign.useCase, campaign.subUsecases);
+    if (campaign.useCase === 'mixed' && subUsecases.length < 2) {
+      throw new BadRequestError('Mixed campaigns must include at least 2 sub-use-cases before submission');
+    }
+
+    if (campaign.useCase === 'low_volume' && subUsecases.length < 1) {
+      throw new BadRequestError('Low-volume campaigns must include at least 1 sub-use-case before submission');
+    }
+
+    if (
+      this.useCasesRequiringSubUseCases.has(this.normalizeCampaignUseCaseToken(campaign.useCase)) &&
+      sampleMessages.length < subUsecases.length
+    ) {
+      throw new BadRequestError(
+        'Provide at least one sample message for each selected sub-use-case before submission'
+      );
+    }
+
     const optInKeywords = this.asStringArray(campaign.optInKeywords);
     const optOutKeywords = this.asStringArray(campaign.optOutKeywords);
     const helpKeywords = this.asStringArray(campaign.helpKeywords);
@@ -147,14 +253,17 @@ export class CampaignService {
 
   private buildProviderPayload(
     campaign: Campaign,
-    brandId: string
+    brandId: string,
+    overrides?: {
+      mnoIds?: string[];
+    }
   ) {
     return {
       brandId,
       name: campaign.name,
       description: campaign.description,
       useCase: campaign.useCase,
-      subUsecases: this.asStringArray(campaign.subUsecases),
+      subUsecases: this.normalizeCampaignSubUsecases(campaign.useCase, campaign.subUsecases),
       embeddedLink: campaign.embeddedLink,
       embeddedPhone: campaign.embeddedPhone,
       affiliateMarketing: campaign.affiliateMarketing,
@@ -167,7 +276,7 @@ export class CampaignService {
       subscriberHelp: campaign.subscriberHelp,
       sampleMessages: this.asStringArray(campaign.sampleMessages),
       messageFlow: campaign.messageFlow,
-      mnoIds: this.asStringArray(campaign.mnoIds),
+      mnoIds: overrides?.mnoIds ?? this.asStringArray(campaign.mnoIds),
       referenceId: campaign.referenceId ?? undefined,
       tag: this.asStringArray(campaign.tags),
       autoRenewal: campaign.autoRenewal,
@@ -181,6 +290,317 @@ export class CampaignService {
       termsAndConditionsLink: campaign.termsAndConditionsLink ?? undefined,
       embeddedLinkSample: campaign.embeddedLinkSample ?? undefined,
     };
+  }
+
+  private resolveQualifiedMnoIds(
+    campaign: Campaign,
+    qualification: Awaited<ReturnType<typeof signalmashService.qualifyBrandByUseCase>>
+  ): string[] {
+    const requestedMnoIds = this.asStringArray(campaign.mnoIds);
+    const eligibleMnoIds = qualification.eligibleMnoIds ?? [];
+
+    if (eligibleMnoIds.length === 0) {
+      return requestedMnoIds;
+    }
+
+    if (requestedMnoIds.length === 0) {
+      return eligibleMnoIds;
+    }
+
+    const intersected = requestedMnoIds.filter((mnoId) => eligibleMnoIds.includes(mnoId));
+    return intersected.length > 0 ? intersected : eligibleMnoIds;
+  }
+
+  private assertQualificationRequirements(
+    campaign: Campaign,
+    qualification: Awaited<ReturnType<typeof signalmashService.qualifyBrandByUseCase>>
+  ) {
+    const sampleMessages = this.asStringArray(campaign.sampleMessages);
+
+    if (
+      qualification.minimumSampleMessages !== undefined &&
+      sampleMessages.length < qualification.minimumSampleMessages
+    ) {
+      throw new BadRequestError(
+        `Signalmash requires at least ${qualification.minimumSampleMessages} sample message${qualification.minimumSampleMessages === 1 ? '' : 's'} for this campaign use case`
+      );
+    }
+
+    if (qualification.requiresSubscriberOptin && !campaign.subscriberOptin) {
+      throw new BadRequestError('This campaign use case must support subscriber opt-in');
+    }
+
+    if (qualification.requiresSubscriberOptout && !campaign.subscriberOptout) {
+      throw new BadRequestError('This campaign use case must support subscriber opt-out');
+    }
+
+    if (qualification.requiresSubscriberHelp && !campaign.subscriberHelp) {
+      throw new BadRequestError('This campaign use case must support subscriber help responses');
+    }
+
+    if (qualification.disallowEmbeddedLink && campaign.embeddedLink) {
+      throw new BadRequestError('This campaign use case cannot include embedded links');
+    }
+
+    if (qualification.disallowEmbeddedPhone && campaign.embeddedPhone) {
+      throw new BadRequestError('This campaign use case cannot include embedded phone numbers');
+    }
+  }
+
+  private parseNumberLinkIntent(value: unknown): CampaignNumberLinkIntent | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+
+    const record = value as Record<string, unknown>;
+    const mode = record.mode === 'existing' || record.mode === 'buy_new'
+      ? record.mode
+      : null;
+
+    if (!mode) {
+      return null;
+    }
+
+    const phoneNumberId =
+      typeof record.phoneNumberId === 'string' && record.phoneNumberId.trim().length > 0
+        ? record.phoneNumberId.trim()
+        : undefined;
+    const phoneNumber =
+      typeof record.phoneNumber === 'string' && record.phoneNumber.trim().length > 0
+        ? record.phoneNumber.trim()
+        : undefined;
+    const friendlyName =
+      typeof record.friendlyName === 'string' && record.friendlyName.trim().length > 0
+        ? record.friendlyName.trim()
+        : undefined;
+
+    if (mode === 'existing' && !phoneNumberId) {
+      return null;
+    }
+
+    if (mode === 'buy_new' && !phoneNumber) {
+      return null;
+    }
+
+    return {
+      mode,
+      ...(phoneNumberId ? { phoneNumberId } : {}),
+      ...(phoneNumber ? { phoneNumber } : {}),
+      ...(friendlyName ? { friendlyName } : {}),
+    };
+  }
+
+  private normalizeNumberLinkIntent(
+    value?: CampaignNumberLinkIntentInput | null
+  ): CampaignNumberLinkIntent | null {
+    if (!value) {
+      return null;
+    }
+
+    const mode = value.mode;
+    if (mode !== 'existing' && mode !== 'buy_new') {
+      throw new BadRequestError('Select a valid phone-number linking mode');
+    }
+
+    if (mode === 'existing') {
+      const phoneNumberId = value.phoneNumberId?.trim();
+      if (!phoneNumberId) {
+        throw new BadRequestError('Select an existing phone number to link');
+      }
+
+      return {
+        mode,
+        phoneNumberId,
+        ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
+      };
+    }
+
+    const phoneNumber = value.phoneNumber?.trim();
+    if (!phoneNumber) {
+      throw new BadRequestError('Select a phone number to purchase and link');
+    }
+
+    return {
+      mode,
+      phoneNumber,
+      ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
+    };
+  }
+
+  private buildPhoneCheckoutUrls(campaignId: string) {
+    return {
+      successUrl: `${config.webUrl}/campaigns/${campaignId}?number_checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${config.webUrl}/campaigns/${campaignId}?number_checkout=cancelled`,
+    };
+  }
+
+  private async setNumberLinkIntent(
+    campaign: Campaign,
+    intentInput?: CampaignNumberLinkIntentInput | null
+  ): Promise<Campaign> {
+    if (intentInput === undefined) {
+      return campaign;
+    }
+
+    const intent = this.normalizeNumberLinkIntent(intentInput);
+
+    return prisma.campaign.update({
+      where: { id: campaign.id },
+      data: intent
+        ? {
+            numberLinkIntent: intent as unknown as Prisma.InputJsonValue,
+            numberLinkStatus: 'requested',
+            numberLinkError: null,
+            numberLinkAttemptedAt: null,
+            numberLinkCompletedAt: null,
+          }
+        : {
+            numberLinkIntent: Prisma.DbNull,
+            numberLinkStatus: 'none',
+            numberLinkError: null,
+            numberLinkAttemptedAt: null,
+            numberLinkCompletedAt: null,
+          },
+    });
+  }
+
+  private async fulfillNumberLinkIntent(campaign: Campaign): Promise<CampaignResultWithNumberLink> {
+    const intent = this.parseNumberLinkIntent(campaign.numberLinkIntent);
+
+    if (!intent) {
+      return campaign;
+    }
+
+    const attemptedAt = new Date();
+
+    if (intent.mode === 'existing') {
+      try {
+        const linkedNumber = await phoneNumberService.updateNumber(
+          campaign.organizationId,
+          intent.phoneNumberId!,
+          {
+            friendlyName: intent.friendlyName,
+            campaignId: campaign.id,
+          }
+        );
+        const updatedCampaign = await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: {
+            numberLinkStatus: 'linked',
+            numberLinkError: null,
+            numberLinkAttemptedAt: attemptedAt,
+            numberLinkCompletedAt: new Date(),
+          },
+        });
+
+        return {
+          ...updatedCampaign,
+          numberLinkAction: {
+            mode: 'linked',
+            phoneNumberId: linkedNumber.id,
+            phoneNumber: linkedNumber.phoneNumber,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to link the existing phone number';
+        const updatedCampaign = await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: {
+            numberLinkStatus: campaign.status === 'approved' ? 'failed' : 'requested',
+            numberLinkError: message,
+            numberLinkAttemptedAt: attemptedAt,
+            numberLinkCompletedAt: null,
+          },
+        });
+
+        return {
+          ...updatedCampaign,
+          numberLinkAction: {
+            mode: campaign.status === 'approved' ? 'failed' : 'pending_provider',
+            message,
+          },
+        };
+      }
+    }
+
+    const checkout = await subscriptionBillingService.preparePhoneNumberCheckout({
+      organizationId: campaign.organizationId,
+      phoneNumber: intent.phoneNumber!,
+      campaignId: campaign.id,
+      friendlyName: intent.friendlyName,
+      ...this.buildPhoneCheckoutUrls(campaign.id),
+    });
+
+    if (checkout.mode === 'checkout') {
+      const updatedCampaign = await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          numberLinkStatus: 'checkout_required',
+          numberLinkError: null,
+          numberLinkAttemptedAt: attemptedAt,
+          numberLinkCompletedAt: null,
+        },
+      });
+
+      return {
+        ...updatedCampaign,
+        numberLinkAction: checkout,
+      };
+    }
+
+    try {
+      const number = await phoneNumberService.purchaseNumber(
+        campaign.organizationId,
+        intent.phoneNumber!,
+        {
+          campaignId: campaign.id,
+          friendlyName: intent.friendlyName,
+        }
+      );
+      const updatedCampaign = await prisma.campaign.findUnique({
+        where: { id: campaign.id },
+      });
+
+      if (!updatedCampaign) {
+        throw new NotFoundError('Campaign not found after phone number purchase');
+      }
+
+      return {
+        ...updatedCampaign,
+        numberLinkAction: {
+          mode: 'linked',
+          phoneNumberId: number.id,
+          phoneNumber: number.phoneNumber,
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to purchase and link the phone number';
+      const updatedCampaign = await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          numberLinkStatus: campaign.status === 'approved' ? 'failed' : 'requested',
+          numberLinkError: message,
+          numberLinkAttemptedAt: attemptedAt,
+          numberLinkCompletedAt: null,
+        },
+      });
+
+      return {
+        ...updatedCampaign,
+        numberLinkAction: {
+          mode: campaign.status === 'approved' ? 'failed' : 'pending_provider',
+          message,
+        },
+      };
+    }
+  }
+
+  private async maybeFulfillPendingNumberLink(campaign: Campaign): Promise<CampaignResultWithNumberLink> {
+    if (campaign.status !== 'approved' || campaign.numberLinkStatus !== 'requested') {
+      return campaign;
+    }
+
+    return this.fulfillNumberLinkIntent(campaign);
   }
 
   /**
@@ -225,7 +645,6 @@ export class CampaignService {
         name: data.name,
         description: data.description,
         useCase: data.useCase,
-        subUsecases: data.subUsecases ?? [],
         embeddedLink: data.embeddedLink ?? false,
         embeddedPhone: data.embeddedPhone ?? false,
         affiliateMarketing: data.affiliateMarketing ?? false,
@@ -251,6 +670,7 @@ export class CampaignService {
         privacyPolicyLink: data.privacyPolicyLink ?? null,
         termsAndConditionsLink: data.termsAndConditionsLink ?? null,
         embeddedLinkSample: data.embeddedLinkSample ?? null,
+        subUsecases: this.normalizeCampaignSubUsecases(data.useCase, data.subUsecases),
         status: 'draft',
       },
     });
@@ -325,6 +745,14 @@ export class CampaignService {
       where: { id },
       data: {
         ...data,
+        ...(data.useCase !== undefined || data.subUsecases !== undefined
+          ? {
+              subUsecases: this.normalizeCampaignSubUsecases(
+                data.useCase ?? campaign.useCase,
+                data.subUsecases ?? campaign.subUsecases
+              ),
+            }
+          : {}),
         status: campaign.status === 'rejected' ? 'draft' : campaign.status,
         rejectionReason: campaign.status === 'rejected' ? null : undefined,
       },
@@ -357,7 +785,7 @@ export class CampaignService {
             dailyMessageLimit: signalmashResult.dailyMessageLimit ?? updatedCampaign.dailyMessageLimit,
             messagesPerSecond: signalmashResult.messagesPerSecond ?? updatedCampaign.messagesPerSecond,
             providerStatus: signalmashResult.status,
-            providerMessage: signalmashResult.message ?? null,
+            providerMessage: signalmashResult.message ?? updatedCampaign.providerMessage,
             lastStatusSyncedAt: new Date(),
             lastSubmissionError: null,
           },
@@ -414,7 +842,13 @@ export class CampaignService {
   /**
    * Submit campaign for approval
    */
-  async submitForApproval(id: string, organizationId: string): Promise<Campaign> {
+  async submitForApproval(
+    id: string,
+    organizationId: string,
+    options?: {
+      numberLinkIntent?: CampaignNumberLinkIntentInput | null;
+    }
+  ): Promise<CampaignResultWithNumberLink> {
     const campaign = await this.getById(id, organizationId);
 
     if (!['draft', 'rejected'].includes(campaign.status)) {
@@ -442,7 +876,69 @@ export class CampaignService {
     }
 
     this.assertCampaignReadyForSubmission(campaign);
-    const requestPayload = this.buildProviderPayload(campaign, brand.signalmashBrandId);
+    const qualification = await signalmashService.qualifyBrandByUseCase(
+      brand.signalmashBrandId,
+      campaign.useCase
+    );
+
+    await providerOperationService.log({
+      organizationId,
+      installationId: installation.id,
+      operation: 'qualify_campaign_brand',
+      localResourceType: 'Campaign',
+      localResourceId: campaign.id,
+      externalId: brand.signalmashBrandId,
+      status: qualification.qualified ? 'success' : 'failed',
+      responsePayload: {
+        ...qualification.raw,
+        eligibleMnoIds: qualification.eligibleMnoIds ?? [],
+        minimumSampleMessages: qualification.minimumSampleMessages ?? null,
+        requiresSubscriberOptin: qualification.requiresSubscriberOptin ?? false,
+        requiresSubscriberOptout: qualification.requiresSubscriberOptout ?? false,
+        requiresSubscriberHelp: qualification.requiresSubscriberHelp ?? false,
+        disallowEmbeddedLink: qualification.disallowEmbeddedLink ?? false,
+        disallowEmbeddedPhone: qualification.disallowEmbeddedPhone ?? false,
+      },
+      errorMessage: qualification.qualified
+        ? undefined
+        : qualification.message ?? 'Brand is not qualified for the requested campaign use case',
+    });
+
+    if (!qualification.qualified) {
+      const errorMessage =
+        qualification.message ?? 'Brand is not qualified for the requested campaign use case yet';
+
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          providerMessage: errorMessage,
+          lastSubmissionError: errorMessage,
+        },
+      });
+
+      throw new BadRequestError(errorMessage);
+    }
+
+    try {
+      this.assertQualificationRequirements(campaign, qualification);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Campaign does not satisfy the provider qualification requirements';
+
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          providerMessage: errorMessage,
+          lastSubmissionError: errorMessage,
+        },
+      });
+
+      throw error;
+    }
+
+    const requestPayload = this.buildProviderPayload(campaign, brand.signalmashBrandId, {
+      mnoIds: this.resolveQualifiedMnoIds(campaign, qualification),
+    });
 
     await prisma.campaign.update({
       where: { id: campaign.id },
@@ -500,7 +996,17 @@ export class CampaignService {
         responsePayload: result as unknown as Record<string, unknown>,
       });
 
-      return updatedCampaign;
+      const campaignWithIntent = await this.setNumberLinkIntent(
+        updatedCampaign,
+        options?.numberLinkIntent
+      );
+
+      const intent = this.parseNumberLinkIntent(campaignWithIntent.numberLinkIntent);
+      if (!intent) {
+        return campaignWithIntent;
+      }
+
+      return this.fulfillNumberLinkIntent(campaignWithIntent);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown provider submission failure';
 
@@ -549,14 +1055,14 @@ export class CampaignService {
    */
   async handleApprovalResult(
     signalmashCampaignId: string,
-    status: 'approved' | 'rejected' | 'suspended' | 'expired',
+    status: string,
     rejectionReason?: string,
     throughput?: {
       dailyMessageLimit?: number;
       messagesPerSecond?: number;
     },
     tcrCampaignId?: string
-  ): Promise<Campaign> {
+  ): Promise<CampaignResultWithNumberLink> {
     const campaign = await prisma.campaign.findFirst({
       where: { signalmashCampaignId },
     });
@@ -565,23 +1071,25 @@ export class CampaignService {
       throw new NotFoundError('Campaign not found');
     }
 
+    const nextStatus = this.mapProviderCampaignStatus(status, campaign.status);
     const updatedCampaign = await prisma.campaign.update({
       where: { id: campaign.id },
       data: {
-        status,
+        status: nextStatus,
         providerStatus: status,
         providerMessage: rejectionReason ?? null,
-        rejectionReason,
+        rejectionReason: nextStatus === 'rejected' ? rejectionReason ?? campaign.rejectionReason : null,
         dailyMessageLimit: throughput?.dailyMessageLimit,
         messagesPerSecond: throughput?.messagesPerSecond,
         tcrCampaignId: tcrCampaignId ?? campaign.tcrCampaignId,
         lastStatusSyncedAt: new Date(),
-        lastSubmissionError: status === 'rejected' ? rejectionReason ?? campaign.lastSubmissionError : null,
+        lastSubmissionError:
+          nextStatus === 'rejected' ? rejectionReason ?? campaign.lastSubmissionError : null,
       },
     });
 
     logger.info(
-      { campaignId: campaign.id, status },
+      { campaignId: campaign.id, providerStatus: status, nextStatus },
       'Campaign approval status updated'
     );
 
@@ -595,13 +1103,14 @@ export class CampaignService {
       status: 'success',
       responsePayload: {
         status,
+        nextStatus,
         rejectionReason,
         throughput,
         tcrCampaignId,
       },
     });
 
-    return updatedCampaign;
+    return this.maybeFulfillPendingNumberLink(updatedCampaign);
   }
 
   async refreshApprovalStatus(id: string, organizationId: string): Promise<Campaign> {
@@ -620,15 +1129,22 @@ export class CampaignService {
         data: {
           status: nextStatus,
           providerStatus: providerStatus.status,
-          providerMessage: providerStatus.rejectionReason ?? null,
-          rejectionReason:
+          providerMessage:
             providerStatus.rejectionReason ??
-            (nextStatus === 'rejected' ? campaign.rejectionReason : null),
+            providerStatus.providerMessage ??
+            campaign.providerMessage,
+          rejectionReason:
+            nextStatus === 'rejected'
+              ? providerStatus.rejectionReason ?? campaign.rejectionReason
+              : null,
           dailyMessageLimit: providerStatus.dailyMessageLimit ?? campaign.dailyMessageLimit,
           messagesPerSecond: providerStatus.messagesPerSecond ?? campaign.messagesPerSecond,
           tcrCampaignId: providerStatus.tcrCampaignId ?? campaign.tcrCampaignId,
           lastStatusSyncedAt: new Date(),
-          lastSubmissionError: nextStatus === 'rejected' ? (providerStatus.rejectionReason ?? campaign.lastSubmissionError) : null,
+          lastSubmissionError:
+            nextStatus === 'rejected'
+              ? providerStatus.rejectionReason ?? campaign.lastSubmissionError
+              : null,
         },
       });
 
@@ -654,7 +1170,8 @@ export class CampaignService {
         responsePayload: providerStatus as unknown as Record<string, unknown>,
       });
 
-      return updatedCampaign;
+      const relinkedCampaign = await this.maybeFulfillPendingNumberLink(updatedCampaign);
+      return relinkedCampaign;
     } catch (error) {
       await providerOperationService.log({
         organizationId,
@@ -686,8 +1203,75 @@ export class CampaignService {
     }
   }
 
+  async linkPhoneNumber(
+    id: string,
+    organizationId: string,
+    intentInput: CampaignNumberLinkIntentInput
+  ): Promise<CampaignResultWithNumberLink> {
+    const campaign = await this.getById(id, organizationId);
+
+    if (!['pending_approval', 'approved'].includes(campaign.status)) {
+      throw new BadRequestError('Phone numbers can only be linked after the campaign has been submitted');
+    }
+
+    if (!campaign.signalmashCampaignId && intentInput.mode === 'buy_new') {
+      throw new BadRequestError('Campaign must be linked to Signalmash before buying a number');
+    }
+
+    const campaignWithIntent = await this.setNumberLinkIntent(campaign, intentInput);
+    return this.fulfillNumberLinkIntent(campaignWithIntent);
+  }
+
+  async setManualApprovalStatus(
+    id: string,
+    organizationId: string,
+    status: Extract<CampaignStatus, 'approved' | 'rejected'>,
+    reason?: string
+  ): Promise<CampaignResultWithNumberLink> {
+    const campaign = await this.getById(id, organizationId);
+
+    if (!campaign.signalmashCampaignId) {
+      throw new BadRequestError('Campaign must be linked to Signalmash before admin approval can be set');
+    }
+
+    const normalizedReason = reason?.trim() || undefined;
+    const rejectionReason =
+      status === 'rejected'
+        ? normalizedReason ??
+          campaign.rejectionReason ??
+          campaign.providerMessage ??
+          campaign.lastSubmissionError ??
+          'Marked rejected manually by admin.'
+        : null;
+
+    const updatedCampaign = await prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        status,
+        rejectionReason,
+        lastSubmissionError: status === 'rejected' ? rejectionReason : null,
+      },
+    });
+
+    logger.info(
+      {
+        campaignId: campaign.id,
+        signalmashCampaignId: campaign.signalmashCampaignId,
+        previousStatus: campaign.status,
+        nextStatus: status,
+      },
+      'Campaign approval status updated manually'
+    );
+
+    await integrationService.syncCampaignMapping(updatedCampaign);
+
+    return status === 'approved'
+      ? this.maybeFulfillPendingNumberLink(updatedCampaign)
+      : updatedCampaign;
+  }
+
   private mapProviderCampaignStatus(providerStatus: string, currentStatus: CampaignStatus): CampaignStatus {
-    const normalized = providerStatus.trim().toLowerCase();
+    const normalized = providerStatus.trim().replace(/[\s-]+/g, '_').toLowerCase();
 
     if (['approved', 'active', 'verified'].includes(normalized)) {
       return 'approved';
@@ -705,7 +1289,17 @@ export class CampaignService {
       return 'expired';
     }
 
-    if (['pending', 'pending_approval', 'submitted', 'in_review', 'review'].includes(normalized)) {
+    if (
+      [
+        'pending',
+        'pending_approval',
+        'submitted',
+        'in_review',
+        'review',
+        'manual_review',
+        'needs_info',
+      ].includes(normalized)
+    ) {
       return 'pending_approval';
     }
 

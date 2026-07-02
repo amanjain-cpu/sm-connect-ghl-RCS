@@ -86,7 +86,10 @@ export class MessageService {
       throw new BadRequestError('Recipient has opted out from messaging');
     }
 
-    await subscriptionBillingService.assertCanSendMessage(organizationId);
+    await subscriptionBillingService.assertCanSendMessage(
+      organizationId,
+      mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms'
+    );
 
     const senderNumber =
       phoneNumberId || !campaignId
@@ -276,7 +279,10 @@ export class MessageService {
         throw new BadRequestError('Recipient has opted out from messaging');
       }
 
-      await subscriptionBillingService.assertCanSendMessage(message.organizationId);
+      await subscriptionBillingService.assertCanSendMessage(
+        message.organizationId,
+        message.type === 'mms' ? 'mms' : 'sms'
+      );
 
       const result = await signalmashService.sendMessage({
         from: message.from,

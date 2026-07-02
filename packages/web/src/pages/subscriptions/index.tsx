@@ -35,6 +35,7 @@ interface BillingSubscriptionSummary {
     currentPeriodEnd?: string | null;
     billingBlockedAt?: string | null;
     billingBlockedReason?: string | null;
+    messageCreditBalance: number;
     pendingOverageBalance: number;
     smsIncluded: number;
     mmsIncluded: number;
@@ -50,6 +51,7 @@ interface BillingSubscriptionSummary {
     mmsOverage: number;
     activePhoneNumbers: number;
     phoneNumbersIncluded: number;
+    messageCreditBalance: number;
     extraPhoneNumbers: number;
   };
   rates: {
@@ -59,6 +61,7 @@ interface BillingSubscriptionSummary {
     extraPhoneNumberMonthlyRate: number;
     realtimeChargeThreshold: number;
   };
+  topUpOptions: number[];
   recentCharges: Array<{
     id: string;
     kind: string;
@@ -113,6 +116,7 @@ export function SubscriptionsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [activePlanAction, setActivePlanAction] = useState<string | null>(null);
   const [isOpeningPortal, setIsOpeningPortal] = useState(false);
+  const [activeTopUpAmount, setActiveTopUpAmount] = useState<number | null>(null);
 
   const loadSummary = async () => {
     const response = await api.getSubscriptionBillingSummary();
@@ -125,6 +129,7 @@ export function SubscriptionsPage() {
     const bootstrap = async () => {
       try {
         const checkoutStatus = searchParams.get('checkout');
+        const creditTopupStatus = searchParams.get('credit_topup');
         const sessionId = searchParams.get('session_id');
 
         if (checkoutStatus === 'success' && sessionId) {
@@ -136,6 +141,18 @@ export function SubscriptionsPage() {
           window.history.replaceState({}, '', '/subscriptions');
         } else if (checkoutStatus === 'cancelled') {
           notify.error('Checkout cancelled', 'The Stripe checkout session was not completed.');
+          window.history.replaceState({}, '', '/subscriptions');
+        }
+
+        if (creditTopupStatus === 'success' && sessionId) {
+          const response = await api.completeMessageCreditTopupCheckout({ sessionId });
+          if (response.success && response.data) {
+            setSummary(response.data);
+          }
+          notify.success('Credits added', 'Message credits were added to this workspace.');
+          window.history.replaceState({}, '', '/subscriptions');
+        } else if (creditTopupStatus === 'cancelled') {
+          notify.error('Top-up cancelled', 'The message credit checkout session was not completed.');
           window.history.replaceState({}, '', '/subscriptions');
         }
 
@@ -206,11 +223,31 @@ export function SubscriptionsPage() {
     }
   };
 
+  const handleTopUp = async (amountDollars: number) => {
+    setActiveTopUpAmount(amountDollars);
+
+    try {
+      const response = await api.createMessageCreditTopupCheckout(amountDollars);
+      if (!response.success || !response.data?.checkoutUrl) {
+        throw new Error('Stripe top-up checkout URL was not returned.');
+      }
+
+      window.location.href = response.data.checkoutUrl;
+    } catch (error) {
+      notify.error(
+        'Top-up unavailable',
+        error instanceof Error ? error.message : 'Unable to start the message credit checkout.'
+      );
+    } finally {
+      setActiveTopUpAmount(null);
+    }
+  };
+
   return (
     <div>
       <Header
         title="Billing"
-        subtitle="Manage your Stripe subscription, usage allowances, and overage state."
+        subtitle="Manage your Stripe subscription, included usage, and prepaid message credits."
       />
 
       <PageShell>
@@ -242,8 +279,7 @@ export function SubscriptionsPage() {
                     </h2>
                     <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                       External Payment from your CRM routes here, then Stripe remains the billing source of truth.
-                      Message overages accumulate in real time and charge automatically once the unpaid balance
-                      reaches {formatCurrency(summary.rates.realtimeChargeThreshold)}.
+                      Included usage is consumed first, then prepaid message credits are used for additional SMS and MMS traffic.
                     </p>
                   </div>
                 </div>
@@ -381,13 +417,41 @@ export function SubscriptionsPage() {
                         </span>
                       </div>
                     </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-600 dark:text-slate-400">Prepaid Message Credits</span>
+                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                          {formatCurrency(summary.subscription.messageCreditBalance)}
+                        </span>
+                      </div>
+                    </PageInset>
                   </div>
 
                   <div className="mt-5 space-y-2 text-sm text-slate-600 dark:text-slate-400">
                     <p>Current period: {formatDate(summary.subscription.currentPeriodStart)} to {formatDate(summary.subscription.currentPeriodEnd)}</p>
-                    <p>Pending message overage balance: {formatCurrency(summary.subscription.pendingOverageBalance)}</p>
+                    <p>Included SMS remaining: {summary.usage.smsRemaining.toLocaleString()}</p>
+                    <p>Included MMS remaining: {summary.usage.mmsRemaining.toLocaleString()}</p>
                     <p>Extra number setup fee: {formatCurrency(summary.rates.extraPhoneNumberSetupFee)}</p>
                     <p>Extra number monthly recurring charge: {formatCurrency(summary.rates.extraPhoneNumberMonthlyRate)}</p>
+                  </div>
+                </PageSection>
+
+                <PageSection className="p-6">
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Add Message Credits</h3>
+                  <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-400">
+                    Buy prepaid credits when included SMS or MMS usage is close to exhaustion. Sending blocks only after both included usage and prepaid credits are depleted.
+                  </p>
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    {summary.topUpOptions.map((amount) => (
+                      <Button
+                        key={amount}
+                        variant="outline"
+                        onClick={() => handleTopUp(amount)}
+                        isLoading={activeTopUpAmount === amount}
+                      >
+                        Add {formatCurrency(amount)}
+                      </Button>
+                    ))}
                   </div>
                 </PageSection>
 

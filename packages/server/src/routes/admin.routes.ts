@@ -13,6 +13,7 @@ import { signalmashService } from '../services/signalmash.service.js';
 import { phoneNumberService } from '../services/phoneNumber.service.js';
 import { brandService } from '../services/brand.service.js';
 import { campaignService } from '../services/campaign.service.js';
+import { organizationService } from '../services/organization.service.js';
 
 const router: RouterType = Router();
 
@@ -255,7 +256,11 @@ router.get('/settings/signalmash/diagnostic', requireSuperAdmin, async (req: Adm
 
 router.post('/settings/signalmash/test-connection', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
   try {
-    const diagnostic = await signalmashService.runConnectionDiagnostic();
+    const data = z.object({
+      brandId: z.string().trim().optional(),
+      campaignId: z.string().trim().optional(),
+    }).parse(req.body ?? {});
+    const diagnostic = await signalmashService.runConnectionDiagnostic(data);
 
     await adminService.logAuditAction(
       req.admin!.id,
@@ -320,6 +325,73 @@ router.get('/organizations/:id/onboarding', requireSuperAdmin, async (req: Admin
     res.json({
       success: true,
       data: detail,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:id/suspend', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      id: z.string().uuid(),
+    }).parse(req.params);
+    const body = z.object({
+      reason: z.string().trim().max(500).optional().transform((value) => value || undefined),
+    }).parse(req.body ?? {});
+
+    const organization = await organizationService.suspend(params.id, body.reason);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_SUSPEND_ORGANIZATION',
+      'organization',
+      params.id,
+      {
+        status: organization.status,
+        reason: organization.suspensionReason,
+      },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: organization,
+      message: 'Organization suspended',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:id/unsuspend', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      id: z.string().uuid(),
+    }).parse(req.params);
+    const organization = await organizationService.unsuspend(params.id);
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_UNSUSPEND_ORGANIZATION',
+      'organization',
+      params.id,
+      {
+        status: organization.status,
+      },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: organization,
+      message: 'Organization unsuspended',
     });
   } catch (error) {
     next(error);
@@ -448,6 +520,52 @@ router.post('/organizations/:organizationId/brands/:brandId/refresh-status', req
   }
 });
 
+router.post('/organizations/:organizationId/brands/:brandId/manual-status', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      brandId: z.string().uuid(),
+    }).parse(req.params);
+    const data = z.object({
+      status: z.enum(['verified', 'rejected']),
+      reason: z.string().trim().max(500).optional().transform((value) => value || undefined),
+    }).parse(req.body ?? {});
+    const existingBrand = await brandService.getById(params.brandId, params.organizationId);
+    const brand = await brandService.setManualVerificationStatus(
+      params.brandId,
+      params.organizationId,
+      data.status,
+      data.reason
+    );
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_SET_BRAND_STATUS',
+      'brand',
+      params.brandId,
+      {
+        organizationId: params.organizationId,
+        previousStatus: existingBrand.status,
+        status: brand.status,
+        providerStatus: brand.providerStatus,
+        reason: data.reason,
+      },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: brand,
+      message: data.status === 'verified' ? 'Brand marked approved locally' : 'Brand marked rejected locally',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/organizations/:organizationId/campaigns/:campaignId/submit', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
   try {
     const params = z.object({
@@ -502,6 +620,52 @@ router.post('/organizations/:organizationId/campaigns/:campaignId/refresh-status
       success: true,
       data: campaign,
       message: 'Campaign status refreshed',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/campaigns/:campaignId/manual-status', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      campaignId: z.string().uuid(),
+    }).parse(req.params);
+    const data = z.object({
+      status: z.enum(['approved', 'rejected']),
+      reason: z.string().trim().max(500).optional().transform((value) => value || undefined),
+    }).parse(req.body ?? {});
+    const existingCampaign = await campaignService.getById(params.campaignId, params.organizationId);
+    const campaign = await campaignService.setManualApprovalStatus(
+      params.campaignId,
+      params.organizationId,
+      data.status,
+      data.reason
+    );
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_SET_CAMPAIGN_STATUS',
+      'campaign',
+      params.campaignId,
+      {
+        organizationId: params.organizationId,
+        previousStatus: existingCampaign.status,
+        status: campaign.status,
+        providerStatus: campaign.providerStatus,
+        reason: data.reason,
+      },
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') || undefined,
+      }
+    );
+
+    res.json({
+      success: true,
+      data: campaign,
+      message: data.status === 'approved' ? 'Campaign marked approved locally' : 'Campaign marked rejected locally',
     });
   } catch (error) {
     next(error);

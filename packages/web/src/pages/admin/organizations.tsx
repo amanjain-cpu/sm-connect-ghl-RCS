@@ -12,6 +12,8 @@ import {
   RefreshCw,
   Send,
   Eye,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -33,11 +35,18 @@ interface Organization {
   id: string;
   name: string;
   email: string;
+  status: 'active' | 'suspended';
+  suspensionReason?: string | null;
+  subscription?: {
+    plan?: string | null;
+    status?: string | null;
+  } | null;
   createdAt: string;
   _count: {
     users: number;
     brands: number;
     campaigns: number;
+    phoneNumbers: number;
     messages: number;
   };
 }
@@ -213,6 +222,39 @@ export function AdminOrganizationsPage() {
     }
   };
 
+  const handleBrandStatusAction = async (brandId: string, status: 'verified' | 'rejected') => {
+    if (!selectedOrganization) return;
+
+    const actionKey = `${status}:brand:${brandId}`;
+    setActiveOrgAction(actionKey);
+    try {
+      const response = await adminApi.setOrganizationBrandStatus(selectedOrganization.id, brandId, {
+        status,
+      });
+
+      if (response.success) {
+        await Promise.all([
+          loadOrganizations(),
+          loadOrganizationOnboarding(selectedOrganization.id),
+        ]);
+        notify.success(
+          status === 'verified' ? 'Brand approved locally' : 'Brand rejected locally',
+          status === 'verified'
+            ? 'The brand is now treated as verified inside SM Connect until provider sync changes it.'
+            : 'The brand is now blocked locally until it is approved again.'
+        );
+      }
+    } catch (error) {
+      console.error(`Failed to mark brand ${status}:`, error);
+      notify.error(
+        status === 'verified' ? 'Brand approve failed' : 'Brand reject failed',
+        error instanceof Error ? error.message : 'The admin action failed.'
+      );
+    } finally {
+      setActiveOrgAction(null);
+    }
+  };
+
   const handleCampaignAction = async (campaignId: string, action: 'submit' | 'refresh') => {
     if (!selectedOrganization) return;
 
@@ -246,6 +288,74 @@ export function AdminOrganizationsPage() {
     }
   };
 
+  const handleCampaignStatusAction = async (campaignId: string, status: 'approved' | 'rejected') => {
+    if (!selectedOrganization) return;
+
+    const actionKey = `${status}:campaign:${campaignId}`;
+    setActiveOrgAction(actionKey);
+    try {
+      const response = await adminApi.setOrganizationCampaignStatus(selectedOrganization.id, campaignId, {
+        status,
+      });
+
+      if (response.success) {
+        await Promise.all([
+          loadOrganizations(),
+          loadOrganizationOnboarding(selectedOrganization.id),
+        ]);
+        notify.success(
+          status === 'approved' ? 'Campaign approved locally' : 'Campaign rejected locally',
+          status === 'approved'
+            ? 'The campaign is now treated as approved inside SM Connect until provider sync changes it.'
+            : 'The campaign is now blocked locally until it is approved again.'
+        );
+      }
+    } catch (error) {
+      console.error(`Failed to mark campaign ${status}:`, error);
+      notify.error(
+        status === 'approved' ? 'Campaign approve failed' : 'Campaign reject failed',
+        error instanceof Error ? error.message : 'The admin action failed.'
+      );
+    } finally {
+      setActiveOrgAction(null);
+    }
+  };
+
+  const handleOrganizationStatusAction = async (organization: Organization, nextStatus: 'suspended' | 'active') => {
+    const actionKey = `${nextStatus}:organization:${organization.id}`;
+    setActiveOrgAction(actionKey);
+
+    try {
+      const response = nextStatus === 'suspended'
+        ? await adminApi.suspendOrganization(
+            organization.id,
+            window.prompt('Suspension reason (optional):') || undefined
+          )
+        : await adminApi.unsuspendOrganization(organization.id);
+
+      if (response.success) {
+        await loadOrganizations();
+        if (selectedOrganization?.id === organization.id) {
+          await loadOrganizationOnboarding(organization.id);
+        }
+        notify.success(
+          nextStatus === 'suspended' ? 'Organization suspended' : 'Organization restored',
+          nextStatus === 'suspended'
+            ? 'Customer runtime actions are now blocked for this tenant until it is unsuspended.'
+            : 'Customer runtime actions are available again for this tenant.'
+        );
+      }
+    } catch (error) {
+      console.error(`Failed to set organization ${nextStatus}:`, error);
+      notify.error(
+        nextStatus === 'suspended' ? 'Suspend failed' : 'Unsuspend failed',
+        error instanceof Error ? error.message : 'The admin action failed.'
+      );
+    } finally {
+      setActiveOrgAction(null);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950">
       <AdminHeader title="Organizations" subtitle="Connected tenants across the platform" showBack />
@@ -261,7 +371,7 @@ export function AdminOrganizationsPage() {
                 Review organization footprint and adoption
               </h2>
               <p className="text-sm leading-6 text-slate-600 dark:text-slate-400">
-                Organizations returned by the admin API with aggregate counts for users, brands, campaigns, and messages.
+                Organizations returned by the admin API with aggregate counts, subscription state, and runtime controls.
               </p>
             </div>
             <p className="text-sm text-slate-600 dark:text-slate-400">
@@ -305,13 +415,27 @@ export function AdminOrganizationsPage() {
                     <div>
                       <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">{org.name}</h3>
                       <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{org.email}</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <span className={`rounded-full px-2 py-1 text-xs font-medium ${
+                          org.status === 'suspended'
+                            ? 'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-200'
+                            : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200'
+                        }`}>
+                          {org.status}
+                        </span>
+                        {org.subscription?.plan ? (
+                          <span className="rounded-full border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:text-slate-300">
+                            {org.subscription.plan}
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900">
                       <Building2 className="h-5 w-5 text-slate-700 dark:text-slate-200" />
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-4 gap-3 rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
+                  <div className="grid grid-cols-5 gap-3 rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
                     <div className="text-center">
                       <Users className="mx-auto h-4 w-4 text-slate-400" />
                       <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">{formatNumber(org._count.users)}</p>
@@ -328,6 +452,11 @@ export function AdminOrganizationsPage() {
                       <p className="text-xs text-slate-500 dark:text-slate-400">Campaigns</p>
                     </div>
                     <div className="text-center">
+                      <Link2 className="mx-auto h-4 w-4 text-slate-400" />
+                      <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">{formatNumber(org._count.phoneNumbers)}</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">Numbers</p>
+                    </div>
+                    <div className="text-center">
                       <MessageSquare className="mx-auto h-4 w-4 text-slate-400" />
                       <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">{formatNumber(org._count.messages)}</p>
                       <p className="text-xs text-slate-500 dark:text-slate-400">Messages</p>
@@ -340,6 +469,25 @@ export function AdminOrganizationsPage() {
                   </div>
 
                   <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    {org.status === 'suspended' ? (
+                      <Button
+                        variant="success"
+                        onClick={() => handleOrganizationStatusAction(org, 'active')}
+                        isLoading={activeOrgAction === `active:organization:${org.id}`}
+                        leftIcon={<CheckCircle2 className="h-4 w-4" />}
+                      >
+                        Unsuspend
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="destructive"
+                        onClick={() => handleOrganizationStatusAction(org, 'suspended')}
+                        isLoading={activeOrgAction === `suspended:organization:${org.id}`}
+                        leftIcon={<XCircle className="h-4 w-4" />}
+                      >
+                        Suspend
+                      </Button>
+                    )}
                     <Button variant="outline" onClick={() => openInspectDialog(org)} leftIcon={<Eye className="h-4 w-4" />}>
                       Inspect Readiness
                     </Button>
@@ -470,7 +618,7 @@ export function AdminOrganizationsPage() {
             </div>
           ) : (
             <div className="max-h-[75vh] space-y-6 overflow-y-auto pr-1">
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-4">
                 <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
                   <CardContent className="p-5">
                     <p className="text-sm text-slate-500 dark:text-slate-400">Lifecycle State</p>
@@ -504,7 +652,58 @@ export function AdminOrganizationsPage() {
                     </p>
                   </CardContent>
                 </Card>
+                <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                  <CardContent className="p-5">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Runtime State</p>
+                    <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">
+                      {onboardingDetail.organization?.status || 'active'}
+                    </p>
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                      {onboardingDetail.organization?.suspensionReason || 'Customer runtime is available.'}
+                    </p>
+                  </CardContent>
+                </Card>
               </div>
+
+              <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <CardContent className="space-y-3 p-6">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Plan and Usage</h3>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Subscription entitlements and prepaid message credits for this tenant.</p>
+                    </div>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-4">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Plan</p>
+                      <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
+                        {onboardingDetail.subscriptionSummary?.subscription?.plan || 'none'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Numbers Used</p>
+                      <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
+                        {onboardingDetail.subscriptionSummary?.usage?.activePhoneNumbers ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.phoneNumbersIncluded ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">SMS / MMS Used</p>
+                      <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
+                        {onboardingDetail.subscriptionSummary?.usage?.smsUsed ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.smsIncluded ?? 0}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        MMS {onboardingDetail.subscriptionSummary?.usage?.mmsUsed ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.mmsIncluded ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Message Credits</p>
+                      <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
+                        ${Number(onboardingDetail.subscriptionSummary?.subscription?.messageCreditBalance ?? 0).toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
 
               <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
                 <CardContent className="space-y-5 p-6">
@@ -532,7 +731,7 @@ export function AdminOrganizationsPage() {
                             Signalmash: {brand.signalmashBrandId || 'n/a'} · TCR: {brand.tcrBrandId || 'n/a'}
                           </p>
                           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                            Message: {brand.providerMessage || brand.lastSubmissionError || 'no provider message'}
+                            Message: {brand.providerMessage || brand.rejectionReason || brand.lastSubmissionError || 'no provider message'}
                           </p>
                         </div>
                         <div className="flex flex-wrap gap-2">
@@ -555,6 +754,30 @@ export function AdminOrganizationsPage() {
                               leftIcon={<RefreshCw className="h-4 w-4" />}
                             >
                               Refresh
+                            </Button>
+                          )}
+                          {brand.signalmashBrandId && (
+                            <Button
+                              size="sm"
+                              variant="success"
+                              onClick={() => handleBrandStatusAction(brand.id, 'verified')}
+                              isLoading={activeOrgAction === `verified:brand:${brand.id}`}
+                              disabled={brand.status === 'verified'}
+                              leftIcon={<CheckCircle2 className="h-4 w-4" />}
+                            >
+                              Approve
+                            </Button>
+                          )}
+                          {brand.signalmashBrandId && (
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => handleBrandStatusAction(brand.id, 'rejected')}
+                              isLoading={activeOrgAction === `rejected:brand:${brand.id}`}
+                              disabled={brand.status === 'rejected'}
+                              leftIcon={<XCircle className="h-4 w-4" />}
+                            >
+                              Reject
                             </Button>
                           )}
                         </div>
@@ -585,7 +808,7 @@ export function AdminOrganizationsPage() {
                             Signalmash: {campaign.signalmashCampaignId || 'n/a'} · TCR: {campaign.tcrCampaignId || 'n/a'} · Numbers: {campaign.phoneNumbers?.length || 0}
                           </p>
                           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                            Message: {campaign.providerMessage || campaign.lastSubmissionError || 'no provider message'}
+                            Message: {campaign.providerMessage || campaign.rejectionReason || campaign.lastSubmissionError || 'no provider message'}
                           </p>
                         </div>
                         <div className="flex flex-wrap gap-2">
@@ -610,11 +833,62 @@ export function AdminOrganizationsPage() {
                               Refresh
                             </Button>
                           )}
+                          {campaign.signalmashCampaignId && (
+                            <Button
+                              size="sm"
+                              variant="success"
+                              onClick={() => handleCampaignStatusAction(campaign.id, 'approved')}
+                              isLoading={activeOrgAction === `approved:campaign:${campaign.id}`}
+                              disabled={campaign.status === 'approved'}
+                              leftIcon={<CheckCircle2 className="h-4 w-4" />}
+                            >
+                              Approve
+                            </Button>
+                          )}
+                          {campaign.signalmashCampaignId && (
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => handleCampaignStatusAction(campaign.id, 'rejected')}
+                              isLoading={activeOrgAction === `rejected:campaign:${campaign.id}`}
+                              disabled={campaign.status === 'rejected'}
+                              leftIcon={<XCircle className="h-4 w-4" />}
+                            >
+                              Reject
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </div>
                   )) : (
                     <p className="text-sm text-slate-600 dark:text-slate-400">No campaigns yet.</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <CardContent className="space-y-5 p-6">
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Phone Numbers</h3>
+                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Assigned sender inventory for this organization, including campaign linkage.</p>
+                  </div>
+
+                  {onboardingDetail.phoneNumbers?.length ? onboardingDetail.phoneNumbers.map((number: any) => (
+                    <div key={number.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                          <p className="font-semibold text-slate-950 dark:text-slate-50">{number.formattedNumber}</p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            {number.phoneNumber} · {number.status}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Campaign: {number.campaign?.name || 'unassigned'} · Signalmash: {number.signalmashNumberId || 'n/a'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )) : (
+                    <p className="text-sm text-slate-600 dark:text-slate-400">No phone numbers yet.</p>
                   )}
                 </CardContent>
               </Card>

@@ -15,6 +15,7 @@ const EXTRA_NUMBER_SETUP_FEE = 0.05;
 const EXTRA_NUMBER_MONTHLY_RATE = 0.5;
 const EXTRA_NUMBER_FIRST_CHARGE = EXTRA_NUMBER_SETUP_FEE + EXTRA_NUMBER_MONTHLY_RATE;
 const MIN_REALTIME_CHARGE = 0.5;
+const MESSAGE_TOP_UP_OPTIONS = [10, 25, 50, 100] as const;
 
 const PLAN_DEFINITIONS = {
   starter: {
@@ -272,6 +273,7 @@ export class SubscriptionBillingService {
       phoneNumbersIncluded: planDefinition?.phoneNumbersIncluded ?? existing?.phoneNumbersIncluded ?? 0,
       smsUsed: periodChanged ? 0 : existing?.smsUsed ?? 0,
       mmsUsed: periodChanged ? 0 : existing?.mmsUsed ?? 0,
+      messageCreditBalance: existing?.messageCreditBalance ?? '0.0000',
       pendingOverageBalance: periodChanged ? '0.0000' : existing?.pendingOverageBalance ?? '0.0000',
       activatedAt: existing?.activatedAt || (isActiveSubscriptionStatus(status) ? new Date() : null),
       canceledAt: status === 'canceled' ? new Date() : existing?.canceledAt ?? null,
@@ -405,6 +407,7 @@ export class SubscriptionBillingService {
         currentPeriodEnd: subscription.currentPeriodEnd,
         billingBlockedAt: subscription.billingBlockedAt,
         billingBlockedReason: subscription.billingBlockedReason,
+        messageCreditBalance: toAmount(subscription.messageCreditBalance),
         pendingOverageBalance: toAmount(subscription.pendingOverageBalance),
         smsIncluded: subscription.smsIncluded,
         mmsIncluded: subscription.mmsIncluded,
@@ -420,6 +423,7 @@ export class SubscriptionBillingService {
         mmsOverage: Math.max(0, subscription.mmsUsed - subscription.mmsIncluded),
         activePhoneNumbers,
         phoneNumbersIncluded: subscription.phoneNumbersIncluded,
+        messageCreditBalance: toAmount(subscription.messageCreditBalance),
         extraPhoneNumbers: Math.max(0, activePhoneNumbers - subscription.phoneNumbersIncluded),
       },
       rates: {
@@ -429,6 +433,7 @@ export class SubscriptionBillingService {
         extraPhoneNumberMonthlyRate: EXTRA_NUMBER_MONTHLY_RATE,
         realtimeChargeThreshold: MIN_REALTIME_CHARGE,
       },
+      topUpOptions: [...MESSAGE_TOP_UP_OPTIONS],
       recentCharges: recentCharges.map((charge) => ({
         ...charge,
         amount: toAmount(charge.amount),
@@ -603,7 +608,147 @@ export class SubscriptionBillingService {
     return portal;
   }
 
-  async assertCanSendMessage(organizationId: string) {
+  async prepareMessageCreditTopupCheckout(input: {
+    organizationId: string;
+    amountDollars: number;
+  }) {
+    const amountDollars = roundCurrency(input.amountDollars);
+
+    if (!MESSAGE_TOP_UP_OPTIONS.includes(amountDollars as (typeof MESSAGE_TOP_UP_OPTIONS)[number])) {
+      throw new AppError(
+        'Select a supported top-up amount.',
+        'MESSAGE_CREDIT_TOPUP_INVALID_AMOUNT',
+        400
+      );
+    }
+
+    const [organization, subscription] = await Promise.all([
+      this.getOrganizationRecord(input.organizationId),
+      this.getCurrentSubscription(input.organizationId),
+    ]);
+
+    if (!subscription.plan || !isActiveSubscriptionStatus(subscription.status)) {
+      throw new AppError(
+        'An active billing subscription is required before buying message credits.',
+        'BILLING_SUBSCRIPTION_REQUIRED',
+        402
+      );
+    }
+
+    const customerId = await this.ensureStripeCustomer(subscription, organization);
+    const session = await stripeService.createOneTimeCheckoutSession({
+      organizationId: input.organizationId,
+      customerId,
+      customerEmail: organization.email,
+      customerName: organization.name,
+      amountCents: Math.round(amountDollars * 100),
+      successUrl: `${config.webUrl}/subscriptions?credit_topup=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${config.webUrl}/subscriptions?credit_topup=cancelled`,
+      description: 'Message credit top-up',
+      metadata: {
+        purpose: 'message_credit_topup',
+        organizationId: input.organizationId,
+        amountDollars: amountDollars.toFixed(2),
+      },
+    });
+
+    if (!session.url) {
+      throw new AppError(
+        'Stripe did not return a checkout URL',
+        'STRIPE_CHECKOUT_URL_MISSING',
+        502
+      );
+    }
+
+    return {
+      checkoutUrl: session.url,
+      sessionId: session.id,
+      amountDollars,
+    };
+  }
+
+  async completeMessageCreditTopupCheckout(organizationId: string, sessionId: string) {
+    const session = await stripeService.getCheckoutSession(sessionId);
+
+    if (session.payment_status !== 'paid' && session.status !== 'complete') {
+      throw new AppError('Stripe checkout has not been completed', 'STRIPE_CHECKOUT_INCOMPLETE', 402);
+    }
+
+    const metadata = session.metadata || {};
+    if (metadata.organizationId !== organizationId || metadata.purpose !== 'message_credit_topup') {
+      throw new AppError('Checkout session does not belong to this organization', 'STRIPE_SESSION_ORG_MISMATCH', 403);
+    }
+
+    const amountDollars = roundCurrency(Number(metadata.amountDollars || 0));
+    if (!amountDollars) {
+      throw new AppError(
+        'Checkout session is missing the message credit amount',
+        'STRIPE_SESSION_INVALID',
+        400
+      );
+    }
+
+    const subscription = await this.getCurrentSubscription(organizationId);
+    const existingCharge = await prisma.billingCharge.findUnique({
+      where: { chargeKey: `message-credit-topup:${session.id}` },
+      select: { id: true, status: true },
+    });
+
+    if (existingCharge?.status === 'succeeded') {
+      return this.getSubscriptionSummary(organizationId);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.billingCharge.upsert({
+        where: { chargeKey: `message-credit-topup:${session.id}` },
+        create: {
+          chargeKey: `message-credit-topup:${session.id}`,
+          kind: 'message_credit_topup',
+          status: 'succeeded',
+          amount: amountDollars.toFixed(4),
+          currency: 'usd',
+          description: 'Message credit top-up',
+          stripeCheckoutSessionId: session.id,
+          organizationId,
+          subscriptionId: subscription.id,
+          metadata,
+          processedAt: new Date(),
+        },
+        update: {
+          status: 'succeeded',
+          metadata,
+          processedAt: new Date(),
+        },
+      });
+
+      if (!existingCharge) {
+        await tx.organizationSubscription.update({
+          where: { id: subscription.id },
+          data: {
+            messageCreditBalance: {
+              increment: amountDollars,
+            },
+          },
+        });
+      }
+    });
+
+    if (session.customer && !subscription.stripeCustomerId) {
+      await prisma.organizationSubscription.update({
+        where: { id: subscription.id },
+        data: {
+          stripeCustomerId: session.customer,
+        },
+      });
+    }
+
+    return this.getSubscriptionSummary(organizationId);
+  }
+
+  async assertCanSendMessage(
+    organizationId: string,
+    unit: 'sms' | 'mms' = 'sms'
+  ) {
     const subscription = await this.getCurrentSubscription(organizationId);
 
     if (!subscription.plan || !isActiveSubscriptionStatus(subscription.status)) {
@@ -622,11 +767,53 @@ export class SubscriptionBillingService {
       );
     }
 
+    const used = unit === 'mms' ? subscription.mmsUsed : subscription.smsUsed;
+    const included = unit === 'mms' ? subscription.mmsIncluded : subscription.smsIncluded;
+    const includedRemaining = Math.max(0, included - used);
+
+    if (includedRemaining > 0) {
+      return subscription;
+    }
+
+    const balance = toAmount(subscription.messageCreditBalance);
+    if (balance >= MESSAGE_OVERAGE_RATE) {
+      return subscription;
+    }
+
+    throw new AppError(
+      'Message credits are exhausted. Add a Stripe top-up before sending more traffic.',
+      'MESSAGE_CREDITS_EXHAUSTED',
+      402,
+      true,
+      {
+        unit,
+        availableBalance: balance,
+        requiredBalance: MESSAGE_OVERAGE_RATE,
+      }
+    );
+
     return subscription;
   }
 
   async assertCanProvisionPhoneNumber(organizationId: string) {
-    const subscription = await this.assertCanSendMessage(organizationId);
+    const subscription = await this.getCurrentSubscription(organizationId);
+
+    if (!subscription.plan || !isActiveSubscriptionStatus(subscription.status)) {
+      throw new AppError(
+        'An active billing subscription is required before provisioning phone numbers.',
+        'BILLING_SUBSCRIPTION_REQUIRED',
+        402
+      );
+    }
+
+    if (subscription.billingBlockedAt) {
+      throw new AppError(
+        subscription.billingBlockedReason || 'Billing action is required before provisioning phone numbers.',
+        'BILLING_ACTION_REQUIRED',
+        402
+      );
+    }
+
     return subscription;
   }
 
@@ -635,6 +822,8 @@ export class SubscriptionBillingService {
     phoneNumber: string;
     campaignId: string;
     friendlyName?: string;
+    successUrl?: string;
+    cancelUrl?: string;
   }) {
     const [organization, subscription, activePhoneNumbers] = await Promise.all([
       this.getOrganizationRecord(input.organizationId),
@@ -657,8 +846,8 @@ export class SubscriptionBillingService {
       customerEmail: organization.email,
       customerName: organization.name,
       amountCents: Math.round(EXTRA_NUMBER_FIRST_CHARGE * 100),
-      successUrl: `${config.webUrl}/phone-numbers?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${config.webUrl}/phone-numbers?checkout=cancelled`,
+      successUrl: input.successUrl ?? `${config.webUrl}/phone-numbers?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: input.cancelUrl ?? `${config.webUrl}/phone-numbers?checkout=cancelled`,
       description: 'Extra phone number activation',
       metadata: {
         purpose: 'phone_number_activation',
@@ -804,20 +993,22 @@ export class SubscriptionBillingService {
             const newUsed = currentUsed + quantity;
             const overageUnits =
               Math.max(0, newUsed - included) - Math.max(0, currentUsed - included);
-            const newPendingBalance = roundLedger(
-              toAmount(subscription.pendingOverageBalance) + overageUnits * MESSAGE_OVERAGE_RATE
-            );
+            const currentCreditBalance = toAmount(subscription.messageCreditBalance);
+            const overageCost = roundLedger(overageUnits * MESSAGE_OVERAGE_RATE);
+            const creditConsumed = Math.min(currentCreditBalance, overageCost);
+            const newCreditBalance = roundLedger(currentCreditBalance - creditConsumed);
+            const creditShortfall = roundLedger(overageCost - creditConsumed);
 
             await tx.organizationSubscription.update({
               where: { id: subscription.id },
               data: event.unit === 'mms'
                 ? {
                     mmsUsed: newUsed,
-                    pendingOverageBalance: newPendingBalance.toFixed(4),
+                    messageCreditBalance: newCreditBalance.toFixed(4),
                   }
                 : {
                     smsUsed: newUsed,
-                    pendingOverageBalance: newPendingBalance.toFixed(4),
+                    messageCreditBalance: newCreditBalance.toFixed(4),
                   },
             });
 
@@ -828,14 +1019,16 @@ export class SubscriptionBillingService {
                   ...eventMetadata,
                   subscriptionUsageProcessedAt: new Date().toISOString(),
                   subscriptionOverageUnits: overageUnits,
-                  pendingOverageBalanceAfter: newPendingBalance.toFixed(4),
+                  messageCreditBalanceAfter: newCreditBalance.toFixed(4),
+                  messageCreditConsumed: creditConsumed.toFixed(4),
+                  messageCreditShortfall: creditShortfall.toFixed(4),
                 },
               },
             });
 
             return {
               organizationId: event.organizationId,
-              shouldFlush: overageUnits > 0,
+              shouldFlush: false,
             };
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }

@@ -22,6 +22,9 @@ model Organization {
   phone     String?
   website   String?
   logoUrl   String?
+  status    OrganizationStatus @default(active)
+  suspendedAt DateTime? @map("suspended_at")
+  suspensionReason String? @map("suspension_reason")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -45,6 +48,11 @@ model Organization {
   providerOperationLogs ProviderOperationLog[]
 
   @@map("organizations")
+}
+
+enum OrganizationStatus {
+  active
+  suspended
 }
 
 model User {
@@ -235,6 +243,11 @@ model Campaign {
   status               CampaignStatus @default(draft)
   providerStatus       String?        @map("provider_status")
   providerMessage      String?        @map("provider_message")
+  numberLinkIntent     Json?          @map("number_link_intent")
+  numberLinkStatus     CampaignNumberLinkStatus @default(none) @map("number_link_status")
+  numberLinkError      String?        @map("number_link_error")
+  numberLinkAttemptedAt DateTime?     @map("number_link_attempted_at")
+  numberLinkCompletedAt DateTime?     @map("number_link_completed_at")
   rejectionReason      String?        @map("rejection_reason")
   submitAttempts       Int            @default(0) @map("submit_attempts")
   lastSubmittedAt      DateTime?      @map("last_submitted_at")
@@ -285,6 +298,14 @@ enum CampaignStatus {
   rejected
   suspended
   expired
+}
+
+enum CampaignNumberLinkStatus {
+  none
+  requested
+  checkout_required
+  linked
+  failed
 }
 
 // ===========================================
@@ -433,6 +454,7 @@ enum SubscriptionStatus {
 enum BillingChargeKind {
   subscription_checkout
   message_overage
+  message_credit_topup
   phone_number_activation
   phone_number_mrc
   invoice_adjustment
@@ -610,6 +632,7 @@ model OrganizationSubscription {
   phoneNumbersIncluded         Int                @default(0) @map("phone_numbers_included")
   smsUsed                      Int                @default(0) @map("sms_used")
   mmsUsed                      Int                @default(0) @map("mms_used")
+  messageCreditBalance         Decimal            @default(0) @map("message_credit_balance") @db.Decimal(12, 4)
   pendingOverageBalance        Decimal            @default(0) @map("pending_overage_balance") @db.Decimal(12, 4)
   billingBlockedAt             DateTime?          @map("billing_blocked_at")
   billingBlockedReason         String?            @map("billing_blocked_reason")

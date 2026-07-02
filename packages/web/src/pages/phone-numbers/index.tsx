@@ -100,8 +100,12 @@ export function PhoneNumbersPage() {
         const sessionId = params.get('session_id');
 
         if (checkoutStatus === 'success' && sessionId) {
-          await api.completePhoneNumberCheckout({ sessionId });
-          notify.success('Number purchased', 'The selected phone number was added to your inventory.');
+          const response = await api.completePhoneNumberCheckout({ sessionId });
+          if (response.success && response.data && 'pending' in response.data && response.data.pending) {
+            notify.success('Checkout completed', response.data.message);
+          } else {
+            notify.success('Number purchased', 'The selected phone number was added to your inventory.');
+          }
           window.history.replaceState({}, '', '/phone-numbers');
         } else if (checkoutStatus === 'cancelled') {
           notify.error('Checkout cancelled', 'The phone number purchase was not completed.');

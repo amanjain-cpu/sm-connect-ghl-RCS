@@ -5,10 +5,15 @@
 import { Router } from 'express';
 import type { Router as RouterType } from 'express';
 import { z } from 'zod';
+import {
+  CAMPAIGN_SUB_USE_CASE_VALUES,
+  CAMPAIGN_USE_CASE_VALUES,
+} from '@signalmash-connect/shared';
 import { campaignService } from '../services/campaign.service.js';
 import { validate, idParamSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { organizationRuntimeService } from '../services/organization-runtime.service.js';
 
 const router: RouterType = Router();
 
@@ -17,21 +22,8 @@ const createCampaignSchema = z.object({
   brandId: z.string().uuid('Invalid brand ID'),
   name: z.string().min(1, 'Name is required').max(100),
   description: z.string().min(10, 'Description must be at least 10 characters').max(1000),
-  useCase: z.enum([
-    'two_factor_auth',
-    'account_notifications',
-    'customer_care',
-    'delivery_notifications',
-    'fraud_alerts',
-    'higher_education',
-    'low_volume',
-    'marketing',
-    'mixed',
-    'polling_voting',
-    'public_service_announcement',
-    'security_alerts',
-  ]),
-  subUsecases: z.array(z.string()).optional(),
+  useCase: z.enum(CAMPAIGN_USE_CASE_VALUES),
+  subUsecases: z.array(z.enum(CAMPAIGN_SUB_USE_CASE_VALUES)).optional(),
   embeddedLink: z.boolean().optional(),
   embeddedPhone: z.boolean().optional(),
   affiliateMarketing: z.boolean().optional(),
@@ -63,6 +55,21 @@ const createCampaignSchema = z.object({
 });
 
 const updateCampaignSchema = createCampaignSchema.omit({ brandId: true }).partial();
+const numberLinkIntentSchema = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('existing'),
+    phoneNumberId: z.string().uuid('Invalid phone number ID'),
+    friendlyName: z.string().max(100).optional(),
+  }),
+  z.object({
+    mode: z.literal('buy_new'),
+    phoneNumber: z.string().min(10).max(20),
+    friendlyName: z.string().max(100).optional(),
+  }),
+]);
+const submitCampaignSchema = z.object({
+  numberLinkIntent: numberLinkIntentSchema.optional(),
+}).default({});
 
 const listCampaignsQuerySchema = z.object({
   brandId: z.string().uuid().optional(),
@@ -104,6 +111,10 @@ router.post(
   authenticate,
   validate({ body: createCampaignSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'create campaigns'
+    );
     const campaign = await campaignService.create({
       ...req.body,
       organizationId: req.user!.organizationId,
@@ -146,6 +157,10 @@ router.put(
   authenticate,
   validate({ params: idParamSchema, body: updateCampaignSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'update campaigns'
+    );
     const campaign = await campaignService.update(
       req.params.id,
       req.user!.organizationId,
@@ -166,17 +181,45 @@ router.put(
 router.post(
   '/:id/submit',
   authenticate,
-  validate({ params: idParamSchema }),
+  validate({ params: idParamSchema, body: submitCampaignSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'submit campaigns'
+    );
     const campaign = await campaignService.submitForApproval(
       req.params.id,
-      req.user!.organizationId
+      req.user!.organizationId,
+      req.body
     );
 
     res.json({
       success: true,
       data: campaign,
       message: 'Campaign submitted for approval',
+    });
+  })
+);
+
+router.post(
+  '/:id/link-number',
+  authenticate,
+  validate({ params: idParamSchema, body: numberLinkIntentSchema }),
+  asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'link campaign phone numbers'
+    );
+    const campaign = await campaignService.linkPhoneNumber(
+      req.params.id,
+      req.user!.organizationId,
+      req.body
+    );
+
+    res.json({
+      success: true,
+      data: campaign,
+      message: 'Campaign phone-number link updated',
     });
   })
 );
@@ -190,6 +233,10 @@ router.post(
   authenticate,
   validate({ params: idParamSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'refresh campaign status'
+    );
     const campaign = await campaignService.refreshApprovalStatus(
       req.params.id,
       req.user!.organizationId
@@ -212,6 +259,10 @@ router.delete(
   authenticate,
   validate({ params: idParamSchema }),
   asyncHandler(async (req, res) => {
+    await organizationRuntimeService.assertActionAllowed(
+      req.user!.organizationId,
+      'delete campaigns'
+    );
     await campaignService.delete(req.params.id, req.user!.organizationId);
 
     res.json({

@@ -11,6 +11,13 @@ import {
   FileText,
   CheckCircle2,
 } from 'lucide-react';
+import {
+  CAMPAIGN_SUB_USE_CASE_VALUES,
+  CAMPAIGN_USE_CASE_DESCRIPTIONS,
+  CAMPAIGN_USE_CASES,
+  CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES,
+  CAMPAIGN_USE_CASE_VALUES,
+} from '@signalmash-connect/shared';
 import { Header } from '@/components/layout/header';
 import { PageShell } from '@/components/layout/page-shell';
 import { Card, CardContent } from '@/components/ui/card';
@@ -20,28 +27,33 @@ import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
 import { notify } from '@/stores/notification.store';
 
-const useCases = [
-  { value: 'marketing', label: 'Marketing', description: 'Promotional messages, offers, and outreach.' },
-  { value: 'customer_care', label: 'Customer Care', description: 'Support, follow-up, and service conversations.' },
-  { value: 'account_notifications', label: 'Account Notifications', description: 'Security, billing, and account alerts.' },
-  { value: 'delivery_notifications', label: 'Delivery Notifications', description: 'Shipment, dispatch, and delivery updates.' },
-  { value: 'fraud_alerts', label: 'Fraud Alerts', description: 'Sensitive notices related to fraud prevention.' },
-  { value: 'higher_education', label: 'Higher Education', description: 'Institutional messaging for schools and programs.' },
-  { value: 'low_volume', label: 'Low Volume', description: 'Small-scale operational messaging.' },
-  { value: 'mixed', label: 'Mixed', description: 'A mix of operational and promotional use cases.' },
-  { value: 'polling_voting', label: 'Polling & Voting', description: 'Surveys, feedback, and voting campaigns.' },
-  { value: 'public_service_announcement', label: 'Public Service Announcement', description: 'Broad public-awareness communications.' },
-  { value: 'security_alerts', label: 'Security Alerts', description: 'Security-related warnings and notifications.' },
-  { value: 'two_factor_auth', label: 'Two-Factor Auth', description: 'One-time passcodes and verification flows.' },
-] as const;
+const useCaseOptions = CAMPAIGN_USE_CASE_VALUES.map((value) => ({
+  value,
+  label: CAMPAIGN_USE_CASES[value],
+  description: CAMPAIGN_USE_CASE_DESCRIPTIONS[value],
+})) as Array<{
+  value: (typeof CAMPAIGN_USE_CASE_VALUES)[number];
+  label: string;
+  description: string;
+}>;
+
+const subUseCaseOptions = CAMPAIGN_SUB_USE_CASE_VALUES.map((value) => ({
+  value,
+  label: CAMPAIGN_USE_CASES[value],
+})) as Array<{
+  value: (typeof CAMPAIGN_SUB_USE_CASE_VALUES)[number];
+  label: string;
+}>;
+
+const useCasesRequiringSubUsecases = new Set<string>(CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES);
 
 const campaignSchema = z.object({
   name: z.string().min(1, 'Campaign name is required'),
   brandId: z.string().min(1, 'Please select a verified brand'),
-  useCase: z.enum(useCases.map((item) => item.value) as [string, ...string[]]),
+  useCase: z.enum(CAMPAIGN_USE_CASE_VALUES),
   description: z.string().min(10, 'Description must be at least 10 characters'),
   messageFlow: z.string().min(10, 'Message flow must be at least 10 characters'),
-  subUsecases: z.string().optional(),
+  subUsecases: z.array(z.enum(CAMPAIGN_SUB_USE_CASE_VALUES)).default([]),
   referenceId: z.string().optional(),
   tags: z.string().optional(),
   privacyPolicyLink: z.string().url('Enter a valid URL').or(z.literal('')),
@@ -65,6 +77,22 @@ const campaignSchema = z.object({
   optInMessage: z.string().optional(),
   optOutMessage: z.string().optional(),
   helpMessage: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (value.useCase === 'mixed' && value.subUsecases.length < 2) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['subUsecases'],
+      message: 'Select at least 2 sub-use-cases for a mixed campaign',
+    });
+  }
+
+  if (value.useCase === 'low_volume' && value.subUsecases.length < 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['subUsecases'],
+      message: 'Select at least 1 sub-use-case for a low-volume campaign',
+    });
+  }
 });
 
 type CampaignForm = z.infer<typeof campaignSchema>;
@@ -101,7 +129,7 @@ export function NewCampaignPage() {
       brandId: preselectedBrandId,
       useCase: 'marketing',
       messageFlow: '',
-      subUsecases: '',
+      subUsecases: [],
       referenceId: '',
       tags: '',
       privacyPolicyLink: '',
@@ -129,6 +157,9 @@ export function NewCampaignPage() {
   });
 
   const selectedUseCase = watch('useCase');
+  const selectedSubUsecases = watch('subUsecases') ?? [];
+  const requiresSubUsecases = useCasesRequiringSubUsecases.has(selectedUseCase);
+  const minimumSubUsecases = selectedUseCase === 'mixed' ? 2 : requiresSubUsecases ? 1 : 0;
 
   useEffect(() => {
     const loadBrands = async () => {
@@ -149,10 +180,24 @@ export function NewCampaignPage() {
     setValue('sampleMessages', sampleMessages.filter((message) => message.trim().length > 0));
   }, [sampleMessages, setValue]);
 
+  useEffect(() => {
+    if (!requiresSubUsecases) {
+      setValue('subUsecases', []);
+    }
+  }, [requiresSubUsecases, setValue]);
+
   const updateSampleMessage = (index: number, value: string) => {
     const next = [...sampleMessages];
     next[index] = value;
     setSampleMessages(next);
+  };
+
+  const toggleSubUsecase = (value: (typeof CAMPAIGN_SUB_USE_CASE_VALUES)[number]) => {
+    const next = selectedSubUsecases.includes(value)
+      ? selectedSubUsecases.filter((item) => item !== value)
+      : [...selectedSubUsecases, value];
+
+    setValue('subUsecases', next, { shouldValidate: true });
   };
 
   const addSampleMessage = () => {
@@ -177,7 +222,7 @@ export function NewCampaignPage() {
         brandId: data.brandId,
         useCase: data.useCase,
         description: data.description,
-        subUsecases: data.subUsecases?.split(',').map((value) => value.trim()).filter(Boolean),
+        subUsecases: requiresSubUsecases ? data.subUsecases : [],
         embeddedLink: data.embeddedLink,
         embeddedPhone: data.embeddedPhone,
         affiliateMarketing: data.affiliateMarketing,
@@ -319,7 +364,7 @@ export function NewCampaignPage() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Use Case</label>
                   <div className="grid gap-3 md:grid-cols-2">
-                    {useCases.map((useCase) => (
+                    {useCaseOptions.map((useCase) => (
                       <label
                         key={useCase.value}
                         className={`cursor-pointer rounded-2xl border px-4 py-4 transition ${
@@ -340,6 +385,49 @@ export function NewCampaignPage() {
                     ))}
                   </div>
                   {errors.useCase && <p className="text-sm text-destructive">{errors.useCase.message}</p>}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Sub-usecases</label>
+                  {requiresSubUsecases ? (
+                    <>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {subUseCaseOptions.map((option) => {
+                          const checked = selectedSubUsecases.includes(option.value);
+
+                          return (
+                            <label
+                              key={option.value}
+                              className={`cursor-pointer rounded-2xl border px-4 py-3 transition ${
+                                checked
+                                  ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950'
+                                  : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-700'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleSubUsecase(option.value)}
+                                className="sr-only"
+                              />
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="font-medium">{option.label}</span>
+                                {checked ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : null}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="text-sm text-slate-600 dark:text-slate-400">
+                        Select at least {minimumSubUsecases} sub-use-case{minimumSubUsecases === 1 ? '' : 's'} for this campaign type.
+                      </p>
+                    </>
+                  ) : (
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+                      Standard campaign types are submitted under their primary use case automatically. Sub-use-cases are only required for low-volume and mixed campaigns.
+                    </div>
+                  )}
+                  {errors.subUsecases && <p className="text-sm text-destructive">{errors.subUsecases.message}</p>}
                 </div>
 
                 <div className="space-y-2">
@@ -413,10 +501,6 @@ export function NewCampaignPage() {
                 </div>
 
                 <div className="grid gap-5 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Sub-usecases</label>
-                    <Input {...register('subUsecases')} placeholder="Comma-separated sub-usecases" />
-                  </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Reference ID</label>
                     <Input {...register('referenceId')} placeholder="Optional external reference" />

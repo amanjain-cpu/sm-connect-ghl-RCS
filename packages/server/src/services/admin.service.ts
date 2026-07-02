@@ -9,6 +9,7 @@ import { generateTokens, verifyAdminRefreshToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { integrationService } from './integration.service.js';
+import { subscriptionBillingService } from './subscription-billing.service.js';
 
 // Settings keys
 export const SETTINGS_KEYS = {
@@ -440,11 +441,18 @@ export class AdminService {
         skip,
         take: limit,
         include: {
+          subscription: {
+            select: {
+              plan: true,
+              status: true,
+            },
+          },
           _count: {
             select: {
               users: true,
               brands: true,
               campaigns: true,
+              phoneNumbers: true,
               messages: true,
             },
           },
@@ -487,7 +495,7 @@ export class AdminService {
       throw new AppError('Organization not found', 'ORGANIZATION_NOT_FOUND', 404);
     }
 
-    const [connections, installations, brands, campaigns, externalMappings, recentProviderOperations] =
+    const [connections, installations, brands, campaigns, phoneNumbers, externalMappings, recentProviderOperations, subscriptionSummary] =
       await Promise.all([
         prisma.platformConnection.findMany({
           where: { organizationId },
@@ -535,6 +543,19 @@ export class AdminService {
           },
           orderBy: { createdAt: 'desc' },
         }),
+        prisma.phoneNumber.findMany({
+          where: { organizationId },
+          include: {
+            campaign: {
+              select: {
+                id: true,
+                name: true,
+                status: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
         prisma.externalResourceMapping.findMany({
           where: { organizationId },
           orderBy: { updatedAt: 'desc' },
@@ -545,6 +566,7 @@ export class AdminService {
           orderBy: { createdAt: 'desc' },
           take: 50,
         }),
+        subscriptionBillingService.getSubscriptionSummary(organizationId),
       ]);
 
     await this.logAuditAction(adminId, 'VIEW_ORGANIZATION_ONBOARDING', 'organizations', organizationId);
@@ -555,6 +577,8 @@ export class AdminService {
       installations,
       brands,
       campaigns,
+      phoneNumbers,
+      subscriptionSummary,
       externalMappings,
       recentProviderOperations,
     };

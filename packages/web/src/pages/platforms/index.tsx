@@ -151,7 +151,7 @@ const lifecycleConfig: Record<
   brand_pending: {
     label: 'Brand pending',
     tone: 'text-primary',
-    helper: 'Business verification is in progress with the provider.',
+    helper: 'A verified brand is not available yet. Save, submit, or correct the brand before campaign setup can continue.',
   },
   campaign_pending: {
     label: 'Campaign pending',
