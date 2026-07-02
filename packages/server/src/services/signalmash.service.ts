@@ -78,6 +78,7 @@ interface RawBrandRegistrationResult {
 interface BrandStatusResult {
   status: string;
   signalmashBrandId?: string;
+  displayName?: string;
   tcrBrandId?: string;
   verificationScore?: number;
   rejectionReason?: string;
@@ -168,6 +169,8 @@ interface RawCampaignRegistrationResult {
 interface CampaignStatusResult {
   status: string;
   signalmashCampaignId?: string;
+  brandId?: string;
+  name?: string;
   tcrCampaignId?: string;
   rejectionReason?: string;
   dailyMessageLimit?: number;
@@ -214,6 +217,7 @@ interface SignalmashListedBrand {
 interface SignalmashListedCampaign {
   campaignId: string;
   brandId?: string;
+  name?: string;
   status?: string;
 }
 
@@ -1036,6 +1040,12 @@ export class SignalmashService {
     return {
       status: this.resolveBrandLifecycleStatus(data, result, 'UNKNOWN'),
       signalmashBrandId: this.pickString(data?.brandId, data?.brand_id, result.brandId, brandId),
+      displayName: this.pickString(
+        data?.displayName,
+        data?.display_name,
+        data?.brandName,
+        data?.brand_name,
+      ),
       tcrBrandId: this.pickString(data?.tcrBrandId, data?.tcr_brand_id, result.tcrBrandId, result.tcr_brand_id),
       verificationScore: this.pickNumber(
         data?.verificationScore,
@@ -1207,6 +1217,12 @@ export class SignalmashService {
         result.campaignId,
         campaignId
       ),
+      brandId: this.pickString(data?.brandId, data?.brand_id),
+      name: this.pickString(
+        data?.campaignName,
+        data?.campaign_name,
+        data?.name,
+      ),
       tcrCampaignId: this.pickString(
         data?.tcrCampaignId,
         data?.tcr_campaign_id,
@@ -1370,6 +1386,7 @@ export class SignalmashService {
       campaigns.push({
         campaignId,
         brandId: this.pickString(campaign.brandId, campaign.brand_id),
+        name: this.pickString(campaign.campaignName, campaign.campaign_name, campaign.name),
         status: this.resolveCampaignLifecycleStatus(campaign, undefined, 'UNKNOWN'),
       });
     }

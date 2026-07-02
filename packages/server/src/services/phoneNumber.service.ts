@@ -39,7 +39,7 @@ interface LinkExistingAssetsInput {
   campaignName: string;
   signalmashCampaignId: string;
   tcrCampaignId?: string;
-  phoneNumber: string;
+  phoneNumber?: string;
   signalmashNumberId?: string;
   friendlyName?: string;
   configureWebhook?: boolean;
@@ -82,6 +82,24 @@ export class PhoneNumberService {
     }
 
     return normalized;
+  }
+
+  private normalizeProviderLifecycleStatus(status?: string | null) {
+    if (!status?.trim()) {
+      return undefined;
+    }
+
+    return status.trim().replace(/[\s-]+/g, '_').toUpperCase();
+  }
+
+  private isVerifiedBrandProviderStatus(status?: string | null) {
+    const normalized = this.normalizeProviderLifecycleStatus(status);
+    return normalized ? ['VERIFIED', 'APPROVED', 'ACTIVE'].includes(normalized) : false;
+  }
+
+  private isApprovedCampaignProviderStatus(status?: string | null) {
+    const normalized = this.normalizeProviderLifecycleStatus(status);
+    return normalized ? ['APPROVED', 'ACTIVE'].includes(normalized) : false;
   }
 
   private async syncCampaignNumberLinkState(
@@ -368,11 +386,13 @@ export class PhoneNumberService {
   async linkExistingAssets(input: LinkExistingAssetsInput): Promise<{
     brand: Brand;
     campaign: Campaign;
-    phoneNumber: PhoneNumber;
+    phoneNumber: PhoneNumber | null;
     webhookConfigured: boolean;
     webhookError?: string;
   }> {
-    const normalizedPhoneNumber = formatPhoneE164(input.phoneNumber);
+    const normalizedPhoneNumber = input.phoneNumber
+      ? formatPhoneE164(input.phoneNumber)
+      : undefined;
     const organization = await prisma.organization.findUnique({
       where: { id: input.organizationId },
       select: {
@@ -388,6 +408,10 @@ export class PhoneNumberService {
       throw new AppError('Organization not found', 'ORGANIZATION_NOT_FOUND', 404);
     }
 
+    const organizationContactPhone = formatPhoneE164(
+      organization.phone ?? normalizedPhoneNumber ?? '+15550000000'
+    );
+
     const [brandOwnedByOtherOrg, campaignOwnedByOtherOrg, numberOwnedByOtherOrg] = await Promise.all([
       prisma.brand.findFirst({
         where: {
@@ -401,13 +425,15 @@ export class PhoneNumberService {
           organizationId: { not: input.organizationId },
         },
       }),
-      prisma.phoneNumber.findFirst({
-        where: {
-          phoneNumber: normalizedPhoneNumber,
-          organizationId: { not: input.organizationId },
-          status: { not: 'released' },
-        },
-      }),
+      normalizedPhoneNumber
+        ? prisma.phoneNumber.findFirst({
+            where: {
+              phoneNumber: normalizedPhoneNumber,
+              organizationId: { not: input.organizationId },
+              status: { not: 'released' },
+            },
+          })
+        : Promise.resolve(null),
     ]);
 
     if (brandOwnedByOtherOrg) {
@@ -443,7 +469,7 @@ export class PhoneNumberService {
             postalCode: '00000',
             country: 'US',
             website: organization.website ?? 'https://example.com',
-            phone: organization.phone ?? normalizedPhoneNumber,
+            phone: organizationContactPhone,
             email: organization.email,
             businessContactEmail: organization.email,
             signalmashBrandId: input.signalmashBrandId,
@@ -504,62 +530,69 @@ export class PhoneNumberService {
         },
       });
 
-      const existingNumber = await tx.phoneNumber.findFirst({
-        where: {
-          organizationId: input.organizationId,
-          phoneNumber: normalizedPhoneNumber,
-        },
-      });
-
-      const phoneNumber = existingNumber
-        ? await tx.phoneNumber.update({
-            where: { id: existingNumber.id },
-            data: {
-              formattedNumber: this.formatPhoneNumber(normalizedPhoneNumber),
-              friendlyName: input.friendlyName ?? existingNumber.friendlyName,
-              areaCode: this.extractAreaCode(normalizedPhoneNumber),
-              signalmashNumberId: input.signalmashNumberId ?? existingNumber.signalmashNumberId,
-              status: 'active',
-              campaignId: syncedCampaign.id,
-              smsCapable: true,
-              mmsCapable: true,
+      const existingNumber = normalizedPhoneNumber
+        ? await tx.phoneNumber.findFirst({
+            where: {
+              organizationId: input.organizationId,
+              phoneNumber: normalizedPhoneNumber,
             },
           })
-        : await tx.phoneNumber.create({
-            data: {
-              organizationId: input.organizationId,
-              campaignId: syncedCampaign.id,
-              phoneNumber: normalizedPhoneNumber,
-              formattedNumber: this.formatPhoneNumber(normalizedPhoneNumber),
-              friendlyName: input.friendlyName,
-              areaCode: this.extractAreaCode(normalizedPhoneNumber),
-              signalmashNumberId: input.signalmashNumberId,
-              status: 'active',
-              smsCapable: true,
-              mmsCapable: true,
-              voiceCapable: false,
-            },
-          });
+        : null;
+
+      const phoneNumber = normalizedPhoneNumber
+        ? existingNumber
+          ? await tx.phoneNumber.update({
+              where: { id: existingNumber.id },
+              data: {
+                formattedNumber: this.formatPhoneNumber(normalizedPhoneNumber),
+                friendlyName: input.friendlyName ?? existingNumber.friendlyName,
+                areaCode: this.extractAreaCode(normalizedPhoneNumber),
+                signalmashNumberId: input.signalmashNumberId ?? existingNumber.signalmashNumberId,
+                status: 'active',
+                campaignId: syncedCampaign.id,
+                smsCapable: true,
+                mmsCapable: true,
+              },
+            })
+          : await tx.phoneNumber.create({
+              data: {
+                organizationId: input.organizationId,
+                campaignId: syncedCampaign.id,
+                phoneNumber: normalizedPhoneNumber,
+                formattedNumber: this.formatPhoneNumber(normalizedPhoneNumber),
+                friendlyName: input.friendlyName,
+                areaCode: this.extractAreaCode(normalizedPhoneNumber),
+                signalmashNumberId: input.signalmashNumberId,
+                status: 'active',
+                smsCapable: true,
+                mmsCapable: true,
+                voiceCapable: false,
+              },
+            })
+        : null;
 
       return { brand: syncedBrand, campaign: syncedCampaign, phoneNumber };
     });
 
     await integrationService.syncBrandMapping(result.brand);
     await integrationService.syncCampaignMapping(result.campaign);
-    await integrationService.syncPhoneNumberMapping(result.phoneNumber);
     await integrationService.setPrimaryOnboardingResources(result.brand.organizationId, {
       brandId: result.brand.id,
       campaignId: result.campaign.id,
     });
-    await this.ensureDefaultSenderProfiles(result.phoneNumber, input.makeDefaultSender ?? true);
+
+    if (result.phoneNumber) {
+      await integrationService.syncPhoneNumberMapping(result.phoneNumber);
+      await this.ensureDefaultSenderProfiles(result.phoneNumber, input.makeDefaultSender ?? true);
+    }
 
     let webhookConfigured = false;
     let webhookError: string | undefined;
-    if (input.configureWebhook && !input.signalmashNumberId) {
+    if (result.phoneNumber && input.configureWebhook && !input.signalmashNumberId) {
       webhookError = 'Signalmash Number ID is required to configure the number webhook automatically.';
     }
 
-    if (input.configureWebhook && input.signalmashNumberId) {
+    if (result.phoneNumber && input.configureWebhook && input.signalmashNumberId) {
       try {
         await signalmashService.configureWebhook(
           input.signalmashNumberId,
@@ -577,13 +610,80 @@ export class PhoneNumberService {
         organizationId: input.organizationId,
         brandId: result.brand.id,
         campaignId: result.campaign.id,
-        phoneNumberId: result.phoneNumber.id,
+        phoneNumberId: result.phoneNumber?.id,
         webhookConfigured,
       },
       'Existing Signalmash assets linked to organization'
     );
 
     return { ...result, webhookConfigured, webhookError };
+  }
+
+  async linkVerifiedBrandCampaignFromProvider(input: {
+    organizationId: string;
+    signalmashBrandId: string;
+    signalmashCampaignId: string;
+  }): Promise<{
+    brand: Brand;
+    campaign: Campaign;
+    phoneNumber: PhoneNumber | null;
+    providerBrandStatus: string;
+    providerCampaignStatus: string;
+  }> {
+    const [listedBrands, listedCampaigns, brandStatus, campaignStatus] = await Promise.all([
+      signalmashService.listBrands(),
+      signalmashService.listCampaigns(),
+      signalmashService.getBrandStatus(input.signalmashBrandId),
+      signalmashService.getCampaignStatus(input.signalmashCampaignId),
+    ]);
+
+    if (!this.isVerifiedBrandProviderStatus(brandStatus.status)) {
+      throw new AppError(
+        `Only verified Signalmash brands can be assigned. Current provider status: ${brandStatus.status}`,
+        'BRAND_NOT_VERIFIED',
+        400
+      );
+    }
+
+    if (!this.isApprovedCampaignProviderStatus(campaignStatus.status)) {
+      throw new AppError(
+        `Only approved Signalmash campaigns can be assigned. Current provider status: ${campaignStatus.status}`,
+        'CAMPAIGN_NOT_APPROVED',
+        400
+      );
+    }
+
+    const listedBrand = listedBrands.find((brand) => brand.brandId === input.signalmashBrandId);
+    const listedCampaign = listedCampaigns.find((campaign) => campaign.campaignId === input.signalmashCampaignId);
+    const campaignBrandId = campaignStatus.brandId ?? listedCampaign?.brandId;
+
+    if (!listedCampaign) {
+      throw new AppError('Signalmash campaign was not returned by the provider account', 'CAMPAIGN_NOT_VISIBLE', 404);
+    }
+
+    if (!campaignBrandId || campaignBrandId !== input.signalmashBrandId) {
+      throw new AppError(
+        'The selected Signalmash campaign does not belong to the selected brand',
+        'CAMPAIGN_BRAND_MISMATCH',
+        400
+      );
+    }
+
+    const linked = await this.linkExistingAssets({
+      organizationId: input.organizationId,
+      brandName: listedBrand?.displayName ?? brandStatus.displayName ?? input.signalmashBrandId,
+      signalmashBrandId: input.signalmashBrandId,
+      tcrBrandId: brandStatus.tcrBrandId,
+      campaignName: campaignStatus.name ?? listedCampaign.name ?? input.signalmashCampaignId,
+      signalmashCampaignId: input.signalmashCampaignId,
+      tcrCampaignId: campaignStatus.tcrCampaignId,
+    });
+
+    return {
+      ...linked,
+      providerBrandStatus: brandStatus.status,
+      providerCampaignStatus: campaignStatus.status,
+    };
   }
 
   // ===========================================
