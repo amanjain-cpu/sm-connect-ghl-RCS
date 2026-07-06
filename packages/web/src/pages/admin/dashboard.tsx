@@ -75,10 +75,10 @@ export function AdminDashboardPage() {
       <AdminHeader title="Admin Portal" subtitle="Platform administration and runtime controls" />
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        <section className="rounded-[28px] border border-slate-200 bg-white px-6 py-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+        <section className="rounded-[28px] border border-primary/20 bg-primary/5 px-6 py-6 shadow-sm dark:border-primary/25 dark:bg-primary/10">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-2xl space-y-2">
-              <p className="text-sm font-medium uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+              <p className="text-sm font-medium uppercase tracking-[0.18em] text-primary">
                 Platform Overview
               </p>
               <h2 className="text-2xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">
