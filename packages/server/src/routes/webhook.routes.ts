@@ -377,6 +377,13 @@ async function handleCrmOutboundWebhook(req: Request, res: Response, options?: {
   });
 }
 
+function isCrmOutboundPayload(payload: unknown): boolean {
+  const data = payload as Record<string, unknown> | null;
+  const type = data?.type;
+
+  return type === 'OutboundMessage' || type === 'SMS' || Boolean(crmPlatformAdapter.parseOutboundWebhook?.(payload));
+}
+
 export async function handleCrmAppWebhook(
   req: Request,
   res: Response,
@@ -421,10 +428,11 @@ export async function handleCrmAppWebhook(
 
   logger.info({ type, locationId, companyId, appId }, 'Received CRM app webhook');
 
-  switch (type) {
-    case 'OutboundMessage':
-      return handleCrmOutboundWebhook(req, res, options);
+  if (isCrmOutboundPayload(req.body)) {
+    return handleCrmOutboundWebhook(req, res, options);
+  }
 
+  switch (type) {
     case 'UNINSTALL': {
       const result = await platformService.handleLeadconnectorUninstall({
         locationId: typeof locationId === 'string' ? locationId : undefined,
