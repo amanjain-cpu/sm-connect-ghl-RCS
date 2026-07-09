@@ -9,6 +9,10 @@ import { validate } from '../middleware/validation.js';
 import { BadRequestError } from '../utils/errors.js';
 
 const router: RouterType = Router();
+const allowedAssetFiles = new Set([
+  'signalmash-support-widget.iife.js',
+  'widget.css',
+]);
 
 const sessionSchema = z.object({
   page: z.string().max(200).optional(),
@@ -16,6 +20,69 @@ const sessionSchema = z.object({
   fieldFocus: z.string().max(80).optional(),
   onboardingStatus: z.string().max(80).optional(),
 });
+
+router.get(
+  '/assets/:file',
+  asyncHandler(async (req, res) => {
+    if (!config.supportAgentWidgetUrl) {
+      throw new BadRequestError('Support agent widget is not configured');
+    }
+
+    const file = req.params.file;
+    if (!allowedAssetFiles.has(file)) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Asset not found' },
+      });
+    }
+
+    const response = await fetch(`${trimSlash(config.supportAgentWidgetUrl)}/${file}`);
+    if (!response.ok) {
+      throw new BadRequestError('Support agent asset could not be loaded');
+    }
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) {
+      res.type(contentType);
+    }
+
+    res.send(Buffer.from(await response.arrayBuffer()));
+  })
+);
+
+router.all(
+  '/proxy/api/:target(chat|faq|feedback)',
+  asyncHandler(async (req, res) => {
+    if (!config.supportAgentApiUrl) {
+      throw new BadRequestError('Support agent API is not configured');
+    }
+
+    const authorization = req.headers.authorization;
+    if (!authorization) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Missing support-agent token' },
+      });
+    }
+
+    const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const response = await fetch(`${trimSlash(config.supportAgentApiUrl)}/api/${req.params.target}${query}`, {
+      method: req.method,
+      headers: {
+        authorization,
+        'content-type': 'application/json',
+      },
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : JSON.stringify(req.body ?? {}),
+    });
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) {
+      res.type(contentType);
+    }
+
+    res.status(response.status).send(Buffer.from(await response.arrayBuffer()));
+  })
+);
 
 router.use(authenticate);
 
@@ -55,8 +122,8 @@ router.post(
     res.json({
       success: true,
       data: {
-        apiBaseUrl: trimSlash(config.supportAgentApiUrl),
-        widgetAssetBaseUrl: trimSlash(config.supportAgentWidgetUrl),
+        apiBaseUrl: '/api/support-agent/proxy',
+        widgetAssetBaseUrl: '/api/support-agent/assets',
         token: data.token,
         expiresAt: data.expiresAt,
       },
