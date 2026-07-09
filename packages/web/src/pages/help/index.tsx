@@ -9,6 +9,14 @@ import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/stores/auth.store';
 
+declare global {
+  interface Window {
+    SignalmashSupportWidget?: {
+      mount: (element: HTMLElement, props: { apiBaseUrl: string; token: string }) => void;
+    };
+  }
+}
+
 interface OperationsSummary {
   billing: {
     pending: number;
@@ -37,6 +45,7 @@ export function HelpPage() {
   const { organization } = useAuthStore();
   const [operations, setOperations] = useState<OperationsSummary | null>(null);
   const [connections, setConnections] = useState<PlatformConnection[]>([]);
+  const [supportAgentStatus, setSupportAgentStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
 
   useEffect(() => {
     const loadData = async () => {
@@ -60,6 +69,52 @@ export function HelpPage() {
 
     void loadData();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const mountSupportAgent = async () => {
+      try {
+        const response = await api.createSupportAgentSession({
+          page: '/help',
+          appStep: 'help',
+          onboardingStatus: connections[0]?.installation?.lifecycleState,
+        });
+
+        if (cancelled || !response.success || !response.data) {
+          return;
+        }
+
+        await loadSupportAgentAssets(response.data.widgetAssetBaseUrl);
+
+        if (cancelled) {
+          return;
+        }
+
+        const mountPoint = document.getElementById('sm-connect-support-agent');
+        if (!mountPoint || !window.SignalmashSupportWidget) {
+          throw new Error('Support widget did not load');
+        }
+
+        mountPoint.innerHTML = '';
+        window.SignalmashSupportWidget.mount(mountPoint, {
+          apiBaseUrl: response.data.apiBaseUrl,
+          token: response.data.token,
+        });
+        setSupportAgentStatus('ready');
+      } catch {
+        if (!cancelled) {
+          setSupportAgentStatus('unavailable');
+        }
+      }
+    };
+
+    void mountSupportAgent();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [connections]);
 
   const connectionNeedsAttention = connections.filter(
     (connection) => connection.status === 'error' || connection.status === 'pending'
@@ -160,6 +215,20 @@ export function HelpPage() {
         </div>
 
         <PageSection className="px-6 py-6">
+          <div className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div id="sm-connect-support-agent" className="min-h-[560px]">
+              {supportAgentStatus === 'loading' ? (
+                <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-500">
+                  Loading support chat...
+                </div>
+              ) : supportAgentStatus === 'unavailable' ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+                  Support chat is unavailable right now. The diagnostics and operator guidance below are still available.
+                </div>
+              ) : null}
+            </div>
+          </div>
+
           <div className="grid gap-4 lg:grid-cols-2">
             <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
               <div className="flex items-center gap-2">
@@ -233,4 +302,45 @@ export function HelpPage() {
       </PageShell>
     </div>
   );
+}
+
+async function loadSupportAgentAssets(assetBaseUrl: string) {
+  await Promise.all([
+    loadStylesheet(`${assetBaseUrl}/widget.css`),
+    loadScript(`${assetBaseUrl}/signalmash-support-widget.iife.js`),
+  ]);
+}
+
+function loadScript(src: string): Promise<void> {
+  const existing = document.querySelector<HTMLScriptElement>(`script[data-support-agent="true"][src="${src}"]`);
+  if (existing) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.supportAgent = 'true';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Support widget script failed to load'));
+    document.head.appendChild(script);
+  });
+}
+
+function loadStylesheet(href: string): Promise<void> {
+  const existing = document.querySelector<HTMLLinkElement>(`link[data-support-agent="true"][href="${href}"]`);
+  if (existing) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.dataset.supportAgent = 'true';
+    link.onload = () => resolve();
+    link.onerror = () => reject(new Error('Support widget styles failed to load'));
+    document.head.appendChild(link);
+  });
 }

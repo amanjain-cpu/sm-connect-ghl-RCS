@@ -451,6 +451,20 @@ class ApiClient {
     return this.get<any>('/operations/summary');
   }
 
+  async createSupportAgentSession(data: {
+    page?: string;
+    appStep?: string;
+    fieldFocus?: string;
+    onboardingStatus?: string;
+  }) {
+    return this.post<{
+      apiBaseUrl: string;
+      widgetAssetBaseUrl: string;
+      token: string;
+      expiresAt: string;
+    }>('/support-agent/session', data);
+  }
+
   async getDeadLetters() {
     return this.get<any[]>('/operations/dead-letters');
   }

@@ -15,6 +15,7 @@ import { webhookRoutes } from './webhook.routes.js';
 import { billingRoutes } from './billing.routes.js';
 import { portOrderRoutes } from './port-order.routes.js';
 import { operationsRoutes } from './operations.routes.js';
+import { supportAgentRoutes } from './support-agent.routes.js';
 import adminRoutes from './admin.routes.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { handleCrmAppWebhook } from './webhook.routes.js';
@@ -53,6 +54,7 @@ router.use('/port-orders', portOrderRoutes);
 router.use('/platforms', platformRoutes);
 router.use('/billing', billingRoutes);
 router.use('/operations', operationsRoutes);
+router.use('/support-agent', supportAgentRoutes);
 router.use('/webhooks', webhookRoutes);
 
 // Admin Routes (separate namespace)

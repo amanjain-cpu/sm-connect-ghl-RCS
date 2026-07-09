@@ -72,6 +72,11 @@ const configSchema = z.object({
   smtpPass: z.string().optional(),
   fromEmail: z.string().email().optional(),
 
+  // Support Agent
+  supportAgentApiUrl: z.string().url().optional(),
+  supportAgentWidgetUrl: z.string().url().optional(),
+  supportAgentAdminApiKey: z.string().optional(),
+
   // Sentry
   sentryDsn: z.string().optional(),
 });
@@ -126,6 +131,10 @@ function loadConfig() {
     smtpUser: process.env['SMTP_USER'],
     smtpPass: process.env['SMTP_PASS'],
     fromEmail: process.env['FROM_EMAIL'],
+
+    supportAgentApiUrl: process.env['SUPPORT_AGENT_API_URL'],
+    supportAgentWidgetUrl: process.env['SUPPORT_AGENT_WIDGET_URL'],
+    supportAgentAdminApiKey: process.env['SUPPORT_AGENT_ADMIN_API_KEY'],
 
     sentryDsn: process.env['SENTRY_DSN'],
   };
