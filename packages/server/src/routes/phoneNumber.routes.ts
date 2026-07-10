@@ -133,8 +133,54 @@ const purchaseBodySchema = z.object({
   phoneNumber: z.string().min(10).max(15),
   campaignId: z.string().uuid(),
   friendlyName: z.string().max(100).optional(),
-  monthlyPrice: z.coerce.number().positive().max(1000).optional(),
 });
+
+async function savePendingNumberPurchaseIntent(input: {
+  organizationId: string;
+  campaignId: string;
+  phoneNumber: string;
+  friendlyName?: string;
+  error: AppError;
+}) {
+  const campaign = await prisma.campaign.findFirst({
+    where: {
+      id: input.campaignId,
+      organizationId: input.organizationId,
+    },
+    select: {
+      id: true,
+      status: true,
+      signalmashCampaignId: true,
+    },
+  });
+
+  if (campaign?.status !== 'pending_approval' || !campaign.signalmashCampaignId) {
+    return null;
+  }
+
+  await prisma.campaign.update({
+    where: { id: campaign.id },
+    data: {
+      numberLinkIntent: {
+        mode: 'buy_new',
+        phoneNumber: input.phoneNumber,
+        makeDefaultSender: true,
+        ...(input.friendlyName ? { friendlyName: input.friendlyName } : {}),
+      } as any,
+      numberLinkStatus: 'requested',
+      numberLinkError: input.error.message,
+      numberLinkAttemptedAt: new Date(),
+      numberLinkCompletedAt: null,
+    },
+  });
+
+  return {
+    pending: true,
+    campaignId: campaign.id,
+    phoneNumber: input.phoneNumber,
+    message: 'Number selection saved. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
+  };
+}
 
 router.post(
   '/checkout',
@@ -237,40 +283,19 @@ router.post(
       }
 
       if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
-        const campaign = await prisma.campaign.findFirst({
-          where: {
-            id: metadata.campaignId,
-            organizationId: req.user!.organizationId,
-          },
-          select: {
-            id: true,
-            status: true,
-            signalmashCampaignId: true,
-          },
+        const pendingIntent = await savePendingNumberPurchaseIntent({
+          organizationId: req.user!.organizationId,
+          campaignId: metadata.campaignId,
+          phoneNumber: metadata.phoneNumber,
+          friendlyName: metadata.friendlyName || undefined,
+          error,
         });
 
-        if (campaign?.status === 'pending_approval' && campaign.signalmashCampaignId) {
-          await prisma.campaign.update({
-            where: { id: campaign.id },
-            data: {
-              numberLinkIntent: {
-                mode: 'buy_new',
-                phoneNumber: metadata.phoneNumber,
-                ...(metadata.friendlyName ? { friendlyName: metadata.friendlyName } : {}),
-              } as any,
-              numberLinkStatus: 'requested',
-              numberLinkError: error.message,
-              numberLinkAttemptedAt: new Date(),
-              numberLinkCompletedAt: null,
-            },
-          });
-
+        if (pendingIntent) {
           res.status(202).json({
             success: true,
             data: {
-              pending: true,
-              campaignId: campaign.id,
-              phoneNumber: metadata.phoneNumber,
+              ...pendingIntent,
               message: 'Payment completed. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
             },
           });
@@ -316,16 +341,38 @@ router.post(
       );
     }
 
-    const number = await phoneNumberService.purchaseNumber(
-      req.user!.organizationId,
-      phoneNumber,
-      { campaignId, friendlyName }
-    );
+    try {
+      const number = await phoneNumberService.purchaseNumber(
+        req.user!.organizationId,
+        phoneNumber,
+        { campaignId, friendlyName }
+      );
 
-    res.status(201).json({
-      success: true,
-      data: number,
-    });
+      res.status(201).json({
+        success: true,
+        data: number,
+      });
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
+        const pendingIntent = await savePendingNumberPurchaseIntent({
+          organizationId: req.user!.organizationId,
+          campaignId,
+          phoneNumber,
+          friendlyName,
+          error,
+        });
+
+        if (pendingIntent) {
+          res.status(202).json({
+            success: true,
+            data: pendingIntent,
+          });
+          return;
+        }
+      }
+
+      throw error;
+    }
   })
 );
 

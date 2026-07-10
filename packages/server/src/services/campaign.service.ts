@@ -85,6 +85,7 @@ interface CampaignNumberLinkIntentInput {
   phoneNumber?: string;
   friendlyName?: string;
   confirmReassignment?: boolean;
+  makeDefaultSender?: boolean;
 }
 
 interface CampaignNumberLinkIntent {
@@ -93,6 +94,7 @@ interface CampaignNumberLinkIntent {
   phoneNumber?: string;
   friendlyName?: string;
   confirmReassignment?: boolean;
+  makeDefaultSender?: boolean;
 }
 
 type CampaignNumberLinkAction =
@@ -389,6 +391,7 @@ export class CampaignService {
         ? record.friendlyName.trim()
         : undefined;
     const confirmReassignment = record.confirmReassignment === true;
+    const makeDefaultSender = record.makeDefaultSender !== false;
 
     if (mode === 'existing' && !phoneNumberId) {
       return null;
@@ -404,6 +407,7 @@ export class CampaignService {
       ...(phoneNumber ? { phoneNumber } : {}),
       ...(friendlyName ? { friendlyName } : {}),
       ...(confirmReassignment ? { confirmReassignment: true } : {}),
+      makeDefaultSender,
     };
   }
 
@@ -430,6 +434,7 @@ export class CampaignService {
         phoneNumberId,
         ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
         ...(value.confirmReassignment ? { confirmReassignment: true } : {}),
+        makeDefaultSender: value.makeDefaultSender ?? true,
       };
     }
 
@@ -442,6 +447,7 @@ export class CampaignService {
       mode,
       phoneNumber,
       ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
+      makeDefaultSender: value.makeDefaultSender ?? true,
     };
   }
 
@@ -539,6 +545,7 @@ export class CampaignService {
             friendlyName: intent.friendlyName,
             campaignId: campaign.id,
             confirmReassignment: intent.confirmReassignment,
+            makeDefault: intent.makeDefaultSender ?? true,
           }
         );
         const updatedCampaign = await prisma.campaign.update({
@@ -609,6 +616,7 @@ export class CampaignService {
         {
           campaignId: campaign.id,
           friendlyName: intent.friendlyName,
+          makeDefaultSender: intent.makeDefaultSender ?? true,
         }
       );
       const updatedCampaign = await prisma.campaign.findUnique({

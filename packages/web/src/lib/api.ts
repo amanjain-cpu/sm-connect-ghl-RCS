@@ -320,6 +320,7 @@ class ApiClient {
       mode: 'buy_new';
       phoneNumber: string;
       friendlyName?: string;
+      makeDefaultSender?: boolean;
     };
   }) {
     return this.post<any>(`/campaigns/${id}/submit`, data);
@@ -330,10 +331,12 @@ class ApiClient {
     phoneNumberId: string;
     friendlyName?: string;
     confirmReassignment?: boolean;
+    makeDefaultSender?: boolean;
   } | {
     mode: 'buy_new';
     phoneNumber: string;
     friendlyName?: string;
+    makeDefaultSender?: boolean;
   }) {
     return this.post<any>(`/campaigns/${id}/link-number`, data);
   }
@@ -550,10 +553,23 @@ class ApiClient {
   }
 
   async purchasePhoneNumber(data: { phoneNumber: string; campaignId?: string; friendlyName?: string }) {
-    return this.post<any>('/phone-numbers/purchase', data);
+    return this.post<
+      | {
+          id: string;
+          phoneNumber: string;
+          status: string;
+          campaignId?: string | null;
+        }
+      | {
+          pending: true;
+          campaignId: string;
+          phoneNumber: string;
+          message: string;
+        }
+    >('/phone-numbers/purchase', data);
   }
 
-  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId: string; friendlyName?: string; monthlyPrice?: number }) {
+  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId: string; friendlyName?: string }) {
     return this.post<
       | { mode: 'included'; activePhoneNumbers: number; includedPhoneNumbers: number }
       | {

@@ -286,7 +286,12 @@ export function CampaignDetailPage() {
           if (response.success && response.data && 'pending' in response.data && response.data.pending) {
             notify.success('Checkout completed', response.data.message);
           } else {
-            notify.success('Number linked', 'The phone number purchase completed for this campaign.');
+            notify.success(
+              'Number linked',
+              campaign?.status === 'pending_approval'
+                ? 'The phone number purchase completed and was saved as the default sender. SMS/MMS starts after campaign approval.'
+                : 'The phone number purchase completed and was saved as the default sender.'
+            );
           }
           await Promise.all([loadCampaign(), loadNumberSetupData()]);
         } catch (error) {
@@ -367,6 +372,7 @@ export function CampaignDetailPage() {
         mode: 'existing' as const,
         phoneNumberId: selectedExistingNumberId,
         friendlyName: numberFriendlyName || undefined,
+        makeDefaultSender: true,
         ...(requiresReassignment ? { confirmReassignment: true } : {}),
       };
     }
@@ -380,6 +386,7 @@ export function CampaignDetailPage() {
       mode: 'buy_new' as const,
       phoneNumber: selectedAvailableNumber,
       friendlyName: numberFriendlyName || undefined,
+      makeDefaultSender: true,
     };
   };
 
@@ -392,7 +399,7 @@ export function CampaignDetailPage() {
     await Promise.all([loadCampaign(), loadNumberSetupData()]);
 
     if (responseData?.numberLinkAction?.mode === 'linked') {
-      notify.success(successMessage, 'The campaign and phone number are now linked.');
+      notify.success(successMessage, 'The campaign and phone number are now linked and saved as the default sender.');
       return;
     }
 
@@ -400,8 +407,8 @@ export function CampaignDetailPage() {
       notify.success(
         successMessage,
         responseData.numberLinkAction.previousCampaignName
-          ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName} and linked to this campaign.`
-          : 'The existing number was reassigned and linked to this campaign.'
+          ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName}, linked to this campaign, and saved as the default sender.`
+          : 'The existing number was reassigned, linked to this campaign, and saved as the default sender.'
       );
       return;
     }
@@ -935,7 +942,7 @@ export function CampaignDetailPage() {
                   <div className="mt-5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                     {campaign.status === 'approved'
                       ? 'No phone numbers are assigned yet. This campaign is ready for the number provisioning step.'
-                      : 'No phone numbers are assigned yet. Number assignment begins after campaign approval.'}
+                      : 'No phone numbers are assigned yet. You can buy or link a sender now; SMS/MMS starts after campaign approval.'}
                   </div>
                 ) : (
                   <div className="mt-5 space-y-3">
@@ -1086,7 +1093,7 @@ export function CampaignDetailPage() {
             <DialogDescription>
               {campaign.status === 'draft'
                 ? 'Submit this campaign to Signalmash and optionally link an existing sender or buy a new 10DLC number.'
-                : 'Link an existing active sender or buy a new 10DLC number for this campaign.'}
+                : 'Link an existing active sender or buy a new 10DLC number for this campaign. SMS/MMS starts after approval if review is still pending.'}
             </DialogDescription>
           </DialogHeader>
 

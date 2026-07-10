@@ -72,6 +72,16 @@ const statusConfig = {
   released: { label: 'Released', icon: XCircle, variant: 'secondary' as const },
 };
 
+const campaignStatusLabel = (status: string) =>
+  status === 'pending_approval'
+    ? 'Pending approval'
+    : status === 'approved'
+      ? 'Approved'
+      : status.replace(/_/g, ' ');
+
+const isPurchasableCampaign = (campaign: CampaignOption) =>
+  ['pending_approval', 'approved'].includes(campaign.status);
+
 export function PhoneNumbersPage() {
   const navigate = useNavigate();
   const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumber[]>([]);
@@ -104,7 +114,7 @@ export function PhoneNumbersPage() {
           if (response.success && response.data && 'pending' in response.data && response.data.pending) {
             notify.success('Checkout completed', response.data.message);
           } else {
-            notify.success('Number purchased', 'The selected phone number was added to your inventory.');
+            notify.success('Number purchased', 'The selected phone number was linked and saved as the default sender.');
           }
           window.history.replaceState({}, '', '/phone-numbers');
         } else if (checkoutStatus === 'cancelled') {
@@ -124,9 +134,9 @@ export function PhoneNumbersPage() {
           setStats(statsRes.data);
         }
 
-        const campaignsRes = await api.getCampaigns({ status: 'approved' });
+        const campaignsRes = await api.getCampaigns();
         if (campaignsRes.success && campaignsRes.data) {
-          setCampaignOptions(campaignsRes.data);
+          setCampaignOptions(campaignsRes.data.filter(isPurchasableCampaign));
         }
       } catch (loadError) {
         console.error('Failed to load phone numbers:', loadError);
@@ -154,9 +164,9 @@ export function PhoneNumbersPage() {
         setStats(statsRes.data);
       }
 
-      const campaignsRes = await api.getCampaigns({ status: 'approved' });
+      const campaignsRes = await api.getCampaigns();
       if (campaignsRes.success && campaignsRes.data) {
-        setCampaignOptions(campaignsRes.data);
+        setCampaignOptions(campaignsRes.data.filter(isPurchasableCampaign));
       }
     } catch (loadError) {
       console.error('Failed to reload phone numbers:', loadError);
@@ -261,8 +271,8 @@ export function PhoneNumbersPage() {
     );
   });
 
-  const hasApprovedCampaigns = campaignOptions.length > 0;
-  const buyNumberLabel = hasApprovedCampaigns ? 'Buy Number' : 'Create Approved Campaign';
+  const hasPurchasableCampaigns = campaignOptions.length > 0;
+  const buyNumberLabel = hasPurchasableCampaigns ? 'Buy Number' : 'Submit Campaign';
 
   return (
     <div>
@@ -272,7 +282,7 @@ export function PhoneNumbersPage() {
         action={{
           label: buyNumberLabel,
           onClick: () => {
-            if (hasApprovedCampaigns) {
+            if (hasPurchasableCampaigns) {
               setShowSearchDialog(true);
               return;
             }
@@ -318,17 +328,17 @@ export function PhoneNumbersPage() {
           </div>
         </PageSection>
 
-        {!hasApprovedCampaigns && (
+        {!hasPurchasableCampaigns && (
           <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
-                <Badge variant="warning" className="w-fit">Blocked</Badge>
+                <Badge variant="warning" className="w-fit">Campaign needed</Badge>
                 <h3 className="text-lg font-semibold text-foreground">
-                  Number provisioning is blocked until a campaign is approved
+                  Submit a campaign before buying a number
                 </h3>
                 <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  The embedded onboarding flow needs at least one approved campaign before a number
-                  can be bought and assigned for compliant traffic. Finish campaign approval first.
+                  You can buy and link a sender once a campaign is submitted to Signalmash.
+                  SMS/MMS traffic stays blocked until that campaign is approved.
                 </p>
               </div>
               <div className="flex gap-3">
@@ -386,14 +396,14 @@ export function PhoneNumbersPage() {
               </div>
               <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">No phone numbers found</h3>
               <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                {hasApprovedCampaigns
-                  ? 'Purchase a number to start routing approved campaign traffic through Signalmash.'
-                  : 'Once a campaign is approved, you can purchase or assign a number here.'}
+                {hasPurchasableCampaigns
+                  ? 'Purchase a number now and it will be ready for traffic after campaign approval.'
+                  : 'Once a campaign is submitted, you can purchase or assign a number here.'}
               </p>
               <Button
                 className="mt-6"
                 onClick={() => {
-                  if (hasApprovedCampaigns) {
+                  if (hasPurchasableCampaigns) {
                     setShowSearchDialog(true);
                     return;
                   }
@@ -566,7 +576,7 @@ export function PhoneNumbersPage() {
           <DialogHeader>
             <DialogTitle>Edit Phone Number</DialogTitle>
             <DialogDescription>
-              Update the friendly name, assign this number to an approved campaign, or make it the embedded app's default outbound sender from the list view.
+              Update the friendly name, assign this number to a submitted campaign, or make it the embedded app's default outbound sender from the list view.
             </DialogDescription>
           </DialogHeader>
 
@@ -580,7 +590,7 @@ export function PhoneNumbersPage() {
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Approved Campaign</label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Submitted Campaign</label>
               <select
                 value={editForm.campaignId}
                 onChange={(e) => setEditForm({ ...editForm, campaignId: e.target.value })}
@@ -589,7 +599,7 @@ export function PhoneNumbersPage() {
                 <option value="">Unassigned</option>
                 {campaignOptions.map((campaign) => (
                   <option key={campaign.id} value={campaign.id}>
-                    {campaign.name}
+                    {campaign.name} - {campaignStatusLabel(campaign.status)}
                   </option>
                 ))}
               </select>

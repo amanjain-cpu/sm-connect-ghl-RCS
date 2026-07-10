@@ -257,6 +257,7 @@ export class PhoneNumberService {
     options: {
       campaignId?: string;
       friendlyName?: string;
+      makeDefaultSender?: boolean;
     } = {}
   ) {
     logger.info({ organizationId, phoneNumber }, 'Purchasing phone number');
@@ -274,7 +275,7 @@ export class PhoneNumberService {
 
     if (!options.campaignId) {
       throw new AppError(
-        'An approved campaign is required before purchasing a phone number',
+        'A submitted provider-linked campaign is required before purchasing a phone number',
         'CAMPAIGN_REQUIRED_FOR_NUMBER_PURCHASE',
         400
       );
@@ -353,6 +354,7 @@ export class PhoneNumberService {
       logger.info({ numberId: number.id, phoneNumber: normalizedPhoneNumber }, 'Phone number purchased');
 
       await integrationService.syncPhoneNumberMapping(number);
+      await this.ensureDefaultSenderProfiles(number, options.makeDefaultSender ?? true);
       await this.syncCampaignNumberLinkState(organizationId, campaign.id, 'linked');
 
       return number;

@@ -61,11 +61,13 @@ const numberLinkIntentSchema = z.discriminatedUnion('mode', [
     phoneNumberId: z.string().uuid('Invalid phone number ID'),
     friendlyName: z.string().max(100).optional(),
     confirmReassignment: z.boolean().optional(),
+    makeDefaultSender: z.boolean().optional(),
   }),
   z.object({
     mode: z.literal('buy_new'),
     phoneNumber: z.string().min(10).max(20),
     friendlyName: z.string().max(100).optional(),
+    makeDefaultSender: z.boolean().optional(),
   }),
 ]);
 const submitCampaignSchema = z.object({
