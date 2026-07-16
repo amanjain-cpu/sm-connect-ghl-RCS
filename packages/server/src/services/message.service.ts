@@ -12,7 +12,6 @@ import type { Message, MessageStatus, MessageDirection, MessageType } from '@pri
 import { integrationService } from './integration.service.js';
 import { complianceService } from './compliance.service.js';
 import { billingService } from './billing.service.js';
-import { subscriptionBillingService } from './subscription-billing.service.js';
 
 interface SendMessageInput {
   organizationId: string;
@@ -134,11 +133,6 @@ export class MessageService {
       phoneNumberId,
       campaignId,
     });
-
-    await subscriptionBillingService.assertCanSendMessage(
-      organizationId,
-      mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms'
-    );
 
     // Create message record (queued status)
     const message = await prisma.message.create({
@@ -312,11 +306,6 @@ export class MessageService {
           from: senderContext.formattedFrom,
         },
       });
-
-      await subscriptionBillingService.assertCanSendMessage(
-        message.organizationId,
-        message.type === 'mms' ? 'mms' : 'sms'
-      );
 
       const result = await signalmashService.sendMessage({
         from: senderContext.formattedFrom,
