@@ -1174,7 +1174,11 @@ export function CampaignDetailPage() {
                     <label className="text-sm font-medium">State</label>
                     <Input
                       value={numberSearch.state}
-                      onChange={(e) => setNumberSearch((current) => ({ ...current, state: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2) }))}
+                      onChange={(e) => setNumberSearch((current) => ({
+                        ...current,
+                        state: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2),
+                        areaCode: '',
+                      }))}
                       placeholder="CA"
                     />
                   </div>
@@ -1182,7 +1186,11 @@ export function CampaignDetailPage() {
                     <label className="text-sm font-medium">Area Code</label>
                     <Input
                       value={numberSearch.areaCode}
-                      onChange={(e) => setNumberSearch((current) => ({ ...current, areaCode: e.target.value.replace(/\D/g, '').slice(0, 3) }))}
+                      onChange={(e) => setNumberSearch((current) => ({
+                        ...current,
+                        state: '',
+                        areaCode: e.target.value.replace(/\D/g, '').slice(0, 3),
+                      }))}
                       placeholder="415"
                     />
                   </div>

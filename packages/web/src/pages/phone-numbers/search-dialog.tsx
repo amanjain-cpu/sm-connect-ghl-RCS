@@ -267,7 +267,13 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                 <div className="grid gap-4">
                   <div className="space-y-2">
                     <Label>State</Label>
-                    <Select value={state} onValueChange={setState}>
+                    <Select
+                      value={state}
+                      onValueChange={(value) => {
+                        setState(value);
+                        setAreaCode('');
+                      }}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Select a state for provider-backed search" />
                       </SelectTrigger>
@@ -289,7 +295,10 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                     <Input
                       placeholder="e.g., 415, 212, 310"
                       value={areaCode}
-                      onChange={(e) => setAreaCode(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                      onChange={(e) => {
+                        setAreaCode(e.target.value.replace(/\D/g, '').slice(0, 3));
+                        setState('');
+                      }}
                       leftIcon={<MapPin className="h-4 w-4" />}
                     />
                     <p className="text-xs text-muted-foreground">
@@ -325,7 +334,10 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                               variant={areaCode === code ? 'default' : 'outline'}
                               size="sm"
                               className="h-7 text-xs"
-                              onClick={() => setAreaCode(code)}
+                              onClick={() => {
+                                setAreaCode(code);
+                                setState('');
+                              }}
                             >
                               {code}
                             </Button>

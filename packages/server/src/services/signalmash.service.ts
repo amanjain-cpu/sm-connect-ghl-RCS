@@ -316,6 +316,24 @@ interface LegacySetConnectionResult {
   };
 }
 
+interface RawNumberInventoryResponse {
+  status?: number | string;
+  statusCode?: number | string;
+  code?: number | string;
+  message?: string;
+  error?: unknown;
+  data?: unknown;
+  result?: unknown;
+  results?: unknown;
+  numbers?: unknown;
+  phone_numbers?: unknown;
+  phoneNumbers?: unknown;
+  dids?: unknown;
+  DIDs?: unknown;
+  availableNumbers?: unknown;
+  available_numbers?: unknown;
+}
+
 export interface SignalmashConnectionDiagnostic {
   testedAt: string;
   method: 'GET';
@@ -478,6 +496,152 @@ export class SignalmashService {
     }
 
     return undefined;
+  }
+
+  private extractInventoryPhoneNumber(record: Record<string, unknown>): string | undefined {
+    return this.pickString(
+      record.phone_number,
+      record.phoneNumber,
+      record.phone,
+      record.number,
+      record.did,
+      record.DID
+    );
+  }
+
+  private collectNumberInventoryRecords(value: unknown): Record<string, unknown>[] {
+    const records = this.asRecordArray(value);
+    const inventoryRecords: Record<string, unknown>[] = [];
+
+    for (const record of records) {
+      if (this.extractInventoryPhoneNumber(record)) {
+        inventoryRecords.push(record);
+        continue;
+      }
+
+      for (const nested of [
+        record.data,
+        record.result,
+        record.results,
+        record.numbers,
+        record.phone_numbers,
+        record.phoneNumbers,
+        record.dids,
+        record.DIDs,
+        record.availableNumbers,
+        record.available_numbers,
+      ]) {
+        inventoryRecords.push(...this.collectNumberInventoryRecords(nested));
+      }
+    }
+
+    return inventoryRecords;
+  }
+
+  private normalizeInventoryPhoneDigits(phoneNumber: string): string {
+    const digits = phoneNumber.replace(/\D/g, '');
+    return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  }
+
+  private assertNumberInventoryResponseSucceeded(response: RawNumberInventoryResponse): void {
+    const error = this.asRecord(response.error);
+    const providerStatus = this.pickNumber(response.status, response.statusCode, response.code);
+    const providerMessage = this.pickString(
+      response.message,
+      response.error,
+      error?.message,
+      error?.description
+    );
+
+    if (providerStatus !== undefined && providerStatus >= 400 && !/no result found/i.test(providerMessage ?? '')) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        providerMessage
+          ? `Number inventory search failed: ${providerMessage}`
+          : `Number inventory search failed with provider status ${providerStatus}`
+      );
+    }
+  }
+
+  private mapNumberInventoryResponse(
+    response: RawNumberInventoryResponse,
+    options?: {
+      areaCode?: string;
+      contains?: string;
+    }
+  ): Array<{
+    phoneNumber: string;
+    formattedNumber: string;
+    capabilities: { sms: boolean; mms: boolean; voice: boolean };
+    monthlyPrice: number;
+  }> {
+    this.assertNumberInventoryResponseSucceeded(response);
+
+    const records = this.collectNumberInventoryRecords(response);
+    const areaCode = options?.areaCode?.replace(/\D/g, '');
+    const contains = options?.contains?.replace(/\D/g, '');
+    const hasNonEmptyPayload = [
+      response.data,
+      response.result,
+      response.results,
+      response.numbers,
+      response.phone_numbers,
+      response.phoneNumbers,
+      response.dids,
+      response.DIDs,
+      response.availableNumbers,
+      response.available_numbers,
+    ].some((value) => {
+      if (Array.isArray(value)) {
+        return value.length > 0;
+      }
+
+      return !!this.asRecord(value);
+    });
+
+    if (records.length === 0 && hasNonEmptyPayload) {
+      logger.warn(
+        {
+          status: response.status,
+          message: response.message,
+          responseKeys: Object.keys(response),
+        },
+        'Signalmash number inventory response did not contain parseable DID records'
+      );
+    }
+
+    return records.flatMap((record) => {
+      const rawPhoneNumber = this.extractInventoryPhoneNumber(record);
+      if (!rawPhoneNumber) {
+        return [];
+      }
+
+      const nationalDigits = this.normalizeInventoryPhoneDigits(rawPhoneNumber);
+      if (areaCode && !nationalDigits.startsWith(areaCode)) {
+        return [];
+      }
+
+      if (contains && !nationalDigits.includes(contains)) {
+        return [];
+      }
+
+      const phoneNumber = nationalDigits.length === 10 ? nationalDigits : rawPhoneNumber;
+
+      return [{
+        phoneNumber,
+        formattedNumber: this.formatPhoneNumber(phoneNumber),
+        capabilities: { sms: true, mms: true, voice: false },
+        monthlyPrice: this.pickNumber(
+          record.rates,
+          record.rate,
+          record.monthlyPrice,
+          record.monthly_price,
+          record.monthlyRate,
+          record.monthly_rate,
+          record.price
+        ) ?? 0,
+      }];
+    });
   }
 
   private normalizeProviderCode(value: unknown): string | undefined {
@@ -1511,37 +1675,12 @@ export class SignalmashService {
         Qty: String(options?.limit ?? 20),
       });
 
-      const response = await this.request<{
-        status: number;
-        message: string;
-        data?: Array<{
-          phone_number: string;
-          rate_center?: string;
-          state?: string;
-          supplier_tier?: number;
-          provider?: string;
-          rates?: number;
-        }>;
-      }>('GET', `/searchbystate?${params.toString()}`);
+      const response = await this.request<RawNumberInventoryResponse>(
+        'GET',
+        `/searchbystate?${params.toString()}`
+      );
 
-      return (response.data ?? [])
-        .filter((number) => {
-          if (options?.areaCode && !number.phone_number.startsWith(options.areaCode)) {
-            return false;
-          }
-
-          if (options?.contains && !number.phone_number.includes(options.contains)) {
-            return false;
-          }
-
-          return true;
-        })
-        .map((number) => ({
-        phoneNumber: number.phone_number,
-        formattedNumber: this.formatPhoneNumber(number.phone_number),
-        capabilities: { sms: true, mms: true, voice: false },
-        monthlyPrice: number.rates ?? 0,
-        }));
+      return this.mapNumberInventoryResponse(response, options);
     }
 
     if (options?.areaCode) {
@@ -1550,37 +1689,12 @@ export class SignalmashService {
         Qty: String(options.limit ?? 20),
       });
 
-      const response = await this.request<{
-        status: number;
-        message: string;
-        data?: Array<{
-          phone_number: string;
-          rate_center?: string;
-          state?: string;
-          supplier_tier?: number;
-          provider?: string;
-          rates?: number;
-        }>;
-      }>('GET', `/searchbynpa?${params.toString()}`);
+      const response = await this.request<RawNumberInventoryResponse>(
+        'GET',
+        `/searchbynpa?${params.toString()}`
+      );
 
-      return (response.data ?? [])
-        .filter((number) => {
-          if (!number.phone_number.startsWith(options.areaCode!)) {
-            return false;
-          }
-
-          if (options?.contains && !number.phone_number.includes(options.contains)) {
-            return false;
-          }
-
-          return true;
-        })
-        .map((number) => ({
-          phoneNumber: number.phone_number,
-          formattedNumber: this.formatPhoneNumber(number.phone_number),
-          capabilities: { sms: true, mms: true, voice: false },
-          monthlyPrice: number.rates ?? 0,
-        }));
+      return this.mapNumberInventoryResponse(response, options);
     }
 
     throw new ExternalServiceError(
