@@ -37,6 +37,7 @@ import {
   CAMPAIGN_USE_CASE_VALUES,
 } from '@signalmash-connect/shared';
 import { api } from '@/lib/api';
+import { reserveCheckoutWindow } from '@/lib/external-checkout';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
 
@@ -390,17 +391,24 @@ export function CampaignDetailPage() {
     };
   };
 
-  const handleNumberLinkResponse = async (responseData: any, successMessage: string) => {
+  const handleNumberLinkResponse = async (
+    responseData: any,
+    successMessage: string,
+    checkoutWindow?: ReturnType<typeof reserveCheckoutWindow>
+  ) => {
     if (responseData?.numberLinkAction?.mode === 'checkout' && responseData.numberLinkAction.checkoutUrl) {
-      window.location.href = responseData.numberLinkAction.checkoutUrl;
-      return;
+      const targetWindow = checkoutWindow ?? reserveCheckoutWindow();
+      targetWindow.open(responseData.numberLinkAction.checkoutUrl);
+      notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to activate the number.');
+      return true;
     }
 
+    checkoutWindow?.close();
     await Promise.all([loadCampaign(), loadNumberSetupData()]);
 
     if (responseData?.numberLinkAction?.mode === 'linked') {
       notify.success(successMessage, 'The campaign and phone number are now linked and saved as the default sender.');
-      return;
+      return false;
     }
 
     if (responseData?.numberLinkAction?.mode === 'reassigned') {
@@ -410,25 +418,26 @@ export function CampaignDetailPage() {
           ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName}, linked to this campaign, and saved as the default sender.`
           : 'The existing number was reassigned, linked to this campaign, and saved as the default sender.'
       );
-      return;
+      return false;
     }
 
     if (responseData?.numberLinkAction?.mode === 'blocked_until_campaign_approved') {
       notify.success(successMessage, responseData.numberLinkAction.message);
-      return;
+      return false;
     }
 
     if (responseData?.numberLinkAction?.mode === 'pending_provider') {
       notify.success(successMessage, responseData.numberLinkAction.message);
-      return;
+      return false;
     }
 
     if (responseData?.numberLinkAction?.mode === 'failed') {
       notify.error('Number link needs attention', responseData.numberLinkAction.message);
-      return;
+      return false;
     }
 
     notify.success(successMessage, 'The campaign request was saved successfully.');
+    return false;
   };
 
   const handleSubmitForApproval = async () => {
@@ -440,19 +449,30 @@ export function CampaignDetailPage() {
     }
 
     setIsSubmitting(true);
+    const checkoutWindow = numberLinkIntent?.mode === 'buy_new'
+      ? reserveCheckoutWindow()
+      : undefined;
+    let checkoutOpened = false;
     try {
       const response = await api.submitCampaign(campaign.id, numberLinkIntent ? { numberLinkIntent } : undefined);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
-        await handleNumberLinkResponse(
+        checkoutOpened = await handleNumberLinkResponse(
           response.data,
-          'Campaign submitted'
+          'Campaign submitted',
+          checkoutWindow
         );
       }
     } catch (error) {
+      if (!checkoutOpened) {
+        checkoutWindow?.close();
+      }
       console.error('Failed to submit campaign:', error);
       notify.error('Submission failed', 'The campaign could not be submitted for approval.');
     } finally {
+      if (!checkoutOpened) {
+        checkoutWindow?.close();
+      }
       setIsSubmitting(false);
     }
   };
@@ -466,19 +486,30 @@ export function CampaignDetailPage() {
     }
 
     setIsSubmitting(true);
+    const checkoutWindow = numberLinkIntent.mode === 'buy_new'
+      ? reserveCheckoutWindow()
+      : undefined;
+    let checkoutOpened = false;
     try {
       const response = await api.linkCampaignPhoneNumber(campaign.id, numberLinkIntent);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
-        await handleNumberLinkResponse(
+        checkoutOpened = await handleNumberLinkResponse(
           response.data,
-          'Campaign number link updated'
+          'Campaign number link updated',
+          checkoutWindow
         );
       }
     } catch (error) {
+      if (!checkoutOpened) {
+        checkoutWindow?.close();
+      }
       console.error('Failed to link campaign phone number:', error);
       notify.error('Number link failed', error instanceof Error ? error.message : 'The campaign phone number could not be linked.');
     } finally {
+      if (!checkoutOpened) {
+        checkoutWindow?.close();
+      }
       setIsSubmitting(false);
     }
   };

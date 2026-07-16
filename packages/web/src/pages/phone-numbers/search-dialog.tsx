@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/select';
 import { api } from '@/lib/api';
 import { ApiError } from '@/lib/api';
+import { reserveCheckoutWindow } from '@/lib/external-checkout';
 import { cn } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
 
@@ -170,6 +171,8 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
 
     setIsPurchasing(true);
     setError('');
+    const checkoutWindow = reserveCheckoutWindow();
+    let checkoutOpened = false;
 
     try {
       const response = await api.createPhoneNumberCheckout({
@@ -179,9 +182,13 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
       });
 
       if (response.success && response.data?.mode === 'checkout' && response.data.checkoutUrl) {
-        window.location.href = response.data.checkoutUrl;
+        checkoutOpened = true;
+        checkoutWindow.open(response.data.checkoutUrl);
+        notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to activate the number.');
         return;
       }
+
+      checkoutWindow.close();
 
       if (response.success && response.data?.mode === 'included') {
         const purchaseResponse = await api.purchasePhoneNumber({
@@ -209,16 +216,23 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
         error.code === 'PROVIDER_CONNECTION_BLOCKED' ||
         error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE'
       )) {
+        if (!checkoutOpened) {
+          checkoutWindow.close();
+        }
         setProviderBlocked(error.message);
         setError('');
         notify.error('Number provisioning unavailable', error.message);
         return;
       }
 
+      checkoutWindow.close();
       const message = error instanceof Error ? error.message : 'Failed to purchase number';
       notify.error('Purchase failed', message);
       setError(message);
     } finally {
+      if (!checkoutOpened) {
+        checkoutWindow.close();
+      }
       setIsPurchasing(false);
     }
   };

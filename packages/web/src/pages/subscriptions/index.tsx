@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { api } from '@/lib/api';
+import { reserveCheckoutWindow } from '@/lib/external-checkout';
 import { notify } from '@/stores/notification.store';
 
 interface BillingPlan {
@@ -172,6 +173,8 @@ export function SubscriptionsPage() {
 
   const handlePlanSelection = async (plan: BillingPlan['id']) => {
     setActivePlanAction(plan);
+    const checkoutWindow = reserveCheckoutWindow();
+    let checkoutOpened = false;
 
     try {
       const response = await api.createSubscriptionCheckout(plan);
@@ -180,10 +183,13 @@ export function SubscriptionsPage() {
       }
 
       if (response.data.mode === 'checkout' && response.data.checkoutUrl) {
-        window.location.href = response.data.checkoutUrl;
+        checkoutOpened = true;
+        checkoutWindow.open(response.data.checkoutUrl);
+        notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to activate the plan.');
         return;
       }
 
+      checkoutWindow.close();
       if (response.data.summary) {
         setSummary(response.data.summary);
       }
@@ -199,12 +205,17 @@ export function SubscriptionsPage() {
         error instanceof Error ? error.message : 'Unable to update the billing plan.'
       );
     } finally {
+      if (!checkoutOpened) {
+        checkoutWindow.close();
+      }
       setActivePlanAction(null);
     }
   };
 
   const handleOpenPortal = async () => {
     setIsOpeningPortal(true);
+    const checkoutWindow = reserveCheckoutWindow();
+    let checkoutOpened = false;
 
     try {
       const response = await api.createBillingPortalSession();
@@ -212,19 +223,25 @@ export function SubscriptionsPage() {
         throw new Error('Stripe billing portal URL was not returned.');
       }
 
-      window.location.href = response.data.url;
+      checkoutOpened = true;
+      checkoutWindow.open(response.data.url);
     } catch (error) {
       notify.error(
         'Billing portal unavailable',
         error instanceof Error ? error.message : 'Unable to open the Stripe billing portal.'
       );
     } finally {
+      if (!checkoutOpened) {
+        checkoutWindow.close();
+      }
       setIsOpeningPortal(false);
     }
   };
 
   const handleTopUp = async (amountDollars: number) => {
     setActiveTopUpAmount(amountDollars);
+    const checkoutWindow = reserveCheckoutWindow();
+    let checkoutOpened = false;
 
     try {
       const response = await api.createMessageCreditTopupCheckout(amountDollars);
@@ -232,13 +249,18 @@ export function SubscriptionsPage() {
         throw new Error('Stripe top-up checkout URL was not returned.');
       }
 
-      window.location.href = response.data.checkoutUrl;
+      checkoutOpened = true;
+      checkoutWindow.open(response.data.checkoutUrl);
+      notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to add credits.');
     } catch (error) {
       notify.error(
         'Top-up unavailable',
         error instanceof Error ? error.message : 'Unable to start the message credit checkout.'
       );
     } finally {
+      if (!checkoutOpened) {
+        checkoutWindow.close();
+      }
       setActiveTopUpAmount(null);
     }
   };
