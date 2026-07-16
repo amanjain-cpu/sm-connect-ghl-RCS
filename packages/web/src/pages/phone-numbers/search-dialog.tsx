@@ -85,10 +85,10 @@ const campaignStatusLabel = (status: string) =>
 const isPurchasableCampaign = (campaign: Campaign) =>
   ['pending_approval', 'approved'].includes(campaign.status);
 
-const formatProviderRate = (monthlyPrice?: number | null) =>
-  monthlyPrice && monthlyPrice > 0
+const formatNumberPricing = (monthlyPrice?: number | null) =>
+  typeof monthlyPrice === 'number' && monthlyPrice > 0
     ? `$${monthlyPrice.toFixed(2)}`
-    : 'Provider rate unavailable';
+    : 'Plan pricing applies';
 
 export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumbersDialogProps) {
   const [step, setStep] = useState<'search' | 'select' | 'purchase'>('search');
@@ -432,9 +432,9 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                               </div>
                             </div>
                             <div className="text-right">
-                              <p className="text-sm text-muted-foreground">Provider rate</p>
+                              <p className="text-sm text-muted-foreground">Pricing</p>
                               <p className="font-semibold text-lg">
-                                {formatProviderRate(number.monthlyPrice)}
+                                {formatNumberPricing(number.monthlyPrice)}
                               </p>
                             </div>
                           </div>
@@ -474,9 +474,9 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                         </p>
                       </div>
                       <div className="text-right">
-                        <p className="text-sm text-muted-foreground">Provider rate</p>
+                        <p className="text-sm text-muted-foreground">Pricing</p>
                         <p className="font-bold text-2xl text-primary">
-                          {formatProviderRate(selectedNumber.monthlyPrice)}
+                          {formatNumberPricing(selectedNumber.monthlyPrice)}
                         </p>
                       </div>
                     </div>

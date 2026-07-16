@@ -62,7 +62,7 @@ interface AvailableNumber {
     mms: boolean;
     voice: boolean;
   };
-  monthlyPrice: number;
+  monthlyPrice?: number | null;
 }
 
 interface Campaign {
@@ -1240,7 +1240,9 @@ export function CampaignDetailPage() {
                           </p>
                         </div>
                         <Badge variant={selectedAvailableNumber === number.phoneNumber ? 'success' : 'secondary'}>
-                          {number.monthlyPrice ? `$${number.monthlyPrice.toFixed(2)}/mo` : 'Provider rate'}
+                          {typeof number.monthlyPrice === 'number' && number.monthlyPrice > 0
+                            ? `$${number.monthlyPrice.toFixed(2)}/mo`
+                            : 'Plan pricing applies'}
                         </Badge>
                       </button>
                     ))
