@@ -543,6 +543,14 @@ export class SignalmashService {
     return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
   }
 
+  private isEmptyNumberInventoryMessage(message?: string): boolean {
+    if (!message?.trim()) {
+      return false;
+    }
+
+    return /no\s+(?:did'?s?|phone\s+numbers?|numbers?|result|results)\s+found/i.test(message);
+  }
+
   private assertNumberInventoryResponseSucceeded(response: RawNumberInventoryResponse): void {
     const error = this.asRecord(response.error);
     const providerStatus = this.pickNumber(response.status, response.statusCode, response.code);
@@ -553,7 +561,11 @@ export class SignalmashService {
       error?.description
     );
 
-    if (providerStatus !== undefined && providerStatus >= 400 && !/no result found/i.test(providerMessage ?? '')) {
+    if (
+      providerStatus !== undefined &&
+      providerStatus >= 400 &&
+      !this.isEmptyNumberInventoryMessage(providerMessage)
+    ) {
       throw new ExternalServiceError(
         'Signalmash',
         providerMessage
