@@ -151,6 +151,8 @@ interface CampaignRegistrationResult {
 
 interface RawCampaignRegistrationResult {
   campaignId?: string;
+  campaign_id?: string;
+  signalmashCampaignId?: string;
   campaign_key?: string;
   sm_reference_no?: string;
   tcrCampaignId?: string;
@@ -183,6 +185,10 @@ interface RawCampaignStatusResult {
   status?: string | number;
   message?: string;
   campaignId?: string;
+  campaign_id?: string;
+  signalmashCampaignId?: string;
+  campaign_key?: string;
+  sm_reference_no?: string;
   tcrCampaignId?: string;
   tcr_campaign_id?: string;
   rejectionReason?: string;
@@ -479,6 +485,30 @@ export class SignalmashService {
     }
 
     return undefined;
+  }
+
+  private isSmsEnablementCampaignId(value?: string): boolean {
+    return /^C[A-Za-z0-9]{6}$/.test(value ?? '');
+  }
+
+  private pickSmsEnablementCampaignId(...values: unknown[]): string | undefined {
+    for (const value of values) {
+      const candidate = this.pickString(value);
+      if (candidate && this.isSmsEnablementCampaignId(candidate)) {
+        return candidate;
+      }
+    }
+
+    return undefined;
+  }
+
+  private assertSmsEnablementCampaignId(campaignId: string) {
+    if (!this.isSmsEnablementCampaignId(campaignId)) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        'SMS enablement requires the provider campaign ID that is exactly 7 characters and starts with C.'
+      );
+    }
   }
 
   private pickNumber(...values: unknown[]): number | undefined {
@@ -1256,12 +1286,14 @@ export class SignalmashService {
     );
     const detail = this.asRecord(result.data);
     const campaignId = this.pickString(
-      result.campaignId,
-      result.campaign_key,
       result.sm_reference_no,
-      detail?.campaignId,
+      result.campaign_key,
+      detail?.sm_reference_no,
       detail?.campaign_key,
-      detail?.sm_reference_no
+      result.campaignId,
+      result.campaign_id,
+      detail?.campaignId,
+      detail?.campaign_id
     );
 
     if ((typeof result.status === 'number' && result.status >= 400) || !campaignId) {
@@ -1281,11 +1313,17 @@ export class SignalmashService {
 
     return {
       campaignId,
-      tcrCampaignId: this.pickString(
+      tcrCampaignId: this.pickSmsEnablementCampaignId(
         result.tcrCampaignId,
         result.tcr_campaign_id,
         detail?.tcrCampaignId,
-        detail?.tcr_campaign_id
+        detail?.tcr_campaign_id,
+        result.signalmashCampaignId,
+        result.campaign_id,
+        result.campaignId,
+        detail?.signalmashCampaignId,
+        detail?.campaign_id,
+        detail?.campaignId
       ),
       status: lifecycleStatus,
       providerCode,
@@ -1317,13 +1355,15 @@ export class SignalmashService {
     );
     const detail = this.asRecord(result.data);
     const campaignId = this.pickString(
-      result.campaignId,
-      result.campaign_key,
       result.sm_reference_no,
-      detail?.campaignId,
-      detail?.campaign_key,
+      result.campaign_key,
       detail?.sm_reference_no,
-      input.campaignId
+      detail?.campaign_key,
+      input.campaignId,
+      result.campaignId,
+      result.campaign_id,
+      detail?.campaignId,
+      detail?.campaign_id
     );
 
     if ((typeof result.status === 'number' && result.status >= 400) || !campaignId) {
@@ -1343,11 +1383,17 @@ export class SignalmashService {
 
     return {
       campaignId,
-      tcrCampaignId: this.pickString(
+      tcrCampaignId: this.pickSmsEnablementCampaignId(
         result.tcrCampaignId,
         result.tcr_campaign_id,
         detail?.tcrCampaignId,
-        detail?.tcr_campaign_id
+        detail?.tcr_campaign_id,
+        result.signalmashCampaignId,
+        result.campaign_id,
+        result.campaignId,
+        detail?.signalmashCampaignId,
+        detail?.campaign_id,
+        detail?.campaignId
       ),
       status: lifecycleStatus,
       providerCode,
@@ -1388,6 +1434,10 @@ export class SignalmashService {
     return {
       status: this.resolveCampaignLifecycleStatus(data, result, 'UNKNOWN'),
       signalmashCampaignId: this.pickString(
+        data?.sm_reference_no,
+        data?.campaign_key,
+        result.sm_reference_no,
+        result.campaign_key,
         data?.campaignId,
         data?.campaign_id,
         result.campaignId,
@@ -1399,11 +1449,17 @@ export class SignalmashService {
         data?.campaign_name,
         data?.name,
       ),
-      tcrCampaignId: this.pickString(
+      tcrCampaignId: this.pickSmsEnablementCampaignId(
         data?.tcrCampaignId,
         data?.tcr_campaign_id,
         result.tcrCampaignId,
-        result.tcr_campaign_id
+        result.tcr_campaign_id,
+        data?.signalmashCampaignId,
+        data?.campaign_id,
+        data?.campaignId,
+        result.signalmashCampaignId,
+        result.campaign_id,
+        result.campaignId
       ),
       rejectionReason: this.pickString(
         data?.rejectionReason,
@@ -1550,10 +1606,10 @@ export class SignalmashService {
 
     for (const campaign of this.asRecordArray(result.data)) {
       const campaignId = this.pickString(
-        campaign.campaignId,
-        campaign.campaign_id,
+        campaign.sm_reference_no,
         campaign.campaign_key,
-        campaign.sm_reference_no
+        campaign.campaignId,
+        campaign.campaign_id
       );
       if (!campaignId) {
         continue;
@@ -1726,6 +1782,8 @@ export class SignalmashService {
     phoneNumber: string;
     status: string;
   }> {
+    this.assertSmsEnablementCampaignId(campaignId);
+
     const did = this.formatSmsEndpointPhone(phoneNumber);
     const purchaseResult = await this.requestForm<LegacyNumberPurchaseResult>(
       'POST',
