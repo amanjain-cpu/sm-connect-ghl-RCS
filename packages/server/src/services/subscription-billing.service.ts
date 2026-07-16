@@ -827,15 +827,21 @@ export class SubscriptionBillingService {
   }) {
     const [organization, subscription, activePhoneNumbers] = await Promise.all([
       this.getOrganizationRecord(input.organizationId),
-      this.assertCanProvisionPhoneNumber(input.organizationId),
+      this.getCurrentSubscription(input.organizationId),
       this.countActivePhoneNumbers(input.organizationId),
     ]);
 
-    if (activePhoneNumbers < subscription.phoneNumbersIncluded) {
+    const canUseIncludedPhoneNumber =
+      isActiveSubscriptionStatus(subscription.status) && !subscription.billingBlockedAt;
+    const includedPhoneNumbers = canUseIncludedPhoneNumber
+      ? subscription.phoneNumbersIncluded
+      : 0;
+
+    if (canUseIncludedPhoneNumber && activePhoneNumbers < includedPhoneNumbers) {
       return {
         mode: 'included' as const,
         activePhoneNumbers,
-        includedPhoneNumbers: subscription.phoneNumbersIncluded,
+        includedPhoneNumbers,
       };
     }
 
@@ -871,7 +877,7 @@ export class SubscriptionBillingService {
       checkoutUrl: session.url,
       sessionId: session.id,
       activePhoneNumbers,
-      includedPhoneNumbers: subscription.phoneNumbersIncluded,
+      includedPhoneNumbers,
       immediateChargeAmount: EXTRA_NUMBER_FIRST_CHARGE,
     };
   }
