@@ -47,6 +47,7 @@ interface LinkExistingAssetsInput {
 }
 
 const TOLL_FREE_NPAS = new Set(['800', '833', '844', '855', '866', '877', '888']);
+const SMS_ENABLEMENT_CAMPAIGN_ID_PATTERN = /^C[A-Za-z0-9]{6}$/;
 
 export class PhoneNumberService {
   private getSignalmashWebhookUrl(): string {
@@ -164,6 +165,109 @@ export class PhoneNumberService {
   private isApprovedCampaignProviderStatus(status?: string | null) {
     const normalized = this.normalizeProviderLifecycleStatus(status);
     return normalized ? ['APPROVED', 'ACTIVE'].includes(normalized) : false;
+  }
+
+  private isSmsEnablementCampaignId(campaignId?: string | null) {
+    return SMS_ENABLEMENT_CAMPAIGN_ID_PATTERN.test(campaignId?.trim() ?? '');
+  }
+
+  private assertProviderLinkedCampaignReady(
+    campaign: Pick<Campaign, 'status' | 'signalmashCampaignId'>
+  ) {
+    if (!['pending_approval', 'approved'].includes(campaign.status)) {
+      throw new AppError(
+        'Campaign must be submitted to Signalmash before assigning phone numbers',
+        'CAMPAIGN_NOT_READY',
+        400
+      );
+    }
+
+    if (!campaign.signalmashCampaignId) {
+      throw new AppError(
+        'Campaign is approved locally but is missing its Signalmash campaign ID',
+        'CAMPAIGN_PROVIDER_ID_MISSING',
+        400
+      );
+    }
+  }
+
+  private async resolveSmsEnablementCampaignId(
+    campaign: Pick<Campaign, 'id' | 'signalmashCampaignId' | 'tcrCampaignId'>
+  ) {
+    const savedCampaignId = campaign.tcrCampaignId?.trim();
+    if (this.isSmsEnablementCampaignId(savedCampaignId)) {
+      return savedCampaignId!;
+    }
+
+    let providerSmsCampaignId: string | undefined;
+    let providerLookupError: string | undefined;
+
+    if (campaign.signalmashCampaignId) {
+      try {
+        const providerStatus = await signalmashService.getCampaignStatus(campaign.signalmashCampaignId);
+        providerSmsCampaignId = providerStatus.tcrCampaignId?.trim();
+      } catch (error) {
+        providerLookupError = error instanceof Error ? error.message : 'Unknown provider status lookup failure';
+        logger.warn(
+          {
+            error,
+            campaignId: campaign.id,
+            signalmashCampaignId: campaign.signalmashCampaignId,
+          },
+          'Unable to refresh Signalmash campaign status while resolving SMS enablement campaign ID'
+        );
+      }
+    }
+
+    if (this.isSmsEnablementCampaignId(providerSmsCampaignId)) {
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: {
+          tcrCampaignId: providerSmsCampaignId,
+          lastStatusSyncedAt: new Date(),
+        },
+      });
+
+      return providerSmsCampaignId!;
+    }
+
+    throw new AppError(
+      'Campaign is missing the Signalmash SMS enablement campaign ID. Refresh the campaign status after provider approval before provisioning a phone number.',
+      'CAMPAIGN_PROVIDER_SMS_ID_MISSING',
+      400,
+      true,
+      {
+        campaignId: campaign.id,
+        signalmashCampaignId: campaign.signalmashCampaignId,
+        tcrCampaignId: campaign.tcrCampaignId,
+        ...(providerLookupError ? { providerLookupError } : {}),
+      }
+    );
+  }
+
+  async assertCampaignReadyForNumberProvisioning(
+    organizationId: string,
+    campaignId: string
+  ) {
+    const campaign = await prisma.campaign.findFirst({
+      where: {
+        id: campaignId,
+        organizationId,
+      },
+      select: {
+        id: true,
+        status: true,
+        signalmashCampaignId: true,
+        tcrCampaignId: true,
+      },
+    });
+
+    if (!campaign) {
+      throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
+    }
+
+    this.assertProviderLinkedCampaignReady(campaign);
+    await this.resolveSmsEnablementCampaignId(campaign);
   }
 
   private async syncCampaignNumberLinkState(
@@ -292,21 +396,8 @@ export class PhoneNumberService {
       throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
     }
 
-    if (!['pending_approval', 'approved'].includes(campaign.status)) {
-      throw new AppError(
-        'Campaign must be submitted to Signalmash before assigning phone numbers',
-        'CAMPAIGN_NOT_READY',
-        400
-      );
-    }
-
-    if (!campaign.signalmashCampaignId) {
-      throw new AppError(
-        'Campaign is approved locally but is missing its Signalmash campaign ID',
-        'CAMPAIGN_PROVIDER_ID_MISSING',
-        400
-      );
-    }
+    this.assertProviderLinkedCampaignReady(campaign);
+    const smsEnablementCampaignId = await this.resolveSmsEnablementCampaignId(campaign);
 
     let providerNumberId: string | null = null;
 
@@ -314,7 +405,7 @@ export class PhoneNumberService {
       // Purchase from Signalmash
       const result = await signalmashService.purchaseNumber(
         phoneNumber,
-        campaign.signalmashCampaignId
+        smsEnablementCampaignId
       );
       providerNumberId = result.numberId;
 

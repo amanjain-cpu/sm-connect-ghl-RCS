@@ -1122,7 +1122,12 @@ export class CampaignService {
     tcrCampaignId?: string
   ): Promise<CampaignResultWithNumberLink> {
     const campaign = await prisma.campaign.findFirst({
-      where: { signalmashCampaignId },
+      where: {
+        OR: [
+          { signalmashCampaignId },
+          { tcrCampaignId: signalmashCampaignId },
+        ],
+      },
     });
 
     if (!campaign) {

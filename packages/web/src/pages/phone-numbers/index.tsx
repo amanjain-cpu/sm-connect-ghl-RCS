@@ -24,7 +24,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import { SearchNumbersDialog } from './search-dialog';
 import { notify } from '@/stores/notification.store';
@@ -82,6 +82,22 @@ const campaignStatusLabel = (status: string) =>
 const isPurchasableCampaign = (campaign: CampaignOption) =>
   ['pending_approval', 'approved'].includes(campaign.status);
 
+const getCheckoutProvisioningErrorMessage = (error: unknown) => {
+  if (error instanceof ApiError) {
+    if (error.code === 'CAMPAIGN_PROVIDER_SMS_ID_MISSING') {
+      return 'Payment completed, but this campaign is missing the Signalmash SMS enablement campaign ID. Refresh the campaign status before retrying provisioning.';
+    }
+
+    if (error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
+      return 'Payment completed, but Signalmash could not provision SMS for the selected number. Phone-number inventory is still available below.';
+    }
+
+    return `Checkout completed, but phone-number provisioning failed: ${error.message}`;
+  }
+
+  return 'Checkout completed, but phone-number provisioning failed. Phone-number inventory is still available below.';
+};
+
 export function PhoneNumbersPage() {
   const navigate = useNavigate();
   const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumber[]>([]);
@@ -110,13 +126,21 @@ export function PhoneNumbersPage() {
         const sessionId = params.get('session_id');
 
         if (checkoutStatus === 'success' && sessionId) {
-          const response = await api.completePhoneNumberCheckout({ sessionId });
-          if (response.success && response.data && 'pending' in response.data && response.data.pending) {
-            notify.success('Checkout completed', response.data.message);
-          } else {
-            notify.success('Number purchased', 'The selected phone number was linked and saved as the default sender.');
+          try {
+            const response = await api.completePhoneNumberCheckout({ sessionId });
+            if (response.success && response.data && 'pending' in response.data && response.data.pending) {
+              notify.success('Checkout completed', response.data.message);
+            } else {
+              notify.success('Number purchased', 'The selected phone number was linked and saved as the default sender.');
+            }
+          } catch (checkoutError) {
+            console.error('Phone number checkout provisioning failed:', checkoutError);
+            const message = getCheckoutProvisioningErrorMessage(checkoutError);
+            setError(message);
+            notify.error('Provisioning incomplete', message);
+          } finally {
+            window.history.replaceState({}, '', '/phone-numbers');
           }
-          window.history.replaceState({}, '', '/phone-numbers');
         } else if (checkoutStatus === 'cancelled') {
           notify.error('Checkout cancelled', 'The phone number purchase was not completed.');
           window.history.replaceState({}, '', '/phone-numbers');

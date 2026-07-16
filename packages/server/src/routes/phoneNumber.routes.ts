@@ -192,25 +192,10 @@ router.post(
     );
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
 
-    const campaign = await prisma.campaign.findFirst({
-      where: {
-        id: campaignId,
-        organizationId: req.user!.organizationId,
-      },
-      select: {
-        id: true,
-        status: true,
-        signalmashCampaignId: true,
-      },
-    });
-
-    if (!campaign) {
-      throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
-    }
-
-    if (!['pending_approval', 'approved'].includes(campaign.status) || !campaign.signalmashCampaignId) {
-      throw new AppError('Select a submitted provider-linked campaign before checkout', 'CAMPAIGN_NOT_READY', 400);
-    }
+    await phoneNumberService.assertCampaignReadyForNumberProvisioning(
+      req.user!.organizationId,
+      campaignId
+    );
 
     const result = await subscriptionBillingService.preparePhoneNumberCheckout({
       organizationId: req.user!.organizationId,

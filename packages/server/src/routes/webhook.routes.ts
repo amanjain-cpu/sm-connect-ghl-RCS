@@ -91,6 +91,17 @@ function pickString(...values: unknown[]) {
   return undefined;
 }
 
+function pickSmsEnablementCampaignId(...values: unknown[]) {
+  for (const value of values) {
+    const candidate = pickString(value);
+    if (candidate && /^C[A-Za-z0-9]{6}$/.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 function pickNumber(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -201,6 +212,12 @@ function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalma
     data?.brandId
   );
   const campaignId = pickString(
+    body.sm_reference_no,
+    body.campaign_key,
+    nestedCampaign?.sm_reference_no,
+    nestedCampaign?.campaign_key,
+    data?.sm_reference_no,
+    data?.campaign_key,
     body.campaign_id,
     body.campaignId,
     nestedCampaign?.campaign_id,
@@ -306,13 +323,22 @@ function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalma
             data?.messages_per_second,
             data?.messagesPerSecond
           ),
-          tcr_campaign_id: pickString(
+          tcr_campaign_id: pickSmsEnablementCampaignId(
             body.tcr_campaign_id,
             body.tcrCampaignId,
             nestedCampaign?.tcr_campaign_id,
             nestedCampaign?.tcrCampaignId,
             data?.tcr_campaign_id,
-            data?.tcrCampaignId
+            data?.tcrCampaignId,
+            body.signalmashCampaignId,
+            nestedCampaign?.signalmashCampaignId,
+            data?.signalmashCampaignId,
+            body.campaign_id,
+            body.campaignId,
+            nestedCampaign?.campaign_id,
+            nestedCampaign?.campaignId,
+            data?.campaign_id,
+            data?.campaignId
           ),
         },
       };
