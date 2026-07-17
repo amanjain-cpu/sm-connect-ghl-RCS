@@ -11,7 +11,7 @@ import { formatPhoneE164 } from '@signalmash-connect/shared';
 import type { Message, MessageStatus, MessageDirection, MessageType } from '@prisma/client';
 import { integrationService } from './integration.service.js';
 import { complianceService } from './compliance.service.js';
-import { billingService } from './billing.service.js';
+import { walletBillingService } from './wallet-billing.service.js';
 
 interface SendMessageInput {
   organizationId: string;
@@ -134,6 +134,12 @@ export class MessageService {
       campaignId,
     });
 
+    const billingEstimate = await walletBillingService.assertCanSendMessage({
+      organizationId,
+      body,
+      mediaUrls,
+    });
+
     // Create message record (queued status)
     const message = await prisma.message.create({
       data: {
@@ -147,6 +153,7 @@ export class MessageService {
         to: formattedTo,
         body,
         mediaUrls,
+        billingEstimate: billingEstimate as any,
         platformMessageId,
         platformConversationId,
         status: 'queued',
@@ -184,14 +191,7 @@ export class MessageService {
         'Message sent successfully'
       );
 
-      await billingService.recordMessageAcceptance({
-        organizationId,
-        messageId: updatedMessage.id,
-        direction: 'outbound',
-        unit: mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms',
-        source: 'signalmash_acceptance',
-        billingKey: `msg:${updatedMessage.id}:outbound`,
-      });
+      await walletBillingService.recordOutboundMessageDebit(updatedMessage);
 
       await integrationService.syncMessageMapping(updatedMessage);
 
@@ -297,6 +297,12 @@ export class MessageService {
         campaignId: message.campaignId ?? undefined,
       });
 
+      const billingEstimate = await walletBillingService.assertCanSendMessage({
+        organizationId: message.organizationId,
+        body: message.body,
+        mediaUrls: Array.isArray(message.mediaUrls) ? message.mediaUrls as string[] : undefined,
+      });
+
       await prisma.message.update({
         where: { id: message.id },
         data: {
@@ -304,6 +310,7 @@ export class MessageService {
           campaignId: senderContext.campaignId,
           phoneNumberId: senderContext.phoneNumberId,
           from: senderContext.formattedFrom,
+          billingEstimate: billingEstimate as any,
         },
       });
 
@@ -324,14 +331,7 @@ export class MessageService {
         },
       });
 
-      await billingService.recordMessageAcceptance({
-        organizationId: updatedMessage.organizationId,
-        messageId: updatedMessage.id,
-        direction: 'outbound',
-        unit: updatedMessage.type === 'mms' ? 'mms' : 'sms',
-        source: 'signalmash_acceptance',
-        billingKey: `msg:${updatedMessage.id}:outbound`,
-      });
+      await walletBillingService.recordOutboundMessageDebit(updatedMessage);
 
       await integrationService.syncMessageMapping(updatedMessage);
 
@@ -415,18 +415,11 @@ export class MessageService {
       'Inbound message received'
     );
 
-    await billingService.recordMessageAcceptance({
-      organizationId: message.organizationId,
-      messageId: message.id,
-      direction: 'inbound',
-      unit: data.mediaUrls && data.mediaUrls.length > 0 ? 'mms' : 'sms',
-      source: 'signalmash_inbound',
-      billingKey: `msg:${message.id}:inbound`,
+    await walletBillingService.recordInboundMessageBilling(message);
+
+    return prisma.message.findUniqueOrThrow({
+      where: { id: message.id },
     });
-
-    await integrationService.syncMessageMapping(message);
-
-    return message;
   }
 
   /**
@@ -527,6 +520,7 @@ export class MessageService {
       where: {
         id,
         organizationId,
+        visible: true,
       },
     });
 
@@ -563,6 +557,7 @@ export class MessageService {
 
     const where: any = {
       organizationId,
+      visible: true,
       ...(platformConnectionId && { platformConnectionId }),
       ...(campaignId && { campaignId }),
       ...(direction && { direction }),
@@ -618,6 +613,7 @@ export class MessageService {
   }> {
     const where: any = {
       organizationId,
+      visible: true,
       ...(options?.campaignId && { campaignId: options.campaignId }),
       ...(options?.startDate || options?.endDate
         ? {

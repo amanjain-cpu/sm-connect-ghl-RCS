@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Megaphone,
   ArrowLeft,
@@ -37,7 +37,6 @@ import {
   CAMPAIGN_USE_CASE_VALUES,
 } from '@signalmash-connect/shared';
 import { api } from '@/lib/api';
-import { reserveCheckoutWindow } from '@/lib/external-checkout';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
 
@@ -124,13 +123,13 @@ interface BrandSummary {
 }
 
 interface SubscriptionSummary {
-  subscription: {
-    plan: string | null;
-    phoneNumbersIncluded: number;
+  account: {
+    pricingTierLabel: string;
+    walletBalance: number;
   };
   usage: {
     activePhoneNumbers: number;
-    phoneNumbersIncluded: number;
+    heldInboundCount: number;
   };
 }
 
@@ -161,7 +160,6 @@ function formatUseCaseLabel(value: string): string {
 export function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [brand, setBrand] = useState<BrandSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -251,7 +249,7 @@ export function CampaignDetailPage() {
     try {
       const [numbersResponse, billingResponse] = await Promise.all([
         api.getPhoneNumbers({ status: 'active', limit: 100 }),
-        api.getSubscriptionBillingSummary(),
+        api.getWalletBillingSummary(),
       ]);
 
       if (numbersResponse.success && numbersResponse.data) {
@@ -273,42 +271,6 @@ export function CampaignDetailPage() {
   useEffect(() => {
     loadNumberSetupData();
   }, [id]);
-
-  useEffect(() => {
-    const handlePhoneCheckoutReturn = async () => {
-      if (!id) return;
-
-      const checkoutStatus = searchParams.get('number_checkout');
-      const sessionId = searchParams.get('session_id');
-
-      if (checkoutStatus === 'success' && sessionId) {
-        try {
-          const response = await api.completePhoneNumberCheckout({ sessionId });
-          if (response.success && response.data && 'pending' in response.data && response.data.pending) {
-            notify.success('Checkout completed', response.data.message);
-          } else {
-            notify.success(
-              'Number linked',
-              campaign?.status === 'pending_approval'
-                ? 'The phone number purchase completed and was saved as the default sender. SMS/MMS starts after campaign approval.'
-                : 'The phone number purchase completed and was saved as the default sender.'
-            );
-          }
-          await Promise.all([loadCampaign(), loadNumberSetupData()]);
-        } catch (error) {
-          console.error('Failed to complete campaign number checkout:', error);
-          notify.error('Number checkout failed', 'The Stripe checkout completed, but the phone number could not be linked automatically.');
-        } finally {
-          window.history.replaceState({}, '', `/campaigns/${id}`);
-        }
-      } else if (checkoutStatus === 'cancelled') {
-        notify.error('Checkout cancelled', 'The campaign number purchase was not completed.');
-        window.history.replaceState({}, '', `/campaigns/${id}`);
-      }
-    };
-
-    handlePhoneCheckoutReturn();
-  }, [id, searchParams]);
 
   const openSubmitDialog = async () => {
     setNumberFlowMode('none');
@@ -391,24 +353,12 @@ export function CampaignDetailPage() {
     };
   };
 
-  const handleNumberLinkResponse = async (
-    responseData: any,
-    successMessage: string,
-    checkoutWindow?: ReturnType<typeof reserveCheckoutWindow>
-  ) => {
-    if (responseData?.numberLinkAction?.mode === 'checkout' && responseData.numberLinkAction.checkoutUrl) {
-      const targetWindow = checkoutWindow ?? reserveCheckoutWindow();
-      targetWindow.open(responseData.numberLinkAction.checkoutUrl);
-      notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to activate the number.');
-      return true;
-    }
-
-    checkoutWindow?.close();
+  const handleNumberLinkResponse = async (responseData: any, successMessage: string) => {
     await Promise.all([loadCampaign(), loadNumberSetupData()]);
 
     if (responseData?.numberLinkAction?.mode === 'linked') {
       notify.success(successMessage, 'The campaign and phone number are now linked and saved as the default sender.');
-      return false;
+      return;
     }
 
     if (responseData?.numberLinkAction?.mode === 'reassigned') {
@@ -418,26 +368,25 @@ export function CampaignDetailPage() {
           ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName}, linked to this campaign, and saved as the default sender.`
           : 'The existing number was reassigned, linked to this campaign, and saved as the default sender.'
       );
-      return false;
+      return;
     }
 
     if (responseData?.numberLinkAction?.mode === 'blocked_until_campaign_approved') {
       notify.success(successMessage, responseData.numberLinkAction.message);
-      return false;
+      return;
     }
 
     if (responseData?.numberLinkAction?.mode === 'pending_provider') {
       notify.success(successMessage, responseData.numberLinkAction.message);
-      return false;
+      return;
     }
 
     if (responseData?.numberLinkAction?.mode === 'failed') {
       notify.error('Number link needs attention', responseData.numberLinkAction.message);
-      return false;
+      return;
     }
 
     notify.success(successMessage, 'The campaign request was saved successfully.');
-    return false;
   };
 
   const handleSubmitForApproval = async () => {
@@ -449,30 +398,19 @@ export function CampaignDetailPage() {
     }
 
     setIsSubmitting(true);
-    const checkoutWindow = numberLinkIntent?.mode === 'buy_new'
-      ? reserveCheckoutWindow()
-      : undefined;
-    let checkoutOpened = false;
     try {
       const response = await api.submitCampaign(campaign.id, numberLinkIntent ? { numberLinkIntent } : undefined);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
-        checkoutOpened = await handleNumberLinkResponse(
+        await handleNumberLinkResponse(
           response.data,
-          'Campaign submitted',
-          checkoutWindow
+          'Campaign submitted'
         );
       }
     } catch (error) {
-      if (!checkoutOpened) {
-        checkoutWindow?.close();
-      }
       console.error('Failed to submit campaign:', error);
       notify.error('Submission failed', 'The campaign could not be submitted for approval.');
     } finally {
-      if (!checkoutOpened) {
-        checkoutWindow?.close();
-      }
       setIsSubmitting(false);
     }
   };
@@ -486,30 +424,19 @@ export function CampaignDetailPage() {
     }
 
     setIsSubmitting(true);
-    const checkoutWindow = numberLinkIntent.mode === 'buy_new'
-      ? reserveCheckoutWindow()
-      : undefined;
-    let checkoutOpened = false;
     try {
       const response = await api.linkCampaignPhoneNumber(campaign.id, numberLinkIntent);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
-        checkoutOpened = await handleNumberLinkResponse(
+        await handleNumberLinkResponse(
           response.data,
-          'Campaign number link updated',
-          checkoutWindow
+          'Campaign number link updated'
         );
       }
     } catch (error) {
-      if (!checkoutOpened) {
-        checkoutWindow?.close();
-      }
       console.error('Failed to link campaign phone number:', error);
       notify.error('Number link failed', error instanceof Error ? error.message : 'The campaign phone number could not be linked.');
     } finally {
-      if (!checkoutOpened) {
-        checkoutWindow?.close();
-      }
       setIsSubmitting(false);
     }
   };
@@ -963,7 +890,7 @@ export function CampaignDetailPage() {
                             ? 'A sender number is linked to this campaign.'
                             : 'A sender number is linked, but SMS/MMS stays blocked until this campaign is approved.'
                           : campaign.numberLinkStatus === 'checkout_required'
-                            ? 'This campaign is waiting on the extra-number Stripe checkout before the new number can be provisioned.'
+                            ? 'This campaign is waiting on wallet billing before the new number can be provisioned.'
                             : 'A number selection is saved for this campaign and will be retried automatically when provider conditions are met.'}
                     </p>
                   </div>
@@ -1132,10 +1059,10 @@ export function CampaignDetailPage() {
             {subscriptionSummary && (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
                 <p className="font-medium text-slate-950 dark:text-slate-50">
-                  Plan: {subscriptionSummary.subscription.plan || 'No active plan'}
+                  Wallet: ${Number(subscriptionSummary.account.walletBalance ?? 0).toFixed(2)}
                 </p>
                 <p className="mt-1">
-                  Active numbers: {subscriptionSummary.usage.activePhoneNumbers} / {subscriptionSummary.usage.phoneNumbersIncluded}
+                  Tier {subscriptionSummary.account.pricingTierLabel} · Active numbers {subscriptionSummary.usage.activePhoneNumbers}
                 </p>
               </div>
             )}
@@ -1273,7 +1200,7 @@ export function CampaignDetailPage() {
                         <Badge variant={selectedAvailableNumber === number.phoneNumber ? 'success' : 'secondary'}>
                           {typeof number.monthlyPrice === 'number' && number.monthlyPrice > 0
                             ? `$${number.monthlyPrice.toFixed(2)}/mo`
-                            : 'Plan pricing applies'}
+                            : 'Wallet pricing applies'}
                         </Badge>
                       </button>
                     ))

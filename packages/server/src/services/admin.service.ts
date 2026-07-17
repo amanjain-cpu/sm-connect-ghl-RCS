@@ -9,7 +9,7 @@ import { generateTokens, verifyAdminRefreshToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { integrationService } from './integration.service.js';
-import { subscriptionBillingService } from './subscription-billing.service.js';
+import { walletBillingService } from './wallet-billing.service.js';
 
 // Settings keys
 export const SETTINGS_KEYS = {
@@ -441,10 +441,12 @@ export class AdminService {
         skip,
         take: limit,
         include: {
-          subscription: {
+          billingAccount: {
             select: {
-              plan: true,
               status: true,
+              pricingTier: true,
+              walletBalance: true,
+              suspensionReason: true,
             },
           },
           _count: {
@@ -581,7 +583,7 @@ export class AdminService {
           orderBy: { createdAt: 'desc' },
           take: 50,
         }),
-        subscriptionBillingService.getSubscriptionSummary(organizationId),
+        walletBillingService.getWalletSummary(organizationId),
       ]);
 
     await this.logAuditAction(adminId, 'VIEW_ORGANIZATION_ONBOARDING', 'organizations', organizationId);

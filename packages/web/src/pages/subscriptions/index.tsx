@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -7,78 +7,69 @@ import {
   Loader2,
   MessageSquareMore,
   Phone,
+  RefreshCw,
+  Wallet,
 } from 'lucide-react';
 import { Header } from '@/components/layout/header';
 import { PageInset, PageSection, PageShell } from '@/components/layout/page-shell';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
 import { reserveCheckoutWindow } from '@/lib/external-checkout';
 import { notify } from '@/stores/notification.store';
 
-interface BillingPlan {
-  id: 'starter' | 'growth' | 'scale';
-  label: string;
-  monthlyPrice: number;
-  smsIncluded: number;
-  mmsIncluded: number;
-  phoneNumbersIncluded: number;
-}
-
-interface BillingSubscriptionSummary {
-  plans: BillingPlan[];
-  subscription: {
+interface WalletBillingSummary {
+  account: {
     id: string;
-    plan: BillingPlan['id'] | null;
-    status: string;
-    currentPeriodStart?: string | null;
-    currentPeriodEnd?: string | null;
-    billingBlockedAt?: string | null;
-    billingBlockedReason?: string | null;
-    messageCreditBalance: number;
-    pendingOverageBalance: number;
-    smsIncluded: number;
-    mmsIncluded: number;
-    phoneNumbersIncluded: number;
+    status: 'active' | 'suspended';
+    suspensionReason?: string | null;
+    suspendedAt?: string | null;
+    pricingTier: string;
+    pricingTierLabel: string;
+    walletBalance: number;
     hasStripeCustomer: boolean;
-  };
-  usage: {
-    smsUsed: number;
-    smsRemaining: number;
-    smsOverage: number;
-    mmsUsed: number;
-    mmsRemaining: number;
-    mmsOverage: number;
-    activePhoneNumbers: number;
-    phoneNumbersIncluded: number;
-    messageCreditBalance: number;
-    extraPhoneNumbers: number;
+    hasSavedPaymentMethod: boolean;
+    mrcNextRunAt?: string | null;
+    setupFeeChargedAt?: string | null;
   };
   rates: {
-    smsOverageRate: number;
-    mmsOverageRate: number;
-    extraPhoneNumberSetupFee: number;
-    extraPhoneNumberMonthlyRate: number;
-    realtimeChargeThreshold: number;
+    sms: number;
+    mms: number;
+    campaignMonthly: number;
+    phoneNumberMonthly: number;
+    basicSetup: number;
+    enhancedVetting: number;
+    campaignExpedite: number;
   };
   topUpOptions: number[];
-  recentCharges: Array<{
+  usage: {
+    cycleMonth: string;
+    smsUnits: number;
+    mmsUnits: number;
+    activePhoneNumbers: number;
+    activeCampaigns: number;
+    heldInboundCount: number;
+    estimatedMonthlyRecurring: number;
+  };
+  recentLedgerEntries: Array<{
     id: string;
-    kind: string;
-    status: string;
+    entryType: 'credit' | 'debit' | 'hold' | 'release';
+    category: string;
     amount: number;
+    balanceAfter: number;
     description: string;
     createdAt: string;
   }>;
 }
 
-function formatCurrency(value: number) {
+function formatCurrency(value: number, precise = false) {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
-    minimumFractionDigits: value < 1 ? 4 : 2,
-    maximumFractionDigits: value < 1 ? 4 : 2,
+    minimumFractionDigits: precise ? 4 : 2,
+    maximumFractionDigits: precise ? 4 : 2,
   }).format(value);
 }
 
@@ -97,30 +88,37 @@ function formatDate(value?: string | null) {
 function statusVariant(status: string): 'default' | 'warning' | 'destructive' | 'info' | 'success' {
   switch (status) {
     case 'active':
-    case 'succeeded':
+    case 'credit':
       return 'success';
-    case 'trialing':
-    case 'pending':
-      return 'info';
-    case 'past_due':
-    case 'unpaid':
-    case 'failed':
+    case 'hold':
+      return 'warning';
+    case 'suspended':
+    case 'debit':
       return 'destructive';
     default:
-      return 'warning';
+      return 'info';
   }
+}
+
+function labelize(value: string) {
+  return value.replace(/_/g, ' ');
 }
 
 export function SubscriptionsPage() {
   const [searchParams] = useSearchParams();
-  const [summary, setSummary] = useState<BillingSubscriptionSummary | null>(null);
+  const [summary, setSummary] = useState<WalletBillingSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [activePlanAction, setActivePlanAction] = useState<string | null>(null);
   const [isOpeningPortal, setIsOpeningPortal] = useState(false);
+  const [isSettingUpCard, setIsSettingUpCard] = useState(false);
   const [activeTopUpAmount, setActiveTopUpAmount] = useState<number | null>(null);
+  const [customTopUpAmount, setCustomTopUpAmount] = useState('250');
+  const [isReleasingHeld, setIsReleasingHeld] = useState(false);
+
+  const customAmount = useMemo(() => Number(customTopUpAmount), [customTopUpAmount]);
+  const customTopUpInvalid = !Number.isFinite(customAmount) || customAmount < 250;
 
   const loadSummary = async () => {
-    const response = await api.getSubscriptionBillingSummary();
+    const response = await api.getWalletBillingSummary();
     if (response.success && response.data) {
       setSummary(response.data);
     }
@@ -129,31 +127,31 @@ export function SubscriptionsPage() {
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const checkoutStatus = searchParams.get('checkout');
-        const creditTopupStatus = searchParams.get('credit_topup');
+        const walletTopupStatus = searchParams.get('wallet_topup');
+        const paymentMethodStatus = searchParams.get('payment_method');
         const sessionId = searchParams.get('session_id');
 
-        if (checkoutStatus === 'success' && sessionId) {
-          const response = await api.completeSubscriptionCheckout({ sessionId });
-          if (response.success && response.data) {
-            setSummary(response.data);
-          }
-          notify.success('Subscription updated', 'Stripe checkout completed and billing has been synced.');
-          window.history.replaceState({}, '', '/subscriptions');
-        } else if (checkoutStatus === 'cancelled') {
-          notify.error('Checkout cancelled', 'The Stripe checkout session was not completed.');
-          window.history.replaceState({}, '', '/subscriptions');
-        }
-
-        if (creditTopupStatus === 'success' && sessionId) {
+        if (walletTopupStatus === 'success' && sessionId) {
           const response = await api.completeMessageCreditTopupCheckout({ sessionId });
           if (response.success && response.data) {
             setSummary(response.data);
           }
-          notify.success('Credits added', 'Message credits were added to this workspace.');
+          notify.success('Wallet funded', 'The wallet balance was updated.');
           window.history.replaceState({}, '', '/subscriptions');
-        } else if (creditTopupStatus === 'cancelled') {
-          notify.error('Top-up cancelled', 'The message credit checkout session was not completed.');
+        } else if (walletTopupStatus === 'cancelled') {
+          notify.error('Top-up cancelled', 'The Stripe checkout session was not completed.');
+          window.history.replaceState({}, '', '/subscriptions');
+        }
+
+        if (paymentMethodStatus === 'success' && sessionId) {
+          const response = await api.completePaymentMethodSetup({ sessionId });
+          if (response.success && response.data) {
+            setSummary(response.data);
+          }
+          notify.success('Payment method saved', 'The saved card is ready for automatic MRC charges.');
+          window.history.replaceState({}, '', '/subscriptions');
+        } else if (paymentMethodStatus === 'cancelled') {
+          notify.error('Setup cancelled', 'No payment method was saved.');
           window.history.replaceState({}, '', '/subscriptions');
         }
 
@@ -161,7 +159,7 @@ export function SubscriptionsPage() {
       } catch (error) {
         notify.error(
           'Billing unavailable',
-          error instanceof Error ? error.message : 'Unable to load subscription details.'
+          error instanceof Error ? error.message : 'Unable to load wallet details.'
         );
       } finally {
         setIsLoading(false);
@@ -170,47 +168,6 @@ export function SubscriptionsPage() {
 
     bootstrap();
   }, [searchParams]);
-
-  const handlePlanSelection = async (plan: BillingPlan['id']) => {
-    setActivePlanAction(plan);
-    const checkoutWindow = reserveCheckoutWindow();
-    let checkoutOpened = false;
-
-    try {
-      const response = await api.createSubscriptionCheckout(plan);
-      if (!response.success || !response.data) {
-        throw new Error('Unable to start Stripe checkout');
-      }
-
-      if (response.data.mode === 'checkout' && response.data.checkoutUrl) {
-        checkoutOpened = true;
-        checkoutWindow.open(response.data.checkoutUrl);
-        notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to activate the plan.');
-        return;
-      }
-
-      checkoutWindow.close();
-      if (response.data.summary) {
-        setSummary(response.data.summary);
-      }
-
-      if (response.data.mode === 'updated') {
-        notify.success('Plan updated', 'The Stripe subscription was updated immediately.');
-      } else if (response.data.mode === 'current') {
-        notify.success('Current plan active', 'This workspace is already on the selected plan.');
-      }
-    } catch (error) {
-      notify.error(
-        'Plan update failed',
-        error instanceof Error ? error.message : 'Unable to update the billing plan.'
-      );
-    } finally {
-      if (!checkoutOpened) {
-        checkoutWindow.close();
-      }
-      setActivePlanAction(null);
-    }
-  };
 
   const handleOpenPortal = async () => {
     setIsOpeningPortal(true);
@@ -238,6 +195,26 @@ export function SubscriptionsPage() {
     }
   };
 
+  const handleSetupCard = async () => {
+    setIsSettingUpCard(true);
+
+    try {
+      const response = await api.createPaymentMethodSetupSession();
+      if (!response.success || !response.data?.checkoutUrl) {
+        throw new Error('Stripe setup URL was not returned.');
+      }
+
+      window.location.href = response.data.checkoutUrl;
+    } catch (error) {
+      notify.error(
+        'Payment method setup unavailable',
+        error instanceof Error ? error.message : 'Unable to start Stripe setup.'
+      );
+    } finally {
+      setIsSettingUpCard(false);
+    }
+  };
+
   const handleTopUp = async (amountDollars: number) => {
     setActiveTopUpAmount(amountDollars);
     const checkoutWindow = reserveCheckoutWindow();
@@ -255,7 +232,7 @@ export function SubscriptionsPage() {
     } catch (error) {
       notify.error(
         'Top-up unavailable',
-        error instanceof Error ? error.message : 'Unable to start the message credit checkout.'
+        error instanceof Error ? error.message : 'Unable to start the wallet top-up.'
       );
     } finally {
       if (!checkoutOpened) {
@@ -265,11 +242,30 @@ export function SubscriptionsPage() {
     }
   };
 
+  const handleReleaseHeld = async () => {
+    setIsReleasingHeld(true);
+
+    try {
+      const response = await api.releaseHeldInboundMessages();
+      if (response.success) {
+        notify.success('Held inbound checked', `${response.data?.released ?? 0} message(s) released.`);
+        await loadSummary();
+      }
+    } catch (error) {
+      notify.error(
+        'Release failed',
+        error instanceof Error ? error.message : 'Unable to release held inbound messages.'
+      );
+    } finally {
+      setIsReleasingHeld(false);
+    }
+  };
+
   return (
     <div>
       <Header
         title="Billing"
-        subtitle="Manage your Stripe subscription, included usage, and prepaid message credits."
+        subtitle="Wallet balance, rates, saved card, and usage ledger."
       />
 
       <PageShell>
@@ -277,7 +273,7 @@ export function SubscriptionsPage() {
           <PageSection className="p-8">
             <div className="flex items-center justify-center gap-3 text-slate-600 dark:text-slate-300">
               <Loader2 className="h-5 w-5 animate-spin" />
-              <span>Loading billing workspace...</span>
+              <span>Loading billing wallet...</span>
             </div>
           </PageSection>
         ) : summary ? (
@@ -285,48 +281,57 @@ export function SubscriptionsPage() {
             <PageSection className="p-6">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Badge variant={statusVariant(summary.subscription.status)} dot>
-                      {summary.subscription.status.replace(/_/g, ' ')}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={statusVariant(summary.account.status)} dot>
+                      {summary.account.status}
                     </Badge>
-                    {summary.subscription.plan ? (
-                      <Badge variant="outline">{summary.subscription.plan}</Badge>
+                    <Badge variant="outline">{summary.account.pricingTierLabel} tier</Badge>
+                    {summary.account.hasSavedPaymentMethod ? (
+                      <Badge variant="success">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        Card saved
+                      </Badge>
                     ) : (
-                      <Badge variant="warning">No active plan</Badge>
+                      <Badge variant="warning">Card required</Badge>
                     )}
                   </div>
                   <div>
-                    <h2 className="text-2xl font-semibold text-slate-950 dark:text-slate-50">
-                      Stripe subscription overview
+                    <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Wallet Balance</p>
+                    <h2 className="mt-1 text-4xl font-semibold text-slate-950 dark:text-slate-50">
+                      {formatCurrency(summary.account.walletBalance)}
                     </h2>
-                    <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                      External Payment from your CRM routes here, then Stripe remains the billing source of truth.
-                      Included usage is consumed first, then prepaid message credits are used for additional SMS and MMS traffic.
-                    </p>
                   </div>
                 </div>
 
                 <div className="flex flex-wrap gap-3">
                   <Button
                     variant="outline"
-                    onClick={handleOpenPortal}
-                    isLoading={isOpeningPortal}
-                    disabled={!summary.subscription.hasStripeCustomer}
+                    onClick={handleSetupCard}
+                    isLoading={isSettingUpCard}
                     leftIcon={<CreditCard className="h-4 w-4" />}
                   >
-                    Manage Payment Method
+                    Save Card
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleOpenPortal}
+                    isLoading={isOpeningPortal}
+                    disabled={!summary.account.hasStripeCustomer}
+                    leftIcon={<CreditCard className="h-4 w-4" />}
+                  >
+                    Stripe Portal
                   </Button>
                 </div>
               </div>
 
-              {summary.subscription.billingBlockedAt ? (
-                <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-800 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-200">
+              {summary.account.status === 'suspended' ? (
+                <div className="mt-6 rounded-[8px] border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-800 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-200">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <div>
-                      <p className="font-medium">Billing action required</p>
+                      <p className="font-medium">Billing suspended</p>
                       <p className="mt-1">
-                        {summary.subscription.billingBlockedReason || 'Stripe reported a billing issue.'}
+                        {summary.account.suspensionReason || 'Payment action is required.'}
                       </p>
                     </div>
                   </div>
@@ -334,136 +339,15 @@ export function SubscriptionsPage() {
               ) : null}
             </PageSection>
 
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,0.95fr)]">
-              <PageSection className="p-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Plans</h3>
-                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                      Choose a monthly plan for SMS, MMS, and included sender inventory.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-6 grid gap-4 lg:grid-cols-3">
-                  {summary.plans.map((plan) => {
-                    const isCurrent = summary.subscription.plan === plan.id;
-
-                    return (
-                      <Card key={plan.id} className={`border-slate-200 shadow-sm dark:border-slate-800 ${isCurrent ? 'ring-2 ring-primary/30' : ''}`}>
-                        <CardContent className="p-5">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-medium uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                                {plan.label}
-                              </p>
-                              <div className="mt-2 flex items-end gap-1">
-                                <span className="text-3xl font-semibold text-slate-950 dark:text-slate-50">
-                                  {formatCurrency(plan.monthlyPrice)}
-                                </span>
-                                <span className="pb-1 text-sm text-slate-500 dark:text-slate-400">/mo</span>
-                              </div>
-                            </div>
-                            {isCurrent ? (
-                              <Badge variant="success">
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                Current
-                              </Badge>
-                            ) : null}
-                          </div>
-
-                          <div className="mt-5 space-y-3 text-sm text-slate-700 dark:text-slate-300">
-                            <div className="flex items-center justify-between">
-                              <span className="flex items-center gap-2">
-                                <MessageSquareMore className="h-4 w-4 text-primary" />
-                                SMS included
-                              </span>
-                              <span className="font-medium">{plan.smsIncluded.toLocaleString()}</span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="flex items-center gap-2">
-                                <MessageSquareMore className="h-4 w-4 text-primary" />
-                                MMS included
-                              </span>
-                              <span className="font-medium">{plan.mmsIncluded.toLocaleString()}</span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="flex items-center gap-2">
-                                <Phone className="h-4 w-4 text-primary" />
-                                Included numbers
-                              </span>
-                              <span className="font-medium">{plan.phoneNumbersIncluded}</span>
-                            </div>
-                          </div>
-
-                          <Button
-                            className="mt-6 w-full"
-                            variant={isCurrent ? 'outline' : 'default'}
-                            onClick={() => handlePlanSelection(plan.id)}
-                            isLoading={activePlanAction === plan.id}
-                          >
-                            {isCurrent ? 'Current Plan' : 'Choose Plan'}
-                          </Button>
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
-                </div>
-              </PageSection>
-
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.9fr)]">
               <div className="space-y-5">
                 <PageSection className="p-6">
-                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Usage This Cycle</h3>
-                  <div className="mt-5 grid gap-4">
-                    <PageInset className="p-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-slate-600 dark:text-slate-400">SMS</span>
-                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
-                          {summary.usage.smsUsed.toLocaleString()} / {summary.subscription.smsIncluded.toLocaleString()}
-                        </span>
-                      </div>
-                    </PageInset>
-                    <PageInset className="p-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-slate-600 dark:text-slate-400">MMS</span>
-                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
-                          {summary.usage.mmsUsed.toLocaleString()} / {summary.subscription.mmsIncluded.toLocaleString()}
-                        </span>
-                      </div>
-                    </PageInset>
-                    <PageInset className="p-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-slate-600 dark:text-slate-400">Active Phone Numbers</span>
-                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
-                          {summary.usage.activePhoneNumbers} / {summary.subscription.phoneNumbersIncluded}
-                        </span>
-                      </div>
-                    </PageInset>
-                    <PageInset className="p-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-slate-600 dark:text-slate-400">Prepaid Message Credits</span>
-                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
-                          {formatCurrency(summary.subscription.messageCreditBalance)}
-                        </span>
-                      </div>
-                    </PageInset>
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Top Up</h3>
+                    <Wallet className="h-5 w-5 text-primary" />
                   </div>
 
-                  <div className="mt-5 space-y-2 text-sm text-slate-600 dark:text-slate-400">
-                    <p>Current period: {formatDate(summary.subscription.currentPeriodStart)} to {formatDate(summary.subscription.currentPeriodEnd)}</p>
-                    <p>Included SMS remaining: {summary.usage.smsRemaining.toLocaleString()}</p>
-                    <p>Included MMS remaining: {summary.usage.mmsRemaining.toLocaleString()}</p>
-                    <p>Extra number setup fee: {formatCurrency(summary.rates.extraPhoneNumberSetupFee)}</p>
-                    <p>Extra number monthly recurring charge: {formatCurrency(summary.rates.extraPhoneNumberMonthlyRate)}</p>
-                  </div>
-                </PageSection>
-
-                <PageSection className="p-6">
-                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Add Message Credits</h3>
-                  <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-400">
-                    Buy prepaid credits when included SMS or MMS usage is close to exhaustion. Sending blocks only after both included usage and prepaid credits are depleted.
-                  </p>
-                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <div className="mt-5 grid gap-3 sm:grid-cols-3">
                     {summary.topUpOptions.map((amount) => (
                       <Button
                         key={amount}
@@ -471,42 +355,191 @@ export function SubscriptionsPage() {
                         onClick={() => handleTopUp(amount)}
                         isLoading={activeTopUpAmount === amount}
                       >
-                        Add {formatCurrency(amount)}
+                        {formatCurrency(amount)}
                       </Button>
                     ))}
+                  </div>
+
+                  <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                    <Input
+                      type="number"
+                      min={250}
+                      step={50}
+                      value={customTopUpAmount}
+                      onChange={(event) => setCustomTopUpAmount(event.target.value)}
+                      aria-label="Custom top-up amount"
+                    />
+                    <Button
+                      onClick={() => handleTopUp(customAmount)}
+                      disabled={customTopUpInvalid}
+                      isLoading={activeTopUpAmount === customAmount}
+                    >
+                      Custom Top-up
+                    </Button>
                   </div>
                 </PageSection>
 
                 <PageSection className="p-6">
-                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Recent Charges</h3>
-                  <div className="mt-5 space-y-3">
-                    {summary.recentCharges.length > 0 ? summary.recentCharges.map((charge) => (
-                      <div
-                        key={charge.id}
-                        className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 dark:border-slate-800 dark:bg-slate-900"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium text-slate-950 dark:text-slate-50">
-                              {charge.description}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                              {formatDate(charge.createdAt)}
-                            </p>
-                          </div>
-                          <div className="text-right">
-                            <Badge variant={statusVariant(charge.status)}>{charge.status}</Badge>
-                            <p className="mt-2 text-sm font-medium text-slate-950 dark:text-slate-50">
-                              {formatCurrency(charge.amount)}
-                            </p>
-                          </div>
-                        </div>
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Rates</h3>
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <PageInset className="p-4">
+                      <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                        <MessageSquareMore className="h-4 w-4" />
+                        SMS
                       </div>
+                      <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.sms, true)}
+                      </p>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                        <MessageSquareMore className="h-4 w-4" />
+                        MMS
+                      </div>
+                      <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.mms, true)}
+                      </p>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                        <Phone className="h-4 w-4" />
+                        Phone MRC
+                      </div>
+                      <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.phoneNumberMonthly)}
+                      </p>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                        <RefreshCw className="h-4 w-4" />
+                        Campaign MRC
+                      </div>
+                      <p className="mt-2 text-lg font-semibold text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.campaignMonthly)}
+                      </p>
+                    </PageInset>
+                  </div>
+                </PageSection>
+
+                <PageSection className="p-6">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Ledger</h3>
+                    {summary.usage.heldInboundCount > 0 ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleReleaseHeld}
+                        isLoading={isReleasingHeld}
+                        leftIcon={<RefreshCw className="h-4 w-4" />}
+                      >
+                        Release Held
+                      </Button>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-5 space-y-3">
+                    {summary.recentLedgerEntries.length > 0 ? summary.recentLedgerEntries.map((entry) => (
+                      <Card key={entry.id} className="border-slate-200 shadow-sm dark:border-slate-800">
+                        <CardContent className="p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                                {entry.description}
+                              </p>
+                              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                {formatDate(entry.createdAt)} · {labelize(entry.category)}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <Badge variant={statusVariant(entry.entryType)}>{entry.entryType}</Badge>
+                              <p className="mt-2 text-sm font-semibold text-slate-950 dark:text-slate-50">
+                                {entry.entryType === 'debit' ? '-' : entry.entryType === 'credit' ? '+' : ''}
+                                {formatCurrency(entry.amount)}
+                              </p>
+                              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                {formatCurrency(entry.balanceAfter)}
+                              </p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
                     )) : (
-                      <div className="rounded-2xl border border-dashed border-slate-300 px-4 py-6 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
-                        No Stripe-backed charges have been recorded for this workspace yet.
+                      <div className="rounded-[8px] border border-dashed border-slate-300 px-4 py-6 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                        No ledger entries yet.
                       </div>
                     )}
+                  </div>
+                </PageSection>
+              </div>
+
+              <div className="space-y-5">
+                <PageSection className="p-6">
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Usage</h3>
+                  <div className="mt-5 grid gap-4">
+                    <PageInset className="p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-600 dark:text-slate-400">SMS units</span>
+                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                          {summary.usage.smsUnits.toLocaleString()}
+                        </span>
+                      </div>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-600 dark:text-slate-400">MMS units</span>
+                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                          {summary.usage.mmsUnits.toLocaleString()}
+                        </span>
+                      </div>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-600 dark:text-slate-400">Active numbers</span>
+                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                          {summary.usage.activePhoneNumbers}
+                        </span>
+                      </div>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-600 dark:text-slate-400">Approved campaigns</span>
+                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                          {summary.usage.activeCampaigns}
+                        </span>
+                      </div>
+                    </PageInset>
+                    <PageInset className="p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-600 dark:text-slate-400">Held inbound</span>
+                        <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
+                          {summary.usage.heldInboundCount}
+                        </span>
+                      </div>
+                    </PageInset>
+                  </div>
+                </PageSection>
+
+                <PageSection className="p-6">
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Monthly Charges</h3>
+                  <div className="mt-5 space-y-3 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 dark:text-slate-400">Estimated MRC</span>
+                      <span className="font-medium text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.usage.estimatedMonthlyRecurring)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 dark:text-slate-400">Next MRC run</span>
+                      <span className="font-medium text-slate-950 dark:text-slate-50">
+                        {formatDate(summary.account.mrcNextRunAt)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 dark:text-slate-400">Setup fee</span>
+                      <span className="font-medium text-slate-950 dark:text-slate-50">
+                        {summary.account.setupFeeChargedAt ? 'Paid' : formatCurrency(summary.rates.basicSetup)}
+                      </span>
+                    </div>
                   </div>
                 </PageSection>
               </div>

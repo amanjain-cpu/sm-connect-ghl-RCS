@@ -11,7 +11,7 @@ import { messageService } from '../services/message.service.js';
 import { senderRoutingService } from '../services/sender-routing.service.js';
 import { platformAdapterRegistry } from '../services/platform-adapter-registry.service.js';
 import { toPlatformAdapterConnection } from '../adapters/base.adapter.js';
-import { BadRequestError, NotFoundError } from '../utils/errors.js';
+import { AppError, BadRequestError, NotFoundError } from '../utils/errors.js';
 import { deadLetterService } from '../services/dead-letter.service.js';
 
 const OUTBOUND_QUEUE_NAME = 'outbound-platform-messages';
@@ -54,6 +54,18 @@ export async function enqueueGhlOutboundMessage(data: GhlOutboundJobData) {
 
 function isTerminalOutboundError(error: unknown): boolean {
   if (error instanceof BadRequestError || error instanceof NotFoundError) {
+    return true;
+  }
+
+  if (
+    error instanceof AppError &&
+    [
+      'WALLET_FUNDS_REQUIRED',
+      'SAVED_PAYMENT_METHOD_REQUIRED',
+      'BILLING_SUSPENDED',
+      'ORGANIZATION_SUSPENDED',
+    ].includes(error.code)
+  ) {
     return true;
   }
 
@@ -166,7 +178,18 @@ export function startOutboundMessageWorker() {
           mediaUrls: data.mediaUrls,
         });
 
-      const sentMessage = await messageService.dispatchQueuedMessage(queuedMessage.id);
+      let sentMessage;
+      try {
+        sentMessage = await messageService.dispatchQueuedMessage(queuedMessage.id);
+      } catch (error) {
+        if (isTerminalOutboundError(error)) {
+          throw new UnrecoverableError(
+            error instanceof Error ? error.message : 'Outbound send cannot be retried'
+          );
+        }
+
+        throw error;
+      }
 
       try {
         await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
@@ -234,7 +257,7 @@ export function startOutboundMessageWorker() {
         },
       });
 
-      if (existingMessage && isTerminalOutboundError(error)) {
+      if (existingMessage && (isTerminalOutboundError(error) || error instanceof UnrecoverableError)) {
         await messageService.markFailed(existingMessage.id, error instanceof Error ? error.message : 'Outbound send failed');
       }
 

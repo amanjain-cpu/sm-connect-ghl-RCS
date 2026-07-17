@@ -11,6 +11,8 @@ import { billingService } from '../services/billing.service.js';
 import { validate, idParamSchema } from '../middleware/validation.js';
 import { subscriptionBillingService } from '../services/subscription-billing.service.js';
 import { externalBillingBridgeService } from '../services/external-billing-bridge.service.js';
+import { walletBillingService } from '../services/wallet-billing.service.js';
+import { AppError } from '../utils/errors.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
@@ -34,8 +36,8 @@ const completeCheckoutSchema = z.object({
   sessionId: z.string().min(8),
 });
 
-const messageCreditTopupSchema = z.object({
-  amountDollars: z.coerce.number().positive().max(1000),
+const walletTopupSchema = z.object({
+  amountDollars: z.coerce.number().min(250).max(100000),
 });
 
 const authorizeMarketplaceBillingSchema = z.object({
@@ -48,10 +50,12 @@ const authorizeMarketplaceBillingSchema = z.object({
 router.post(
   '/webhook/stripe',
   asyncHandler(async (req, res) => {
-    const result = await subscriptionBillingService.handleStripeWebhook(
-      req.rawBody ?? JSON.stringify(req.body ?? {}),
-      req.headers['stripe-signature'] as string | undefined
-    );
+    const rawBody = req.rawBody ?? JSON.stringify(req.body ?? {});
+    const signature = req.headers['stripe-signature'] as string | undefined;
+    const walletResult = await walletBillingService.handleStripeWebhook(rawBody, signature);
+    const result = walletResult.handled
+      ? walletResult
+      : await subscriptionBillingService.handleStripeWebhook(rawBody, signature);
 
     res.json({ success: true, data: result });
   })
@@ -78,30 +82,30 @@ router.post(
 router.use(authenticate);
 
 router.get(
-  '/subscription',
+  '/wallet',
   asyncHandler(async (req, res) => {
-    const summary = await subscriptionBillingService.getSubscriptionSummary(req.user!.organizationId);
+    const summary = await walletBillingService.getWalletSummary(req.user!.organizationId);
     res.json({ success: true, data: summary });
   })
 );
 
 router.post(
-  '/subscription/checkout',
-  validate({ body: checkoutPlanSchema }),
+  '/wallet/top-ups/checkout',
+  validate({ body: walletTopupSchema }),
   asyncHandler(async (req, res) => {
-    const result = await subscriptionBillingService.createOrUpdateSubscriptionCheckout(
-      req.user!.organizationId,
-      req.body.plan
-    );
+    const result = await walletBillingService.createWalletTopUpCheckout({
+      organizationId: req.user!.organizationId,
+      amountDollars: req.body.amountDollars,
+    });
     res.json({ success: true, data: result });
   })
 );
 
 router.post(
-  '/subscription/checkout/complete',
+  '/wallet/top-ups/checkout/complete',
   validate({ body: completeCheckoutSchema }),
   asyncHandler(async (req, res) => {
-    const summary = await subscriptionBillingService.completeSubscriptionCheckout(
+    const summary = await walletBillingService.completeWalletTopUpCheckout(
       req.user!.organizationId,
       req.body.sessionId
     );
@@ -110,9 +114,93 @@ router.post(
 );
 
 router.post(
+  '/wallet/payment-method/setup',
+  asyncHandler(async (req, res) => {
+    const result = await walletBillingService.createPaymentMethodSetupSession(
+      req.user!.organizationId
+    );
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  '/wallet/payment-method/setup/complete',
+  validate({ body: completeCheckoutSchema }),
+  asyncHandler(async (req, res) => {
+    const summary = await walletBillingService.completePaymentMethodSetup(
+      req.user!.organizationId,
+      req.body.sessionId
+    );
+    res.json({ success: true, data: summary });
+  })
+);
+
+router.post(
+  '/wallet/portal',
+  asyncHandler(async (req, res) => {
+    const portal = await walletBillingService.createBillingPortalSession(
+      req.user!.organizationId
+    );
+    res.json({ success: true, data: portal });
+  })
+);
+
+router.post(
+  '/wallet/release-held',
+  asyncHandler(async (req, res) => {
+    const result = await walletBillingService.releaseHeldInboundMessages(
+      req.user!.organizationId
+    );
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  '/wallet/mrc/process',
+  asyncHandler(async (req, res) => {
+    const result = await walletBillingService.processMonthlyRecurringCharges({
+      organizationId: req.user!.organizationId,
+    });
+    res.json({ success: true, data: result });
+  })
+);
+
+router.get(
+  '/subscription',
+  asyncHandler(async (req, res) => {
+    const summary = await walletBillingService.getWalletSummary(req.user!.organizationId);
+    res.json({ success: true, data: summary });
+  })
+);
+
+router.post(
+  '/subscription/checkout',
+  validate({ body: checkoutPlanSchema }),
+  asyncHandler(async () => {
+    throw new AppError(
+      'Subscription plans have been replaced by prepaid wallet top-ups.',
+      'SUBSCRIPTION_CHECKOUT_DISABLED',
+      410
+    );
+  })
+);
+
+router.post(
+  '/subscription/checkout/complete',
+  validate({ body: completeCheckoutSchema }),
+  asyncHandler(async () => {
+    throw new AppError(
+      'Subscription checkout completion is disabled after the prepaid wallet migration.',
+      'SUBSCRIPTION_CHECKOUT_DISABLED',
+      410
+    );
+  })
+);
+
+router.post(
   '/subscription/portal',
   asyncHandler(async (req, res) => {
-    const portal = await subscriptionBillingService.createBillingPortalSession(
+    const portal = await walletBillingService.createBillingPortalSession(
       req.user!.organizationId
     );
     res.json({ success: true, data: portal });
@@ -121,9 +209,9 @@ router.post(
 
 router.post(
   '/message-credits/checkout',
-  validate({ body: messageCreditTopupSchema }),
+  validate({ body: walletTopupSchema }),
   asyncHandler(async (req, res) => {
-    const result = await subscriptionBillingService.prepareMessageCreditTopupCheckout({
+    const result = await walletBillingService.createWalletTopUpCheckout({
       organizationId: req.user!.organizationId,
       amountDollars: req.body.amountDollars,
     });
@@ -135,7 +223,7 @@ router.post(
   '/message-credits/checkout/complete',
   validate({ body: completeCheckoutSchema }),
   asyncHandler(async (req, res) => {
-    const summary = await subscriptionBillingService.completeMessageCreditTopupCheckout(
+    const summary = await walletBillingService.completeWalletTopUpCheckout(
       req.user!.organizationId,
       req.body.sessionId
     );

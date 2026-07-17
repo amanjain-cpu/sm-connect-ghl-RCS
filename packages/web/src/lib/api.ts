@@ -407,6 +407,10 @@ class ApiClient {
     return this.get<any>('/billing/subscription');
   }
 
+  async getWalletBillingSummary() {
+    return this.get<any>('/billing/wallet');
+  }
+
   async createSubscriptionCheckout(plan: 'starter' | 'growth' | 'scale') {
     return this.post<any>('/billing/subscription/checkout', { plan });
   }
@@ -416,18 +420,30 @@ class ApiClient {
   }
 
   async createBillingPortalSession() {
-    return this.post<{ url: string }>('/billing/subscription/portal');
+    return this.post<{ url: string }>('/billing/wallet/portal');
+  }
+
+  async createPaymentMethodSetupSession() {
+    return this.post<{ checkoutUrl: string; sessionId: string }>('/billing/wallet/payment-method/setup');
+  }
+
+  async completePaymentMethodSetup(data: { sessionId: string }) {
+    return this.post<any>('/billing/wallet/payment-method/setup/complete', data);
   }
 
   async createMessageCreditTopupCheckout(amountDollars: number) {
     return this.post<{ checkoutUrl: string; sessionId: string; amountDollars: number }>(
-      '/billing/message-credits/checkout',
+      '/billing/wallet/top-ups/checkout',
       { amountDollars }
     );
   }
 
   async completeMessageCreditTopupCheckout(data: { sessionId: string }) {
-    return this.post<any>('/billing/message-credits/checkout/complete', data);
+    return this.post<any>('/billing/wallet/top-ups/checkout/complete', data);
+  }
+
+  async releaseHeldInboundMessages() {
+    return this.post<any>('/billing/wallet/release-held');
   }
 
   async authorizeMarketplaceBillingInstall(data: {
@@ -571,15 +587,15 @@ class ApiClient {
 
   async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId: string; friendlyName?: string }) {
     return this.post<
-      | { mode: 'included'; activePhoneNumbers: number; includedPhoneNumbers: number }
-      | {
-          mode: 'checkout';
-          checkoutUrl: string;
-          sessionId: string;
-          activePhoneNumbers: number;
-          includedPhoneNumbers: number;
-          immediateChargeAmount: number;
-        }
+      {
+        mode: 'wallet_ready';
+        activePhoneNumbers: number;
+        phoneNumberMonthlyRate: number;
+        pricingTier: string;
+        phoneNumber: string;
+        campaignId: string;
+        friendlyName?: string;
+      }
     >('/phone-numbers/checkout', data);
   }
 

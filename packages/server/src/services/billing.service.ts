@@ -5,7 +5,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database.js';
 import { BadRequestError, NotFoundError } from '../utils/errors.js';
-import { subscriptionBillingService } from './subscription-billing.service.js';
 
 type BillingDirection = 'inbound' | 'outbound';
 type BillingUnit = 'sms' | 'mms' | 'phone_number';
@@ -56,8 +55,6 @@ export class BillingService {
             metadata: mergedMetadata as Prisma.InputJsonValue | undefined,
           },
         });
-
-    await subscriptionBillingService.processMeteredEvent(event.id);
 
     return event;
   }

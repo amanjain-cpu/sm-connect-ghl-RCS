@@ -192,7 +192,7 @@ export function BillingEntryPage() {
             <p className="max-w-md text-muted-foreground">
               {isMarketplaceInstall
                 ? 'Your CRM platform has accepted the external billing authorization. HighLevel should continue the install inside the target workspace.'
-                : 'Redirecting to subscription management...'}
+                : 'Redirecting to wallet billing...'}
             </p>
             {isMarketplaceInstall && showCloseHint && (
               <div className="space-y-3">

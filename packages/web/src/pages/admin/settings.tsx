@@ -109,7 +109,7 @@ const SETTING_LABELS: Record<string, { label: string; description: string; place
   },
   stripe_secret_key: {
     label: 'Stripe Secret Key',
-    description: 'Secret API key used for Stripe checkout, subscriptions, and overage charging.',
+    description: 'Secret API key used for Stripe wallet top-ups, saved cards, and automatic MRC charges.',
     placeholder: 'sk_live_...',
   },
   stripe_webhook_secret: {

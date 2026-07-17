@@ -10,6 +10,8 @@ export interface StripeCheckoutSession {
   payment_status?: string | null;
   customer?: string | null;
   subscription?: string | null;
+  payment_intent?: string | { id?: string | null } | null;
+  setup_intent?: string | { id?: string | null } | null;
   mode?: 'payment' | 'subscription' | 'setup' | null;
   metadata?: Record<string, string> | null;
   client_reference_id?: string | null;
@@ -54,9 +56,18 @@ export interface StripePaymentIntent {
   status: string;
   amount: number;
   currency: string;
+  customer?: string | { id?: string | null } | null;
+  payment_method?: string | { id?: string | null } | null;
   last_payment_error?: {
     message?: string | null;
   } | null;
+}
+
+export interface StripeSetupIntent {
+  id: string;
+  status: string;
+  customer?: string | { id?: string | null } | null;
+  payment_method?: string | { id?: string | null } | null;
 }
 
 export interface StripeInvoiceItem {
@@ -242,6 +253,7 @@ export class StripeService {
     cancelUrl: string;
     description: string;
     metadata: Record<string, string>;
+    savePaymentMethod?: boolean;
   }): Promise<StripeCheckoutSession> {
     const body = new URLSearchParams();
     body.set('mode', 'payment');
@@ -254,8 +266,13 @@ export class StripeService {
     body.set('line_items[0][price_data][product_data][name]', input.description);
     body.set('line_items[0][price_data][product_data][description]', input.description);
 
+    if (input.savePaymentMethod) {
+      body.set('payment_intent_data[setup_future_usage]', 'off_session');
+    }
+
     for (const [key, value] of Object.entries(input.metadata)) {
       body.set(`metadata[${key}]`, value);
+      body.set(`payment_intent_data[metadata][${key}]`, value);
     }
 
     if (input.customerId) {
@@ -276,6 +293,63 @@ export class StripeService {
     return this.callStripe<StripeCheckoutSession>(
       `/checkout/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'GET' }
+    );
+  }
+
+  async createSetupCheckoutSession(input: {
+    organizationId: string;
+    customerId: string;
+    successUrl: string;
+    cancelUrl: string;
+    metadata: Record<string, string>;
+  }): Promise<StripeCheckoutSession> {
+    const body = new URLSearchParams();
+    body.set('mode', 'setup');
+    body.set('customer', input.customerId);
+    body.set('success_url', input.successUrl);
+    body.set('cancel_url', input.cancelUrl);
+    body.set('client_reference_id', input.organizationId);
+
+    for (const [key, value] of Object.entries(input.metadata)) {
+      body.set(`metadata[${key}]`, value);
+      body.set(`setup_intent_data[metadata][${key}]`, value);
+    }
+
+    return this.callStripe<StripeCheckoutSession>('/checkout/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+  }
+
+  async getPaymentIntent(paymentIntentId: string): Promise<StripePaymentIntent> {
+    return this.callStripe<StripePaymentIntent>(
+      `/payment_intents/${encodeURIComponent(paymentIntentId)}`,
+      { method: 'GET' }
+    );
+  }
+
+  async getSetupIntent(setupIntentId: string): Promise<StripeSetupIntent> {
+    return this.callStripe<StripeSetupIntent>(
+      `/setup_intents/${encodeURIComponent(setupIntentId)}`,
+      { method: 'GET' }
+    );
+  }
+
+  async updateCustomerDefaultPaymentMethod(input: {
+    customerId: string;
+    paymentMethodId: string;
+  }): Promise<StripeCustomer> {
+    const body = new URLSearchParams();
+    body.set('invoice_settings[default_payment_method]', input.paymentMethodId);
+
+    return this.callStripe<StripeCustomer>(
+      `/customers/${encodeURIComponent(input.customerId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      }
     );
   }
 

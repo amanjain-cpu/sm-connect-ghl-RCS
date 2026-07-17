@@ -3,7 +3,6 @@
 // ===========================================
 
 import { prisma } from '../config/database.js';
-import { config } from '../config/index.js';
 import { signalmashService } from './signalmash.service.js';
 import { NotFoundError, BadRequestError, AppError, ExternalServiceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
@@ -11,7 +10,7 @@ import { Prisma, type Campaign, type CampaignStatus, type CampaignUseCase } from
 import { integrationService } from './integration.service.js';
 import { providerOperationService } from './provider-operation.service.js';
 import { phoneNumberService } from './phoneNumber.service.js';
-import { subscriptionBillingService } from './subscription-billing.service.js';
+import { walletBillingService } from './wallet-billing.service.js';
 
 interface CreateCampaignInput {
   organizationId: string;
@@ -109,14 +108,6 @@ type CampaignNumberLinkAction =
       phoneNumber: string;
       previousCampaignId: string;
       previousCampaignName?: string | null;
-    }
-  | {
-      mode: 'checkout';
-      checkoutUrl: string;
-      sessionId: string;
-      activePhoneNumbers: number;
-      includedPhoneNumbers: number;
-      immediateChargeAmount: number;
     }
   | {
       mode: 'pending_provider';
@@ -451,13 +442,6 @@ export class CampaignService {
     };
   }
 
-  private buildPhoneCheckoutUrls(campaignId: string) {
-    return {
-      successUrl: `${config.webUrl}/campaigns/${campaignId}?number_checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${config.webUrl}/campaigns/${campaignId}?number_checkout=cancelled`,
-    };
-  }
-
   private buildLinkedNumberAction(
     campaign: Campaign,
     number: {
@@ -584,30 +568,7 @@ export class CampaignService {
       }
     }
 
-    const checkout = await subscriptionBillingService.preparePhoneNumberCheckout({
-      organizationId: campaign.organizationId,
-      phoneNumber: intent.phoneNumber!,
-      campaignId: campaign.id,
-      friendlyName: intent.friendlyName,
-      ...this.buildPhoneCheckoutUrls(campaign.id),
-    });
-
-    if (checkout.mode === 'checkout') {
-      const updatedCampaign = await prisma.campaign.update({
-        where: { id: campaign.id },
-        data: {
-          numberLinkStatus: 'checkout_required',
-          numberLinkError: null,
-          numberLinkAttemptedAt: attemptedAt,
-          numberLinkCompletedAt: null,
-        },
-      });
-
-      return {
-        ...updatedCampaign,
-        numberLinkAction: checkout,
-      };
-    }
+    await walletBillingService.assertCanUsePaidServices(campaign.organizationId);
 
     try {
       const number = await phoneNumberService.purchaseNumber(

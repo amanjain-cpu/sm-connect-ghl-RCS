@@ -11,8 +11,8 @@ import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { prisma } from '../config/database.js';
 import { AppError } from '../utils/errors.js';
-import { subscriptionBillingService } from '../services/subscription-billing.service.js';
 import { organizationRuntimeService } from '../services/organization-runtime.service.js';
+import { walletBillingService } from '../services/wallet-billing.service.js';
 
 const router: RouterType = Router();
 
@@ -197,16 +197,18 @@ router.post(
       campaignId
     );
 
-    const result = await subscriptionBillingService.preparePhoneNumberCheckout({
-      organizationId: req.user!.organizationId,
-      phoneNumber,
-      campaignId,
-      friendlyName,
-    });
+    const result = await walletBillingService.preparePhoneNumberProvisioning(
+      req.user!.organizationId
+    );
 
     res.status(200).json({
       success: true,
-      data: result,
+      data: {
+        ...result,
+        phoneNumber,
+        campaignId,
+        friendlyName,
+      },
     });
   })
 );
@@ -219,77 +221,11 @@ router.post(
   '/checkout/complete',
   validate({ body: completeCheckoutBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
-    await organizationRuntimeService.assertActionAllowed(
-      req.user!.organizationId,
-      'complete number checkout'
+    throw new AppError(
+      'Phone number checkout has been replaced by wallet-based provisioning.',
+      'PHONE_NUMBER_CHECKOUT_DISABLED',
+      410
     );
-    const { sessionId } = req.body as z.infer<typeof completeCheckoutBodySchema>;
-    const metadata = await subscriptionBillingService.completePhoneNumberCheckout(
-      req.user!.organizationId,
-      sessionId
-    );
-
-    try {
-      const number = await phoneNumberService.purchaseNumber(
-        req.user!.organizationId,
-        metadata.phoneNumber,
-        {
-          campaignId: metadata.campaignId,
-          friendlyName: metadata.friendlyName || undefined,
-        }
-      );
-
-      res.status(201).json({
-        success: true,
-        data: number,
-      });
-    } catch (error) {
-      if (error instanceof AppError && error.code === 'NUMBER_ALREADY_OWNED') {
-        const existing = await prisma.phoneNumber.findUnique({
-          where: { phoneNumber: metadata.phoneNumber },
-          include: {
-            campaign: {
-              select: {
-                id: true,
-                name: true,
-                status: true,
-              },
-            },
-          },
-        });
-
-        if (existing?.organizationId === req.user!.organizationId) {
-          res.status(200).json({
-            success: true,
-            data: existing,
-          });
-          return;
-        }
-      }
-
-      if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
-        const pendingIntent = await savePendingNumberPurchaseIntent({
-          organizationId: req.user!.organizationId,
-          campaignId: metadata.campaignId,
-          phoneNumber: metadata.phoneNumber,
-          friendlyName: metadata.friendlyName || undefined,
-          error,
-        });
-
-        if (pendingIntent) {
-          res.status(202).json({
-            success: true,
-            data: {
-              ...pendingIntent,
-              message: 'Payment completed. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
-            },
-          });
-          return;
-        }
-      }
-
-      throw error;
-    }
   })
 );
 
@@ -303,28 +239,7 @@ router.post(
     );
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
 
-    const subscription = await subscriptionBillingService.assertCanProvisionPhoneNumber(
-      req.user!.organizationId
-    );
-    const activePhoneNumbers = await prisma.phoneNumber.count({
-      where: {
-        organizationId: req.user!.organizationId,
-        status: 'active',
-      },
-    });
-
-    if (activePhoneNumbers >= subscription.phoneNumbersIncluded) {
-      throw new AppError(
-        'This purchase requires the extra phone-number checkout flow first.',
-        'PHONE_NUMBER_OVERAGE_PAYMENT_REQUIRED',
-        402,
-        true,
-        {
-          activePhoneNumbers,
-          includedPhoneNumbers: subscription.phoneNumbersIncluded,
-        }
-      );
-    }
+    await walletBillingService.assertCanUsePaidServices(req.user!.organizationId);
 
     try {
       const number = await phoneNumberService.purchaseNumber(

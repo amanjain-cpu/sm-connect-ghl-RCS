@@ -9,10 +9,11 @@ import { prisma } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 import { messageService } from '../services/message.service.js';
 import { platformService } from '../services/platform.service.js';
-import { platformAdapterRegistry } from '../services/platform-adapter-registry.service.js';
 import { complianceService } from '../services/compliance.service.js';
-import { toPlatformAdapterConnection } from '../adapters/base.adapter.js';
 import { deadLetterService } from '../services/dead-letter.service.js';
+import { inboundMessageSyncService } from '../services/inbound-message-sync.service.js';
+import { platformAdapterRegistry } from '../services/platform-adapter-registry.service.js';
+import { toPlatformAdapterConnection } from '../adapters/base.adapter.js';
 
 const INCOMING_QUEUE_NAME = 'incoming-platform-events';
 
@@ -163,111 +164,59 @@ export function startIncomingEventsWorker() {
           body: message.body,
         });
 
-        const connections = await platformService.getByOrganization(
-          message.organizationId,
-          'leadconnector'
-        );
-
-        const connection = connections.find((item) => item.status === 'connected');
-        if (!connection) {
-          logger.warn(
+        if (message.heldForPayment || !message.visible) {
+          logger.info(
             {
+              messageId: message.id,
               organizationId: message.organizationId,
               signalmashMessageId: job.data.signalmashMessageId,
             },
-            'No active platform connection for inbound message'
+            'Inbound message stored and held from CRM sync pending wallet funding'
           );
-
-          await deadLetterService.record({
-            queueName: INCOMING_QUEUE_NAME,
-            jobName: job.name,
-            jobKey: `deferred-${job.data.signalmashMessageId}`,
-            payload: job.data as unknown as Record<string, unknown>,
-            error: 'No active platform connection for inbound message',
-            organizationId: message.organizationId,
-            metadata: {
-              reason: 'connection_unavailable',
-              deferredAt: new Date().toISOString(),
-            },
-          });
 
           return message;
         }
 
         try {
-          let contact = await platformAdapterRegistry.get('leadconnector').getContactByPhone?.(
-            toPlatformAdapterConnection(connection),
-            message.from
-          );
-
-          if (!contact) {
-            const createdContact = await platformAdapterRegistry.get('leadconnector').createContact?.(
-              toPlatformAdapterConnection(connection),
-              { phone: message.from }
+          await inboundMessageSyncService.syncToPlatform(message, {
+            mediaUrls: job.data.mediaUrls,
+            complianceAction: complianceEvent?.action,
+          });
+        } catch (error) {
+          if (error instanceof Error && error.message === 'No active platform connection for inbound message') {
+            logger.warn(
+              {
+                organizationId: message.organizationId,
+                signalmashMessageId: job.data.signalmashMessageId,
+              },
+              'No active platform connection for inbound message'
             );
 
-            if (!createdContact) {
-              throw new Error('Failed to create contact for inbound message');
-            }
-
-            contact = { id: createdContact.id };
-          }
-
-          const conversationId = await platformAdapterRegistry.get('leadconnector').getOrCreateConversation?.(
-            toPlatformAdapterConnection(connection),
-            contact.id
-          );
-
-          if (!conversationId) {
-            throw new Error('Failed to resolve conversation for inbound message');
-          }
-
-          if (complianceEvent && contact.id) {
-            try {
-              await platformAdapterRegistry.get('leadconnector').updateContactPreferences?.(
-                toPlatformAdapterConnection(connection),
-                contact.id,
-                {
-                  dnd: complianceEvent.action === 'opt_out',
-                }
-              );
-            } catch (error) {
-              logger.warn({ err: error, contactId: contact.id }, 'Failed to sync contact DND state to the CRM platform');
-            }
-          }
-
-          const inboundResult = await platformAdapterRegistry.get('leadconnector').addInboundMessage?.(
-            toPlatformAdapterConnection(connection),
-            {
-              externalMessageId: job.data.signalmashMessageId,
-              from: message.from,
-              to: message.to,
-              body: message.body,
-              mediaUrls: job.data.mediaUrls,
-              occurredAt: new Date(),
-              contactId: contact.id,
-              conversationId,
-            }
-          );
-
-          try {
-            await prisma.message.update({
-              where: { id: message.id },
-              data: {
-                platformConnectionId: connection.id,
-                platformConversationId: conversationId,
-                platformMessageId: inboundResult?.externalMessageId ?? message.platformMessageId,
+            await deadLetterService.record({
+              queueName: INCOMING_QUEUE_NAME,
+              jobName: job.name,
+              jobKey: `deferred-${job.data.signalmashMessageId}`,
+              payload: job.data as unknown as Record<string, unknown>,
+              error: 'No active platform connection for inbound message',
+              organizationId: message.organizationId,
+              metadata: {
+                reason: 'connection_unavailable',
+                deferredAt: new Date().toISOString(),
               },
             });
-          } catch (updateError) {
-            logger.warn(
-              { err: updateError, messageId: message.id },
-              'Failed to persist inbound platform sync identifiers'
-            );
+
+            return message;
           }
-        } catch (error) {
+
           if (isAuthClassScopeMismatchError(error)) {
-            await markConnectionAuthClassError(connection.id, 'inbound', error);
+            const connections = await platformService.getByOrganization(
+              message.organizationId,
+              'leadconnector'
+            );
+            const connection = connections.find((item) => item.status === 'connected');
+            if (connection) {
+              await markConnectionAuthClassError(connection.id, 'inbound', error);
+            }
             throw new UnrecoverableError(
               error instanceof Error ? error.message : 'Platform auth class scope mismatch'
             );
@@ -279,54 +228,61 @@ export function startIncomingEventsWorker() {
         return message;
       }
 
-      const updatedMessage = await messageService.handleStatusUpdate(
-        job.data.signalmashMessageId,
-        job.data.status,
-        job.data.errorCode,
-        job.data.errorMessage,
-        {
-          from: job.data.from,
-          to: job.data.to,
-          body: job.data.body,
-          direction: job.data.direction,
-        }
-      );
-
-      if (!updatedMessage?.platformConnectionId || !updatedMessage.platformMessageId) {
-        return updatedMessage;
-      }
-
-      const connection = await platformService.getByIdUnsafe(updatedMessage.platformConnectionId);
-      if (connection.status !== 'connected') {
-        logger.warn(
+      if (job.data.kind === 'signalmash-status') {
+        const message = await messageService.handleStatusUpdate(
+          job.data.signalmashMessageId,
+          job.data.status,
+          job.data.errorCode,
+          job.data.errorMessage,
           {
-            connectionId: connection.id,
-            status: connection.status,
-            signalmashMessageId: job.data.signalmashMessageId,
-          },
-          'Skipping platform status sync because connection is not connected'
+            from: job.data.from,
+            to: job.data.to,
+            body: job.data.body,
+            direction: job.data.direction,
+          }
         );
-        return updatedMessage;
-      }
 
-      try {
-        await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
-          toPlatformAdapterConnection(connection),
-          updatedMessage.platformMessageId,
-          updatedMessage.status
-        );
-      } catch (error) {
-        if (isAuthClassScopeMismatchError(error)) {
-          await markConnectionAuthClassError(connection.id, 'status', error);
-          throw new UnrecoverableError(
-            error instanceof Error ? error.message : 'Platform auth class scope mismatch'
-          );
+        if (!message) {
+          throw new UnrecoverableError(`Message ${job.data.signalmashMessageId} not found`);
         }
 
-        throw error;
+        if (message.platformConnectionId && message.platformMessageId) {
+          const connection = await platformService.getByIdUnsafe(message.platformConnectionId);
+
+          if (connection.status !== 'connected') {
+            logger.warn(
+              {
+                connectionId: connection.id,
+                status: connection.status,
+                signalmashMessageId: job.data.signalmashMessageId,
+              },
+              'Skipping platform status sync because connection is not connected'
+            );
+            return message;
+          }
+
+          try {
+            await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
+              toPlatformAdapterConnection(connection),
+              message.platformMessageId,
+              message.status
+            );
+          } catch (error) {
+            if (isAuthClassScopeMismatchError(error)) {
+              await markConnectionAuthClassError(connection.id, 'status', error);
+              throw new UnrecoverableError(
+                error instanceof Error ? error.message : 'Platform auth class scope mismatch'
+              );
+            }
+
+            throw error;
+          }
+        }
+
+        return message;
       }
 
-      return updatedMessage;
+      throw new UnrecoverableError(`Unsupported incoming job kind ${(job.data as any).kind}`);
     },
     {
       connection: createRedisConnection(),
@@ -338,7 +294,7 @@ export function startIncomingEventsWorker() {
     logger.info({ jobId: job.id }, 'Incoming event job completed');
   });
 
-  incomingEventsWorker.on('failed', (job, error) => {
+  incomingEventsWorker.on('failed', async (job, error) => {
     logger.error(
       {
         jobId: job?.id,
@@ -354,25 +310,27 @@ export function startIncomingEventsWorker() {
       return;
     }
 
-    void (async () => {
-      const organizationId = await resolveOrganizationIdFromJobData(data);
+    const organizationId = await resolveOrganizationIdFromJobData(data);
+    const terminal =
+      error instanceof UnrecoverableError ||
+      job.attemptsMade >= (job.opts.attempts ?? defaultJobOptions.attempts ?? 1);
 
-      await deadLetterService.record({
-        queueName: INCOMING_QUEUE_NAME,
-        jobName: job?.name ?? data.kind,
-        jobKey: String(job?.id ?? `${data.kind}:${Date.now()}`),
-        payload: data as unknown as Record<string, unknown>,
-        error: error instanceof Error ? error.message : 'Incoming queue failure',
-        organizationId,
-        metadata: {
-          attemptsMade: job?.attemptsMade ?? 0,
-        },
-      });
-    })().catch((recordError) => {
-      logger.error(
-        { err: recordError, jobId: job?.id },
-        'Failed to record incoming queue dead-letter job'
-      );
+    if (!terminal) {
+      return;
+    }
+
+    await deadLetterService.record({
+      queueName: INCOMING_QUEUE_NAME,
+      jobName: job.name,
+      jobKey: job.id ?? `${job.name}:${Date.now()}`,
+      payload: data as unknown as Record<string, unknown>,
+      error: error instanceof Error ? error.message : 'Unknown incoming event processing error',
+      organizationId,
+      metadata: {
+        attemptsMade: job.attemptsMade,
+        failedReason: job.failedReason,
+        failedAt: new Date().toISOString(),
+      },
     });
   });
 

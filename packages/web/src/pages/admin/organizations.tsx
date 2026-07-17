@@ -37,9 +37,11 @@ interface Organization {
   email: string;
   status: 'active' | 'suspended';
   suspensionReason?: string | null;
-  subscription?: {
-    plan?: string | null;
+  billingAccount?: {
     status?: string | null;
+    pricingTier?: string | null;
+    walletBalance?: number | string | null;
+    suspensionReason?: string | null;
   } | null;
   createdAt: string;
   _count: {
@@ -371,7 +373,7 @@ export function AdminOrganizationsPage() {
                 Review organization footprint and adoption
               </h2>
               <p className="text-sm leading-6 text-slate-600 dark:text-slate-400">
-                Organizations returned by the admin API with aggregate counts, subscription state, and runtime controls.
+                Organizations returned by the admin API with aggregate counts, wallet state, and runtime controls.
               </p>
             </div>
             <p className="text-sm text-slate-600 dark:text-slate-400">
@@ -423,9 +425,9 @@ export function AdminOrganizationsPage() {
                         }`}>
                           {org.status}
                         </span>
-                        {org.subscription?.plan ? (
+                        {org.billingAccount?.pricingTier ? (
                           <span className="rounded-full border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:text-slate-300">
-                            {org.subscription.plan}
+                            {org.billingAccount.pricingTier.replace(/_/g, ' ')}
                           </span>
                         ) : null}
                       </div>
@@ -669,36 +671,39 @@ export function AdminOrganizationsPage() {
                 <CardContent className="space-y-3 p-6">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Plan and Usage</h3>
-                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Subscription entitlements and prepaid message credits for this tenant.</p>
+                      <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Wallet and Usage</h3>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Wallet balance, rate tier, held inbound, and ledger state for this tenant.</p>
                     </div>
                   </div>
                   <div className="grid gap-4 md:grid-cols-4">
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">Plan</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Rate Tier</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        {onboardingDetail.subscriptionSummary?.subscription?.plan || 'none'}
+                        {onboardingDetail.subscriptionSummary?.account?.pricingTierLabel || 'none'}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">Numbers Used</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Active Numbers</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        {onboardingDetail.subscriptionSummary?.usage?.activePhoneNumbers ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.phoneNumbersIncluded ?? 0}
+                        {onboardingDetail.subscriptionSummary?.usage?.activePhoneNumbers ?? 0}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">SMS / MMS Used</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">SMS / MMS Units</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        {onboardingDetail.subscriptionSummary?.usage?.smsUsed ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.smsIncluded ?? 0}
+                        {onboardingDetail.subscriptionSummary?.usage?.smsUnits ?? 0}
                       </p>
                       <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                        MMS {onboardingDetail.subscriptionSummary?.usage?.mmsUsed ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.mmsIncluded ?? 0}
+                        MMS {onboardingDetail.subscriptionSummary?.usage?.mmsUnits ?? 0}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">Message Credits</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Wallet Balance</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        ${Number(onboardingDetail.subscriptionSummary?.subscription?.messageCreditBalance ?? 0).toFixed(2)}
+                        ${Number(onboardingDetail.subscriptionSummary?.account?.walletBalance ?? 0).toFixed(2)}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        Held {onboardingDetail.subscriptionSummary?.usage?.heldInboundCount ?? 0}
                       </p>
                     </div>
                   </div>
