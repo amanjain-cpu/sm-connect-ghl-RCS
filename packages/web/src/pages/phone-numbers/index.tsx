@@ -296,22 +296,16 @@ export function PhoneNumbersPage() {
   });
 
   const hasPurchasableCampaigns = campaignOptions.length > 0;
-  const buyNumberLabel = hasPurchasableCampaigns ? 'Buy Number' : 'Submit Campaign';
+  const buyNumberLabel = 'Buy Number';
 
   return (
     <div>
       <Header
         title="Phone Numbers"
-        subtitle="Manage owned numbers, assignment readiness, and current DID inventory."
+        subtitle="Buy numbers now, assign approved campaigns later, and manage current DID inventory."
         action={{
           label: buyNumberLabel,
-          onClick: () => {
-            if (hasPurchasableCampaigns) {
-              setShowSearchDialog(true);
-              return;
-            }
-            navigate('/campaigns');
-          },
+          onClick: () => setShowSearchDialog(true),
         }}
       />
 
@@ -356,21 +350,21 @@ export function PhoneNumbersPage() {
           <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
-                <Badge variant="warning" className="w-fit">Campaign needed</Badge>
+                <Badge variant="info" className="w-fit">Buying available</Badge>
                 <h3 className="text-lg font-semibold text-foreground">
-                  Submit a campaign before buying a number
+                  Buy a number before campaign approval
                 </h3>
                 <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  You can buy and link a sender once a campaign is submitted to Signalmash.
-                  SMS/MMS traffic stays blocked until that campaign is approved.
+                  A purchased number can stay unassigned while brand and campaign approval are in progress.
+                  SMS/MMS traffic stays blocked until an approved campaign is linked.
                 </p>
               </div>
               <div className="flex gap-3">
                 <Button variant="outline" onClick={() => navigate('/brands')}>
                   Review Brands
                 </Button>
-                <Button onClick={() => navigate('/campaigns/new')}>
-                  Create Campaign
+                <Button onClick={() => setShowSearchDialog(true)}>
+                  Buy Number
                 </Button>
               </div>
             </CardContent>
@@ -420,19 +414,11 @@ export function PhoneNumbersPage() {
               </div>
               <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">No phone numbers found</h3>
               <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-600 dark:text-slate-400">
-                {hasPurchasableCampaigns
-                  ? 'Purchase a number now and it will be ready for traffic after campaign approval.'
-                  : 'Once a campaign is submitted, you can purchase or assign a number here.'}
+                Purchase a number now. It will be visible here immediately, and SMS/MMS sending starts only after an approved campaign is linked.
               </p>
               <Button
                 className="mt-6"
-                onClick={() => {
-                  if (hasPurchasableCampaigns) {
-                    setShowSearchDialog(true);
-                    return;
-                  }
-                  navigate('/campaigns');
-                }}
+                onClick={() => setShowSearchDialog(true)}
               >
                 {buyNumberLabel}
               </Button>
@@ -489,6 +475,11 @@ export function PhoneNumbersPage() {
                         <p className="mt-1 font-medium text-slate-950 dark:text-slate-50">
                           {number.campaign?.name || 'Unassigned'}
                         </p>
+                        {!number.campaign ? (
+                          <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                            Sending starts after an approved campaign is linked.
+                          </p>
+                        ) : null}
                         {number.campaign && number.campaign.status !== 'approved' ? (
                           <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
                             Traffic is blocked until this campaign is approved.
@@ -517,7 +508,7 @@ export function PhoneNumbersPage() {
 
                     <div className="mt-5 flex justify-end">
                       <div className="flex gap-2">
-                        {!number.isDefaultSender && number.status === 'active' ? (
+                        {!number.isDefaultSender && number.status === 'active' && number.campaign?.status === 'approved' ? (
                           <Button
                             variant="outline"
                             onClick={() => handleMakeDefaultSender(number)}

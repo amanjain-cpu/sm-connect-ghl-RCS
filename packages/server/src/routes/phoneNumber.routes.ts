@@ -131,17 +131,21 @@ router.get(
 
 const purchaseBodySchema = z.object({
   phoneNumber: z.string().min(10).max(15),
-  campaignId: z.string().uuid(),
+  campaignId: z.string().uuid().optional(),
   friendlyName: z.string().max(100).optional(),
 });
 
 async function savePendingNumberPurchaseIntent(input: {
   organizationId: string;
-  campaignId: string;
+  campaignId?: string;
   phoneNumber: string;
   friendlyName?: string;
   error: AppError;
 }) {
+  if (!input.campaignId) {
+    return null;
+  }
+
   const campaign = await prisma.campaign.findFirst({
     where: {
       id: input.campaignId,
@@ -192,11 +196,6 @@ router.post(
     );
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
 
-    await phoneNumberService.assertCampaignReadyForNumberProvisioning(
-      req.user!.organizationId,
-      campaignId
-    );
-
     const result = await walletBillingService.preparePhoneNumberProvisioning(
       req.user!.organizationId
     );
@@ -238,8 +237,6 @@ router.post(
       'purchase numbers'
     );
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
-
-    await walletBillingService.assertCanUsePaidServices(req.user!.organizationId);
 
     try {
       const number = await phoneNumberService.purchaseNumber(

@@ -127,6 +127,9 @@ interface SubscriptionSummary {
     pricingTierLabel: string;
     walletBalance: number;
   };
+  rates: {
+    phoneNumberMonthly: number;
+  };
   usage: {
     activePhoneNumbers: number;
     heldInboundCount: number;
@@ -1198,8 +1201,8 @@ export function CampaignDetailPage() {
                           </p>
                         </div>
                         <Badge variant={selectedAvailableNumber === number.phoneNumber ? 'success' : 'secondary'}>
-                          {typeof number.monthlyPrice === 'number' && number.monthlyPrice > 0
-                            ? `$${number.monthlyPrice.toFixed(2)}/mo`
+                          {typeof subscriptionSummary?.rates.phoneNumberMonthly === 'number'
+                            ? `$${subscriptionSummary.rates.phoneNumberMonthly.toFixed(2)}/mo`
                             : 'Wallet pricing applies'}
                         </Badge>
                       </button>

@@ -442,6 +442,21 @@ class ApiClient {
     return this.post<any>('/billing/wallet/top-ups/checkout/complete', data);
   }
 
+  async createOnboardingCheckout(data: {
+    topUpAmount: number;
+    includeEnhancedVetting?: boolean;
+    includeCampaignExpedite?: boolean;
+  }) {
+    return this.post<{ checkoutUrl: string; sessionId: string; onboardingCart: any }>(
+      '/billing/wallet/onboarding/checkout',
+      data
+    );
+  }
+
+  async completeOnboardingCheckout(data: { sessionId: string }) {
+    return this.post<any>('/billing/wallet/onboarding/checkout/complete', data);
+  }
+
   async releaseHeldInboundMessages() {
     return this.post<any>('/billing/wallet/release-held');
   }
@@ -585,15 +600,16 @@ class ApiClient {
     >('/phone-numbers/purchase', data);
   }
 
-  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId: string; friendlyName?: string }) {
+  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId?: string; friendlyName?: string }) {
     return this.post<
       {
         mode: 'wallet_ready';
         activePhoneNumbers: number;
         phoneNumberMonthlyRate: number;
         pricingTier: string;
+        fundingSource: 'onboarding_package' | 'wallet';
         phoneNumber: string;
-        campaignId: string;
+        campaignId?: string;
         friendlyName?: string;
       }
     >('/phone-numbers/checkout', data);

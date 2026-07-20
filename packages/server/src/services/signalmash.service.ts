@@ -1774,16 +1774,7 @@ export class SignalmashService {
   /**
    * Purchase a phone number
    */
-  async purchaseNumber(
-    phoneNumber: string,
-    campaignId: string
-  ): Promise<{
-    numberId: string;
-    phoneNumber: string;
-    status: string;
-  }> {
-    this.assertSmsEnablementCampaignId(campaignId);
-
+  private async buyDid(phoneNumber: string) {
     const did = this.formatSmsEndpointPhone(phoneNumber);
     const purchaseResult = await this.requestForm<LegacyNumberPurchaseResult>(
       'POST',
@@ -1804,42 +1795,104 @@ export class SignalmashService {
       );
     }
 
+    return purchasedDid;
+  }
+
+  private async setPurchasedNumberConnection(purchasedDid: string) {
+    const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
+      'PUT',
+      '/setConnection',
+      new URLSearchParams({
+        DID: purchasedDid,
+        ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
+      })
+    );
+
+    if ((setConnectionResult.status ?? 200) >= 400) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        setConnectionResult.error?.message ||
+          setConnectionResult.message ||
+          `Connection assignment failed for DID ${purchasedDid}`
+      );
+    }
+  }
+
+  async enableSmsForNumber(
+    phoneNumber: string,
+    campaignId: string
+  ): Promise<void> {
+    this.assertSmsEnablementCampaignId(campaignId);
+
+    const did = this.formatSmsEndpointPhone(phoneNumber);
+    const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
+      'POST',
+      '/enablesms',
+      new URLSearchParams({
+        DID: did,
+        CampaignId: campaignId,
+      })
+    );
+
+    if ((enableSmsResult.status ?? 500) >= 400) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        enableSmsResult.error?.message ||
+          enableSmsResult.message ||
+          `SMS enablement failed for DID ${did}`
+      );
+    }
+
+    await this.setPurchasedNumberConnection(did);
+  }
+
+  async purchaseNumberWithoutSmsEnablement(
+    phoneNumber: string
+  ): Promise<{
+    numberId: string;
+    phoneNumber: string;
+    status: string;
+  }> {
+    const purchasedDid = await this.buyDid(phoneNumber);
+
     try {
-      const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
-        'POST',
-        '/enablesms',
-        new URLSearchParams({
-          DID: purchasedDid,
-          CampaignId: campaignId,
-        })
-      );
-
-      if ((enableSmsResult.status ?? 500) >= 400) {
-        throw new ExternalServiceError(
-          'Signalmash',
-          enableSmsResult.error?.message ||
-            enableSmsResult.message ||
-            `SMS enablement failed for DID ${purchasedDid}`
+      await this.setPurchasedNumberConnection(purchasedDid);
+    } catch (error) {
+      try {
+        await this.releaseNumber(purchasedDid);
+      } catch (releaseError) {
+        logger.warn(
+          {
+            numberId: purchasedDid,
+            error: releaseError instanceof Error ? releaseError.message : releaseError,
+          },
+          'Failed to release purchased DID after connection assignment error'
         );
       }
 
-      const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
-        'PUT',
-        '/setConnection',
-        new URLSearchParams({
-          DID: purchasedDid,
-          ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
-        })
-      );
+      throw error;
+    }
 
-      if ((setConnectionResult.status ?? 200) >= 400) {
-        throw new ExternalServiceError(
-          'Signalmash',
-          setConnectionResult.error?.message ||
-            setConnectionResult.message ||
-            `Connection assignment failed for DID ${purchasedDid}`
-        );
-      }
+    return {
+      numberId: purchasedDid,
+      phoneNumber: purchasedDid,
+      status: 'active',
+    };
+  }
+
+  async purchaseNumber(
+    phoneNumber: string,
+    campaignId: string
+  ): Promise<{
+    numberId: string;
+    phoneNumber: string;
+    status: string;
+  }> {
+    this.assertSmsEnablementCampaignId(campaignId);
+    const purchasedDid = await this.buyDid(phoneNumber);
+
+    try {
+      await this.enableSmsForNumber(purchasedDid, campaignId);
     } catch (error) {
       try {
         await this.releaseNumber(purchasedDid);

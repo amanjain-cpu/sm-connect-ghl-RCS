@@ -101,6 +101,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
   const [selectedNumber, setSelectedNumber] = useState<AvailableNumber | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
+  const [phoneNumberMonthlyRate, setPhoneNumberMonthlyRate] = useState<number | null>(null);
   const [friendlyName, setFriendlyName] = useState('');
   const [error, setError] = useState('');
   const [providerBlocked, setProviderBlocked] = useState<string | null>(null);
@@ -113,12 +114,19 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
 
   const loadCampaigns = async () => {
     try {
-      const response = await api.getCampaigns();
-      if (response.success && response.data) {
-        setCampaigns(response.data.filter(isPurchasableCampaign));
+      const [campaignsResponse, billingResponse] = await Promise.all([
+        api.getCampaigns(),
+        api.getWalletBillingSummary(),
+      ]);
+      if (campaignsResponse.success && campaignsResponse.data) {
+        setCampaigns(campaignsResponse.data.filter(isPurchasableCampaign));
+      }
+
+      if (billingResponse.success && billingResponse.data?.rates) {
+        setPhoneNumberMonthlyRate(billingResponse.data.rates.phoneNumberMonthly);
       }
     } catch (error) {
-      console.error('Failed to load campaigns:', error);
+      console.error('Failed to load number purchase setup:', error);
     }
   };
 
@@ -174,14 +182,14 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
     try {
       const response = await api.createPhoneNumberCheckout({
         phoneNumber: selectedNumber.phoneNumber,
-        campaignId: selectedCampaignId,
+        campaignId: selectedCampaignId || undefined,
         friendlyName: friendlyName || undefined,
       });
 
       if (response.success && response.data?.mode === 'wallet_ready') {
         const purchaseResponse = await api.purchasePhoneNumber({
           phoneNumber: selectedNumber.phoneNumber,
-          campaignId: selectedCampaignId,
+          campaignId: selectedCampaignId || undefined,
           friendlyName: friendlyName || undefined,
         });
         await onPurchased();
@@ -191,8 +199,10 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
           const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId);
           notify.success(
             'Number purchased',
-            selectedCampaign?.status === 'pending_approval'
-              ? 'The selected phone number was linked and saved as the default sender. SMS/MMS starts after campaign approval.'
+            !selectedCampaign
+              ? 'The selected phone number was purchased. SMS/MMS starts after an approved campaign is linked.'
+              : selectedCampaign.status === 'pending_approval'
+              ? 'The selected phone number was purchased and queued for campaign assignment. SMS/MMS starts after campaign approval.'
               : 'The selected phone number was linked and saved as the default sender.'
           );
         }
@@ -226,6 +236,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
     setAvailableNumbers([]);
     setSelectedNumber(null);
     setSelectedCampaignId('');
+    setPhoneNumberMonthlyRate(null);
     setFriendlyName('');
     setError('');
     onClose();
@@ -244,7 +255,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
           <DialogDescription>
             {step === 'search' && 'Find available phone numbers by area code or containing specific digits'}
             {step === 'select' && `Found ${availableNumbers.length} available numbers`}
-            {step === 'purchase' && 'Configure and purchase your selected number against a submitted campaign'}
+            {step === 'purchase' && 'Purchase the selected number now; campaign assignment can happen after approval'}
           </DialogDescription>
         </DialogHeader>
 
@@ -429,7 +440,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                             <div className="text-right">
                               <p className="text-sm text-muted-foreground">Pricing</p>
                               <p className="font-semibold text-lg">
-                                {formatNumberPricing(number.monthlyPrice)}
+                                {formatNumberPricing(phoneNumberMonthlyRate)}
                               </p>
                             </div>
                           </div>
@@ -471,7 +482,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                       <div className="text-right">
                         <p className="text-sm text-muted-foreground">Pricing</p>
                         <p className="font-bold text-2xl text-primary">
-                          {formatNumberPricing(selectedNumber.monthlyPrice)}
+                          {formatNumberPricing(phoneNumberMonthlyRate)}
                         </p>
                       </div>
                     </div>
@@ -490,13 +501,13 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                   </div>
 
                   <div className="space-y-2">
-                    <Label>Assign to Submitted Campaign</Label>
+                    <Label>Assign to Campaign (optional)</Label>
                     <Select
                       value={selectedCampaignId}
                       onValueChange={setSelectedCampaignId}
                     >
                       <SelectTrigger>
-                        <SelectValue placeholder="Select a submitted campaign" />
+                        <SelectValue placeholder="Leave unassigned until approval" />
                       </SelectTrigger>
                       <SelectContent>
                         {campaigns.map((campaign) => (
@@ -506,15 +517,25 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                         ))}
                       </SelectContent>
                     </Select>
+                    {selectedCampaignId ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedCampaignId('')}
+                      >
+                        Leave unassigned
+                      </Button>
+                    ) : null}
                     <p className="text-xs text-muted-foreground">
-                      Purchase and default-sender setup can be saved now. SMS/MMS starts after the selected campaign is approved.
+                      Buying is available now. SMS/MMS starts only after an approved campaign is linked.
                     </p>
                   </div>
                 </div>
 
                 {campaigns.length === 0 && (
-                  <p className="text-sm text-destructive">
-                    No submitted campaigns are available yet. Submit a campaign to Signalmash before purchasing a number.
+                  <p className="text-sm text-muted-foreground">
+                    No submitted campaigns are available yet. The number will be kept unassigned after purchase.
                   </p>
                 )}
 
@@ -525,7 +546,6 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                 <Button
                   onClick={handlePurchase}
                   isLoading={isPurchasing}
-                  disabled={!selectedCampaignId || campaigns.length === 0}
                   className="w-full"
                   leftIcon={<Check className="h-4 w-4" />}
                 >

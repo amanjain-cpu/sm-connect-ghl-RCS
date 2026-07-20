@@ -1,6 +1,7 @@
 import {
   Prisma,
   type BillingAccount,
+  type BillingChargeKind,
   type BillingLedgerCategory,
   type BillingPricingTier,
   type Message,
@@ -98,6 +99,43 @@ const PRICING_TIERS = {
 
 type PricingTierDefinition = (typeof PRICING_TIERS)[BillingPricingTier];
 type AdministrativeFeeKind = 'enhanced_vetting' | 'campaign_expedite';
+export type OnboardingLineItemKey =
+  | 'wallet_topup'
+  | 'basic_setup'
+  | 'campaign_mrc'
+  | 'phone_number_mrc'
+  | 'enhanced_vetting'
+  | 'campaign_expedite';
+
+export interface OnboardingLineItem {
+  key: OnboardingLineItemKey;
+  label: string;
+  amount: number;
+  required: boolean;
+  selected: boolean;
+  category: BillingLedgerCategory | 'non_wallet_fee';
+  description: string;
+}
+
+interface OnboardingCartOptions {
+  topUpAmount?: number;
+  includeEnhancedVetting?: boolean;
+  includeCampaignExpedite?: boolean;
+}
+
+interface OnboardingSessionAmounts {
+  topUpAmount: number;
+  basicSetupAmount: number;
+  campaignMrcAmount: number;
+  phoneNumberMrcAmount: number;
+  enhancedVettingAmount: number;
+  campaignExpediteAmount: number;
+  totalAmount: number;
+  pricingTier: BillingPricingTier;
+  includeEnhancedVetting: boolean;
+  includeCampaignExpedite: boolean;
+  hasExistingNonReleasedPhoneNumber: boolean;
+}
 
 interface MessageBillingEstimate {
   catalogVersion: string;
@@ -146,6 +184,23 @@ function asRecord(value: Prisma.JsonValue | null | undefined): Record<string, un
   }
 
   return value as Record<string, unknown>;
+}
+
+function parseMoneyMetadata(value: string | undefined, field: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new AppError(
+      `Checkout session is missing valid ${field} metadata.`,
+      'CHECKOUT_METADATA_INVALID',
+      400
+    );
+  }
+
+  return roundLedger(parsed);
+}
+
+function parseBooleanMetadata(value: string | undefined) {
+  return value === 'true';
 }
 
 function getCycleMonth(date = new Date()) {
@@ -295,6 +350,136 @@ export class WalletBillingService {
     return estimateMessageCharge(input);
   }
 
+  private sumLineItems(lineItems: OnboardingLineItem[]) {
+    return roundLedger(
+      lineItems.reduce((total, item) => total + (item.selected ? item.amount : 0), 0)
+    );
+  }
+
+  async getOnboardingCart(
+    organizationId: string,
+    options: OnboardingCartOptions = {}
+  ) {
+    const topUpAmount = roundLedger(options.topUpAmount ?? MIN_TOP_UP_AMOUNT);
+    const pricingTier = this.getTopUpPricingTier(topUpAmount);
+    const tier = PRICING_TIERS[pricingTier];
+    const account = await this.getOrCreateAccount(organizationId);
+    const [verifiedBrandCount, approvedCampaignCount, nonReleasedPhoneNumberCount] =
+      await Promise.all([
+        prisma.brand.count({
+          where: {
+            organizationId,
+            status: 'verified',
+          },
+        }),
+        prisma.campaign.count({
+          where: {
+            organizationId,
+            status: 'approved',
+          },
+        }),
+        prisma.phoneNumber.count({
+          where: {
+            organizationId,
+            status: { not: 'released' },
+          },
+        }),
+      ]);
+
+    const hasExistingNonReleasedPhoneNumber = nonReleasedPhoneNumberCount > 0;
+    const isNewCustomer =
+      verifiedBrandCount === 0 &&
+      approvedCampaignCount === 0 &&
+      !hasExistingNonReleasedPhoneNumber;
+    const requiredLineItems: OnboardingLineItem[] = [
+      {
+        key: 'wallet_topup',
+        label: `Wallet top-up (${PRICING_TIERS[pricingTier].label} tier)`,
+        amount: topUpAmount,
+        required: true,
+        selected: true,
+        category: 'wallet_topup',
+        description: 'Spendable balance for SMS/MMS traffic and future usage charges.',
+      },
+    ];
+
+    if (!account.setupFeeChargedAt) {
+      requiredLineItems.push({
+        key: 'basic_setup',
+        label: 'Basic Setup',
+        amount: tier.basicSetupFee,
+        required: true,
+        selected: true,
+        category: 'setup_fee',
+        description: 'One-time account setup paid outside the spendable wallet balance.',
+      });
+    }
+
+    if (approvedCampaignCount === 0) {
+      requiredLineItems.push({
+        key: 'campaign_mrc',
+        label: 'First Month Campaign MRC',
+        amount: tier.campaignMonthlyRate,
+        required: true,
+        selected: true,
+        category: 'mrc_campaign',
+        description: 'First month of campaign recurring cost for the initial 10DLC campaign.',
+      });
+    }
+
+    if (!hasExistingNonReleasedPhoneNumber) {
+      requiredLineItems.push({
+        key: 'phone_number_mrc',
+        label: 'First Month Phone Number MRC',
+        amount: tier.phoneNumberMonthlyRate,
+        required: true,
+        selected: true,
+        category: 'mrc_phone_number',
+        description: 'First month for the first purchased phone number.',
+      });
+    }
+
+    const optionalLineItems: OnboardingLineItem[] = [
+      {
+        key: 'enhanced_vetting',
+        label: 'Enhanced Vetting Setup - Optional',
+        amount: tier.enhancedVettingFee,
+        required: false,
+        selected: options.includeEnhancedVetting === true,
+        category: 'enhanced_vetting',
+        description: 'Optional enhanced vetting support.',
+      },
+      {
+        key: 'campaign_expedite',
+        label: 'Campaign Expedite Setup - Optional',
+        amount: tier.campaignExpediteFee,
+        required: false,
+        selected: options.includeCampaignExpedite === true,
+        category: 'campaign_expedite',
+        description: 'Optional expedited campaign setup support.',
+      },
+    ];
+
+    const requiredTotal = this.sumLineItems(requiredLineItems);
+    const selectedOptionalTotal = this.sumLineItems(optionalLineItems);
+
+    return {
+      isNewCustomer,
+      requiresOnboardingPackage:
+        !account.setupFeeChargedAt ||
+        verifiedBrandCount === 0 ||
+        approvedCampaignCount === 0 ||
+        !hasExistingNonReleasedPhoneNumber,
+      topUpAmount,
+      pricingTier,
+      requiredLineItems,
+      optionalLineItems,
+      hasExistingNonReleasedPhoneNumber,
+      totalWithDefaults: requiredTotal,
+      totalWithSelectedOptions: roundLedger(requiredTotal + selectedOptionalTotal),
+    };
+  }
+
   private async getOrganizationRecord(organizationId: string) {
     const organization = await prisma.organization.findUnique({
       where: { id: organizationId },
@@ -427,6 +612,56 @@ export class WalletBillingService {
     });
 
     return customer.id;
+  }
+
+  private async syncPaidCheckoutSessionPaymentDetails(
+    organizationId: string,
+    session: StripeCheckoutSession
+  ) {
+    const account = await this.getOrCreateAccount(organizationId);
+
+    if (session.customer && session.customer !== account.stripeCustomerId) {
+      await prisma.billingAccount.update({
+        where: { organizationId },
+        data: {
+          stripeCustomerId: session.customer,
+        },
+      });
+    }
+
+    if (session.payment_intent) {
+      const paymentIntentId =
+        typeof session.payment_intent === 'string'
+          ? session.payment_intent
+          : session.payment_intent.id;
+      if (paymentIntentId) {
+        const paymentIntent = await stripeService.getPaymentIntent(paymentIntentId);
+        const paymentMethodId =
+          typeof paymentIntent.payment_method === 'string'
+            ? paymentIntent.payment_method
+            : paymentIntent.payment_method?.id ?? null;
+
+        if (paymentMethodId) {
+          const customerId = session.customer ?? account.stripeCustomerId;
+          if (customerId) {
+            await stripeService.updateCustomerDefaultPaymentMethod({
+              customerId,
+              paymentMethodId,
+            });
+          }
+
+          await prisma.billingAccount.update({
+            where: { organizationId },
+            data: {
+              stripeCustomerId: customerId ?? account.stripeCustomerId,
+              stripeDefaultPaymentMethodId: paymentMethodId,
+            },
+          });
+        }
+      }
+    }
+
+    return this.getOrCreateAccount(organizationId);
   }
 
   private assertAccountActive(account: BillingAccount) {
@@ -668,6 +903,57 @@ export class WalletBillingService {
           metadata: asInputJson(input.metadata),
         },
       });
+    });
+  }
+
+  private async upsertBillingCharge(input: {
+    organizationId: string;
+    chargeKey: string;
+    kind: BillingChargeKind;
+    amount: number;
+    description: string;
+    stripeCheckoutSessionId?: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    const existing = await prisma.billingCharge.findUnique({
+      where: { chargeKey: input.chargeKey },
+    });
+
+    if (existing) {
+      const existingMetadata = asRecord(existing.metadata);
+      const nextMetadata = {
+        ...(input.metadata ?? {}),
+        ...(existingMetadata.consumedByPhoneNumberId
+          ? {
+              consumedByPhoneNumberId: existingMetadata.consumedByPhoneNumberId,
+              consumedByPhoneNumber: existingMetadata.consumedByPhoneNumber,
+              consumedAt: existingMetadata.consumedAt,
+            }
+          : {}),
+      };
+
+      return prisma.billingCharge.update({
+        where: { id: existing.id },
+        data: {
+          status: 'succeeded',
+          processedAt: new Date(),
+          metadata: asInputJson(nextMetadata),
+        },
+      });
+    }
+
+    return prisma.billingCharge.create({
+      data: {
+        chargeKey: input.chargeKey,
+        kind: input.kind,
+        status: 'succeeded',
+        amount: roundLedger(input.amount).toFixed(4),
+        description: input.description,
+        stripeCheckoutSessionId: input.stripeCheckoutSessionId,
+        organizationId: input.organizationId,
+        processedAt: new Date(),
+        metadata: asInputJson(input.metadata),
+      },
     });
   }
 
@@ -1031,6 +1317,73 @@ export class WalletBillingService {
     };
   }
 
+  private getOnboardingLineAmount(
+    cart: Awaited<ReturnType<WalletBillingService['getOnboardingCart']>>,
+    key: OnboardingLineItemKey
+  ) {
+    return (
+      cart.requiredLineItems.find((item) => item.key === key)?.amount ??
+      cart.optionalLineItems.find((item) => item.key === key && item.selected)?.amount ??
+      0
+    );
+  }
+
+  async createOnboardingCheckout(input: {
+    organizationId: string;
+    topUpAmount: number;
+    includeEnhancedVetting?: boolean;
+    includeCampaignExpedite?: boolean;
+  }) {
+    const cart = await this.getOnboardingCart(input.organizationId, {
+      topUpAmount: input.topUpAmount,
+      includeEnhancedVetting: input.includeEnhancedVetting,
+      includeCampaignExpedite: input.includeCampaignExpedite,
+    });
+    const organization = await this.getOrganizationRecord(input.organizationId);
+    const account = await this.getOrCreateAccount(input.organizationId);
+    const customerId = await this.ensureStripeCustomer(account, organization);
+
+    const basicSetupAmount = this.getOnboardingLineAmount(cart, 'basic_setup');
+    const campaignMrcAmount = this.getOnboardingLineAmount(cart, 'campaign_mrc');
+    const phoneNumberMrcAmount = this.getOnboardingLineAmount(cart, 'phone_number_mrc');
+    const enhancedVettingAmount = this.getOnboardingLineAmount(cart, 'enhanced_vetting');
+    const campaignExpediteAmount = this.getOnboardingLineAmount(cart, 'campaign_expedite');
+
+    const session = await stripeService.createOneTimeCheckoutSession({
+      organizationId: input.organizationId,
+      customerId,
+      customerEmail: organization.email,
+      customerName: organization.name,
+      amountCents: toCents(cart.totalWithSelectedOptions),
+      successUrl: `${config.webUrl}/subscriptions?onboarding=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${config.webUrl}/subscriptions?onboarding=cancelled`,
+      description: 'Signalmash Connect onboarding package',
+      savePaymentMethod: true,
+      metadata: {
+        purpose: 'wallet_onboarding',
+        organizationId: input.organizationId,
+        topUpAmount: cart.topUpAmount.toFixed(2),
+        pricingTier: cart.pricingTier,
+        basicSetupAmount: basicSetupAmount.toFixed(2),
+        campaignMrcAmount: campaignMrcAmount.toFixed(2),
+        phoneNumberMrcAmount: phoneNumberMrcAmount.toFixed(2),
+        enhancedVettingAmount: enhancedVettingAmount.toFixed(2),
+        campaignExpediteAmount: campaignExpediteAmount.toFixed(2),
+        totalAmount: cart.totalWithSelectedOptions.toFixed(2),
+        includeEnhancedVetting: String(input.includeEnhancedVetting === true),
+        includeCampaignExpedite: String(input.includeCampaignExpedite === true),
+        hasExistingNonReleasedPhoneNumber: String(cart.hasExistingNonReleasedPhoneNumber),
+        catalogVersion: PRICE_CATALOG_VERSION,
+      },
+    });
+
+    return {
+      checkoutUrl: session.url,
+      sessionId: session.id,
+      onboardingCart: cart,
+    };
+  }
+
   async completeWalletTopUpCheckout(organizationId: string, sessionId: string) {
     const session = await stripeService.getCheckoutSession(sessionId);
     await this.applyWalletTopUpSession(organizationId, session);
@@ -1054,47 +1407,7 @@ export class WalletBillingService {
     }
 
     const pricingTier = this.getTopUpPricingTier(amountDollars);
-    const account = await this.getOrCreateAccount(organizationId);
-
-    if (session.customer && session.customer !== account.stripeCustomerId) {
-      await prisma.billingAccount.update({
-        where: { organizationId },
-        data: {
-          stripeCustomerId: session.customer,
-        },
-      });
-    }
-
-    if (session.payment_intent) {
-      const paymentIntentId =
-        typeof session.payment_intent === 'string'
-          ? session.payment_intent
-          : session.payment_intent.id;
-      if (paymentIntentId) {
-        const paymentIntent = await stripeService.getPaymentIntent(paymentIntentId);
-        const paymentMethodId =
-          typeof paymentIntent.payment_method === 'string'
-            ? paymentIntent.payment_method
-            : paymentIntent.payment_method?.id ?? null;
-
-        if (paymentMethodId) {
-          const customerId = session.customer ?? account.stripeCustomerId;
-          if (customerId) {
-            await stripeService.updateCustomerDefaultPaymentMethod({
-              customerId,
-              paymentMethodId,
-            });
-          }
-
-          await prisma.billingAccount.update({
-            where: { organizationId },
-            data: {
-              stripeDefaultPaymentMethodId: paymentMethodId,
-            },
-          });
-        }
-      }
-    }
+    await this.syncPaidCheckoutSessionPaymentDetails(organizationId, session);
 
     await this.creditWallet({
       organizationId,
@@ -1130,6 +1443,214 @@ export class WalletBillingService {
       update: {
         status: 'succeeded',
         processedAt: new Date(),
+      },
+    });
+
+    await this.clearBillingSuspension(organizationId);
+  }
+
+  async completeOnboardingCheckout(organizationId: string, sessionId: string) {
+    const session = await stripeService.getCheckoutSession(sessionId);
+    await this.applyOnboardingCheckoutSession(organizationId, session);
+    await this.releaseHeldInboundMessages(organizationId);
+    return this.getWalletSummary(organizationId);
+  }
+
+  private parseOnboardingSessionAmounts(
+    metadata: Record<string, string>
+  ): OnboardingSessionAmounts {
+    const topUpAmount = parseMoneyMetadata(metadata.topUpAmount, 'topUpAmount');
+    const basicSetupAmount = parseMoneyMetadata(metadata.basicSetupAmount ?? '0', 'basicSetupAmount');
+    const campaignMrcAmount = parseMoneyMetadata(metadata.campaignMrcAmount ?? '0', 'campaignMrcAmount');
+    const phoneNumberMrcAmount = parseMoneyMetadata(
+      metadata.phoneNumberMrcAmount ?? '0',
+      'phoneNumberMrcAmount'
+    );
+    const enhancedVettingAmount = parseMoneyMetadata(
+      metadata.enhancedVettingAmount ?? '0',
+      'enhancedVettingAmount'
+    );
+    const campaignExpediteAmount = parseMoneyMetadata(
+      metadata.campaignExpediteAmount ?? '0',
+      'campaignExpediteAmount'
+    );
+    const totalAmount = parseMoneyMetadata(metadata.totalAmount, 'totalAmount');
+    const computedTotal = roundLedger(
+      topUpAmount +
+      basicSetupAmount +
+      campaignMrcAmount +
+      phoneNumberMrcAmount +
+      enhancedVettingAmount +
+      campaignExpediteAmount
+    );
+
+    if (Math.abs(totalAmount - computedTotal) > 0.00001) {
+      throw new AppError(
+        'Checkout session line-item metadata does not match the package total.',
+        'CHECKOUT_METADATA_INVALID',
+        400
+      );
+    }
+
+    return {
+      topUpAmount,
+      basicSetupAmount,
+      campaignMrcAmount,
+      phoneNumberMrcAmount,
+      enhancedVettingAmount,
+      campaignExpediteAmount,
+      totalAmount,
+      pricingTier: this.getTopUpPricingTier(topUpAmount),
+      includeEnhancedVetting: parseBooleanMetadata(metadata.includeEnhancedVetting),
+      includeCampaignExpedite: parseBooleanMetadata(metadata.includeCampaignExpedite),
+      hasExistingNonReleasedPhoneNumber: parseBooleanMetadata(
+        metadata.hasExistingNonReleasedPhoneNumber
+      ),
+    };
+  }
+
+  private async applyOnboardingCheckoutSession(
+    organizationId: string,
+    session: StripeCheckoutSession
+  ) {
+    const metadata = session.metadata ?? {};
+    if (metadata.organizationId !== organizationId || metadata.purpose !== 'wallet_onboarding') {
+      throw new AppError('Checkout session does not belong to this onboarding package.', 'CHECKOUT_SESSION_MISMATCH', 400);
+    }
+
+    if (session.payment_status && session.payment_status !== 'paid') {
+      throw new AppError('Onboarding checkout has not been paid yet.', 'CHECKOUT_NOT_PAID', 400);
+    }
+
+    const amounts = this.parseOnboardingSessionAmounts(metadata);
+    const now = new Date();
+
+    await this.syncPaidCheckoutSessionPaymentDetails(organizationId, session);
+
+    await this.creditWallet({
+      organizationId,
+      ledgerKey: `onboarding:${session.id}:wallet-topup`,
+      amount: amounts.topUpAmount,
+      category: 'wallet_topup',
+      description: 'Stripe onboarding wallet top-up',
+      sourceId: session.id,
+      pricingTier: amounts.pricingTier,
+      metadata: {
+        stripeCheckoutSessionId: session.id,
+        pricingTier: amounts.pricingTier,
+        catalogVersion: PRICE_CATALOG_VERSION,
+        purpose: 'wallet_onboarding',
+      },
+    });
+
+    await this.upsertBillingCharge({
+      organizationId,
+      chargeKey: `onboarding:${session.id}:wallet-topup`,
+      kind: 'message_credit_topup',
+      amount: amounts.topUpAmount,
+      description: 'Stripe onboarding wallet top-up',
+      stripeCheckoutSessionId: session.id,
+      metadata: {
+        purpose: 'wallet_onboarding',
+        pricingTier: amounts.pricingTier,
+        catalogVersion: PRICE_CATALOG_VERSION,
+      },
+    });
+
+    const nonWalletChargeMetadata = {
+      purpose: 'wallet_onboarding',
+      stripeCheckoutSessionId: session.id,
+      pricingTier: amounts.pricingTier,
+      catalogVersion: PRICE_CATALOG_VERSION,
+    };
+
+    if (amounts.basicSetupAmount > 0) {
+      await this.upsertBillingCharge({
+        organizationId,
+        chargeKey: `onboarding:${session.id}:basic-setup`,
+        kind: 'invoice_adjustment',
+        amount: amounts.basicSetupAmount,
+        description: 'One-time basic setup fee',
+        metadata: {
+          ...nonWalletChargeMetadata,
+          feeKind: 'basic_setup',
+          ledgerCategory: 'setup_fee',
+        },
+      });
+    }
+
+    if (amounts.campaignMrcAmount > 0) {
+      await this.upsertBillingCharge({
+        organizationId,
+        chargeKey: `onboarding:${session.id}:campaign-mrc`,
+        kind: 'invoice_adjustment',
+        amount: amounts.campaignMrcAmount,
+        description: 'First month campaign recurring charge',
+        metadata: {
+          ...nonWalletChargeMetadata,
+          feeKind: 'first_month_campaign_mrc',
+          ledgerCategory: 'mrc_campaign',
+        },
+      });
+    }
+
+    if (amounts.phoneNumberMrcAmount > 0) {
+      await this.upsertBillingCharge({
+        organizationId,
+        chargeKey: `onboarding:${session.id}:phone-number-mrc`,
+        kind: 'phone_number_mrc',
+        amount: amounts.phoneNumberMrcAmount,
+        description: 'First month phone number recurring charge',
+        metadata: {
+          ...nonWalletChargeMetadata,
+          feeKind: 'first_month_phone_number_mrc',
+          ledgerCategory: 'mrc_phone_number',
+          consumedByPhoneNumberId: null,
+          consumedAt: null,
+        },
+      });
+    }
+
+    if (amounts.enhancedVettingAmount > 0) {
+      await this.upsertBillingCharge({
+        organizationId,
+        chargeKey: `onboarding:${session.id}:enhanced-vetting`,
+        kind: 'invoice_adjustment',
+        amount: amounts.enhancedVettingAmount,
+        description: 'Enhanced vetting setup fee',
+        metadata: {
+          ...nonWalletChargeMetadata,
+          feeKind: 'enhanced_vetting',
+          ledgerCategory: 'enhanced_vetting',
+        },
+      });
+    }
+
+    if (amounts.campaignExpediteAmount > 0) {
+      await this.upsertBillingCharge({
+        organizationId,
+        chargeKey: `onboarding:${session.id}:campaign-expedite`,
+        kind: 'invoice_adjustment',
+        amount: amounts.campaignExpediteAmount,
+        description: 'Campaign expedite setup fee',
+        metadata: {
+          ...nonWalletChargeMetadata,
+          feeKind: 'campaign_expedite',
+          ledgerCategory: 'campaign_expedite',
+        },
+      });
+    }
+
+    await prisma.billingAccount.update({
+      where: { organizationId },
+      data: {
+        status: 'active',
+        suspendedAt: null,
+        suspensionReason: null,
+        pricingTier: amounts.pricingTier,
+        mrcAnchorAt: now,
+        mrcNextRunAt: addMonths(now, 1),
+        ...(amounts.basicSetupAmount > 0 ? { setupFeeChargedAt: now } : {}),
       },
     });
 
@@ -1237,20 +1758,169 @@ export class WalletBillingService {
     });
   }
 
-  async preparePhoneNumberProvisioning(organizationId: string) {
+  private async findUnconsumedOnboardingPhoneNumberCharge(organizationId: string) {
+    const charges = await prisma.billingCharge.findMany({
+      where: {
+        organizationId,
+        kind: 'phone_number_mrc',
+        status: 'succeeded',
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return charges.find((charge) => {
+      const metadata = asRecord(charge.metadata);
+      return (
+        metadata.purpose === 'wallet_onboarding' &&
+        metadata.feeKind === 'first_month_phone_number_mrc' &&
+        !metadata.consumedByPhoneNumberId
+      );
+    }) ?? null;
+  }
+
+  async assertCanFundPhoneNumberPurchase(organizationId: string) {
     const account = await this.assertCanUsePaidServices(organizationId);
+    const phoneNumberMonthlyRate = PRICING_TIERS[account.pricingTier].phoneNumberMonthlyRate;
+    const onboardingPackageCharge = await this.findUnconsumedOnboardingPhoneNumberCharge(
+      organizationId
+    );
+
+    if (!onboardingPackageCharge && toAmount(account.walletBalance) < phoneNumberMonthlyRate) {
+      throw new AppError(
+        'Wallet balance is too low for the first-month phone-number charge.',
+        'WALLET_FUNDS_REQUIRED',
+        402,
+        true,
+        {
+          requiredAmount: phoneNumberMonthlyRate,
+          walletBalance: toAmount(account.walletBalance),
+          category: 'mrc_phone_number',
+        }
+      );
+    }
+
     const activePhoneNumbers = await prisma.phoneNumber.count({
       where: {
         organizationId,
-        status: 'active',
+        status: { not: 'released' },
       },
     });
 
     return {
       mode: 'wallet_ready' as const,
       activePhoneNumbers,
-      phoneNumberMonthlyRate: PRICING_TIERS[account.pricingTier].phoneNumberMonthlyRate,
+      phoneNumberMonthlyRate,
       pricingTier: account.pricingTier,
+      fundingSource: onboardingPackageCharge ? 'onboarding_package' : 'wallet',
+    };
+  }
+
+  async preparePhoneNumberProvisioning(organizationId: string) {
+    return this.assertCanFundPhoneNumberPurchase(organizationId);
+  }
+
+  async recordPhoneNumberFirstMonthCharge(input: {
+    organizationId: string;
+    phoneNumberId: string;
+    phoneNumber: string;
+  }) {
+    const onboardingLedgerKey = `phone-number:${input.phoneNumberId}:first-month-mrc:onboarding-package`;
+    const walletLedgerKey = `phone-number:${input.phoneNumberId}:first-month-mrc`;
+    const existingLedgerEntry = await prisma.billingLedgerEntry.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        ledgerKey: {
+          in: [onboardingLedgerKey, walletLedgerKey],
+        },
+      },
+    });
+
+    if (existingLedgerEntry) {
+      return {
+        fundingSource: existingLedgerEntry.ledgerKey === onboardingLedgerKey
+          ? 'onboarding_package' as const
+          : 'wallet' as const,
+        amount: toAmount(existingLedgerEntry.amount),
+      };
+    }
+
+    const account = await this.assertCanUsePaidServices(input.organizationId);
+    const tier = PRICING_TIERS[account.pricingTier];
+    const onboardingPackageCharge = await this.findUnconsumedOnboardingPhoneNumberCharge(
+      input.organizationId
+    );
+
+    if (onboardingPackageCharge) {
+      const metadata = asRecord(onboardingPackageCharge.metadata);
+      await prisma.billingCharge.update({
+        where: { id: onboardingPackageCharge.id },
+        data: {
+          metadata: asInputJson({
+            ...metadata,
+            consumedByPhoneNumberId: input.phoneNumberId,
+            consumedByPhoneNumber: input.phoneNumber,
+            consumedAt: new Date().toISOString(),
+          }),
+        },
+      });
+
+      await this.writeZeroAmountLedgerEntry({
+        organizationId: input.organizationId,
+        account,
+        ledgerKey: onboardingLedgerKey,
+        category: 'mrc_phone_number',
+        description: 'First month phone number recurring charge prepaid in onboarding package',
+        sourceId: input.phoneNumberId,
+        metadata: {
+          phoneNumberId: input.phoneNumberId,
+          phoneNumber: input.phoneNumber,
+          onboardingChargeKey: onboardingPackageCharge.chargeKey,
+          catalogVersion: PRICE_CATALOG_VERSION,
+        },
+      });
+
+      return {
+        fundingSource: 'onboarding_package' as const,
+        amount: toAmount(onboardingPackageCharge.amount),
+      };
+    }
+
+    await this.debitWallet({
+      organizationId: input.organizationId,
+      ledgerKey: walletLedgerKey,
+      amount: tier.phoneNumberMonthlyRate,
+      category: 'mrc_phone_number',
+      description: 'First month phone number recurring charge',
+      sourceId: input.phoneNumberId,
+      requireFunds: true,
+      metadata: {
+        phoneNumberId: input.phoneNumberId,
+        phoneNumber: input.phoneNumber,
+        unitRate: tier.phoneNumberMonthlyRate,
+        pricingTier: account.pricingTier,
+        catalogVersion: PRICE_CATALOG_VERSION,
+      },
+    });
+
+    await this.upsertBillingCharge({
+      organizationId: input.organizationId,
+      chargeKey: walletLedgerKey,
+      kind: 'phone_number_mrc',
+      amount: tier.phoneNumberMonthlyRate,
+      description: 'First month phone number recurring charge',
+      metadata: {
+        purpose: 'phone_number_purchase',
+        feeKind: 'first_month_phone_number_mrc',
+        phoneNumberId: input.phoneNumberId,
+        phoneNumber: input.phoneNumber,
+        pricingTier: account.pricingTier,
+        catalogVersion: PRICE_CATALOG_VERSION,
+      },
+    });
+
+    return {
+      fundingSource: 'wallet' as const,
+      amount: tier.phoneNumberMonthlyRate,
     };
   }
 
@@ -1522,6 +2192,8 @@ export class WalletBillingService {
       }
     }
 
+    const onboardingCart = await this.getOnboardingCart(organizationId);
+
     return {
       account: {
         id: account.id,
@@ -1536,6 +2208,7 @@ export class WalletBillingService {
         mrcNextRunAt: account.mrcNextRunAt,
         setupFeeChargedAt: account.setupFeeChargedAt,
       },
+      onboardingCart,
       pricingCatalog: this.getPricingCatalog(),
       carrierSurcharges: [...CARRIER_SURCHARGES],
       carrierSurchargeNote: CARRIER_SURCHARGE_NOTE,
@@ -1587,6 +2260,12 @@ export class WalletBillingService {
 
       if (organizationId && metadata.purpose === 'wallet_topup') {
         await this.applyWalletTopUpSession(organizationId, session);
+        await this.releaseHeldInboundMessages(organizationId);
+        return { handled: true, eventType: event.type, purpose: metadata.purpose };
+      }
+
+      if (organizationId && metadata.purpose === 'wallet_onboarding') {
+        await this.applyOnboardingCheckoutSession(organizationId, session);
         await this.releaseHeldInboundMessages(organizationId);
         return { handled: true, eventType: event.type, purpose: metadata.purpose };
       }

@@ -40,6 +40,12 @@ const walletTopupSchema = z.object({
   amountDollars: z.coerce.number().min(250).max(100000),
 });
 
+const onboardingCheckoutSchema = z.object({
+  topUpAmount: z.coerce.number().min(250).max(100000),
+  includeEnhancedVetting: z.boolean().optional(),
+  includeCampaignExpedite: z.boolean().optional(),
+});
+
 const authorizeMarketplaceBillingSchema = z.object({
   clientId: z.string().min(8),
   installType: z.string().min(1),
@@ -106,6 +112,32 @@ router.post(
   validate({ body: completeCheckoutSchema }),
   asyncHandler(async (req, res) => {
     const summary = await walletBillingService.completeWalletTopUpCheckout(
+      req.user!.organizationId,
+      req.body.sessionId
+    );
+    res.json({ success: true, data: summary });
+  })
+);
+
+router.post(
+  '/wallet/onboarding/checkout',
+  validate({ body: onboardingCheckoutSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await walletBillingService.createOnboardingCheckout({
+      organizationId: req.user!.organizationId,
+      topUpAmount: req.body.topUpAmount,
+      includeEnhancedVetting: req.body.includeEnhancedVetting,
+      includeCampaignExpedite: req.body.includeCampaignExpedite,
+    });
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  '/wallet/onboarding/checkout/complete',
+  validate({ body: completeCheckoutSchema }),
+  asyncHandler(async (req, res) => {
+    const summary = await walletBillingService.completeOnboardingCheckout(
       req.user!.organizationId,
       req.body.sessionId
     );

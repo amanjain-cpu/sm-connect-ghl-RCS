@@ -50,6 +50,30 @@ interface WalletBillingSummary {
   }>;
   carrierSurchargeNote?: string;
   prepayBalanceNote?: string;
+  onboardingCart?: {
+    isNewCustomer: boolean;
+    requiresOnboardingPackage?: boolean;
+    topUpAmount: number;
+    requiredLineItems: Array<{
+      key: string;
+      label: string;
+      amount: number;
+      required: boolean;
+      selected: boolean;
+      description: string;
+    }>;
+    optionalLineItems: Array<{
+      key: 'enhanced_vetting' | 'campaign_expedite' | string;
+      label: string;
+      amount: number;
+      required: boolean;
+      selected: boolean;
+      description: string;
+    }>;
+    hasExistingNonReleasedPhoneNumber: boolean;
+    totalWithDefaults: number;
+    totalWithSelectedOptions: number;
+  };
   topUpOptions: number[];
   usage: {
     cycleMonth: string;
@@ -117,12 +141,34 @@ export function SubscriptionsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isOpeningPortal, setIsOpeningPortal] = useState(false);
   const [isSettingUpCard, setIsSettingUpCard] = useState(false);
+  const [isOpeningOnboardingCheckout, setIsOpeningOnboardingCheckout] = useState(false);
+  const [includeEnhancedVetting, setIncludeEnhancedVetting] = useState(false);
+  const [includeCampaignExpedite, setIncludeCampaignExpedite] = useState(false);
   const [activeTopUpAmount, setActiveTopUpAmount] = useState<number | null>(null);
   const [customTopUpAmount, setCustomTopUpAmount] = useState('250');
   const [isReleasingHeld, setIsReleasingHeld] = useState(false);
 
   const customAmount = useMemo(() => Number(customTopUpAmount), [customTopUpAmount]);
   const customTopUpInvalid = !Number.isFinite(customAmount) || customAmount < 250;
+  const onboardingCart = summary?.onboardingCart ?? null;
+  const onboardingSelectedTotal = useMemo(() => {
+    if (!onboardingCart) {
+      return 0;
+    }
+
+    return onboardingCart.totalWithDefaults +
+      onboardingCart.optionalLineItems.reduce((total, item) => {
+        if (item.key === 'enhanced_vetting' && includeEnhancedVetting) {
+          return total + item.amount;
+        }
+
+        if (item.key === 'campaign_expedite' && includeCampaignExpedite) {
+          return total + item.amount;
+        }
+
+        return total;
+      }, 0);
+  }, [includeCampaignExpedite, includeEnhancedVetting, onboardingCart]);
 
   const loadSummary = async () => {
     const response = await api.getWalletBillingSummary();
@@ -137,6 +183,20 @@ export function SubscriptionsPage() {
         const walletTopupStatus = searchParams.get('wallet_topup');
         const paymentMethodStatus = searchParams.get('payment_method');
         const sessionId = searchParams.get('session_id');
+
+        const onboardingStatus = searchParams.get('onboarding');
+
+        if (onboardingStatus === 'success' && sessionId) {
+          const response = await api.completeOnboardingCheckout({ sessionId });
+          if (response.success && response.data) {
+            setSummary(response.data);
+          }
+          notify.success('Onboarding package paid', 'Wallet funds and setup fees were recorded.');
+          window.history.replaceState({}, '', '/subscriptions');
+        } else if (onboardingStatus === 'cancelled') {
+          notify.error('Onboarding checkout cancelled', 'The Stripe checkout session was not completed.');
+          window.history.replaceState({}, '', '/subscriptions');
+        }
 
         if (walletTopupStatus === 'success' && sessionId) {
           const response = await api.completeMessageCreditTopupCheckout({ sessionId });
@@ -249,6 +309,39 @@ export function SubscriptionsPage() {
     }
   };
 
+  const handleOnboardingCheckout = async () => {
+    if (!onboardingCart) return;
+
+    setIsOpeningOnboardingCheckout(true);
+    const checkoutWindow = reserveCheckoutWindow();
+    let checkoutOpened = false;
+
+    try {
+      const response = await api.createOnboardingCheckout({
+        topUpAmount: onboardingCart.topUpAmount,
+        includeEnhancedVetting,
+        includeCampaignExpedite,
+      });
+      if (!response.success || !response.data?.checkoutUrl) {
+        throw new Error('Stripe onboarding checkout URL was not returned.');
+      }
+
+      checkoutOpened = true;
+      checkoutWindow.open(response.data.checkoutUrl);
+      notify.success('Checkout opened', 'Complete Stripe checkout in the new tab to fund onboarding.');
+    } catch (error) {
+      notify.error(
+        'Onboarding checkout unavailable',
+        error instanceof Error ? error.message : 'Unable to start onboarding checkout.'
+      );
+    } finally {
+      if (!checkoutOpened) {
+        checkoutWindow.close();
+      }
+      setIsOpeningOnboardingCheckout(false);
+    }
+  };
+
   const handleReleaseHeld = async () => {
     setIsReleasingHeld(true);
 
@@ -345,6 +438,108 @@ export function SubscriptionsPage() {
                 </div>
               ) : null}
             </PageSection>
+
+            {onboardingCart?.requiresOnboardingPackage ? (
+              <PageSection className="p-6">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant={onboardingCart.isNewCustomer ? 'info' : 'warning'}>
+                        {onboardingCart.isNewCustomer ? 'New onboarding' : 'Onboarding required'}
+                      </Badge>
+                      {onboardingCart.hasExistingNonReleasedPhoneNumber ? (
+                        <Badge variant="outline">Existing number detected</Badge>
+                      ) : (
+                        <Badge variant="outline">First number included</Badge>
+                      )}
+                    </div>
+                    <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">
+                      Onboarding Cart
+                    </h3>
+                    <p className="max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-400">
+                      Pay the setup package once. Only the wallet top-up becomes spendable balance; setup, first-month recurring items, and selected add-ons are recorded separately.
+                    </p>
+                  </div>
+                  <div className="text-left lg:text-right">
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Package total</p>
+                    <p className="mt-1 text-3xl font-semibold text-slate-950 dark:text-slate-50">
+                      {formatCurrency(onboardingSelectedTotal)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                  <div className="space-y-3">
+                    {onboardingCart.requiredLineItems.map((item) => (
+                      <PageInset key={item.key} className="p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-slate-950 dark:text-slate-50">{item.label}</p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{item.description}</p>
+                          </div>
+                          <span className="shrink-0 text-sm font-semibold text-slate-950 dark:text-slate-50">
+                            {formatCurrency(item.amount)}
+                          </span>
+                        </div>
+                      </PageInset>
+                    ))}
+                  </div>
+
+                  <div className="space-y-4">
+                    <PageInset className="p-4">
+                      <p className="text-sm font-semibold text-slate-950 dark:text-slate-50">Optional Add-ons</p>
+                      <div className="mt-4 space-y-3">
+                        {onboardingCart.optionalLineItems.map((item) => {
+                          const checked =
+                            item.key === 'enhanced_vetting'
+                              ? includeEnhancedVetting
+                              : item.key === 'campaign_expedite'
+                                ? includeCampaignExpedite
+                                : item.selected;
+
+                          return (
+                            <label key={item.key} className="flex cursor-pointer items-start gap-3">
+                              <input
+                                type="checkbox"
+                                className="mt-1 h-4 w-4 rounded border-slate-300 text-primary focus:ring-primary"
+                                checked={checked}
+                                onChange={(event) => {
+                                  if (item.key === 'enhanced_vetting') {
+                                    setIncludeEnhancedVetting(event.target.checked);
+                                  }
+
+                                  if (item.key === 'campaign_expedite') {
+                                    setIncludeCampaignExpedite(event.target.checked);
+                                  }
+                                }}
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center justify-between gap-3 text-sm font-medium text-slate-950 dark:text-slate-50">
+                                  <span>{item.label}</span>
+                                  <span className="shrink-0">{formatCurrency(item.amount)}</span>
+                                </span>
+                                <span className="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">
+                                  {item.description}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </PageInset>
+
+                    <Button
+                      onClick={handleOnboardingCheckout}
+                      isLoading={isOpeningOnboardingCheckout}
+                      className="w-full"
+                      leftIcon={<CreditCard className="h-4 w-4" />}
+                    >
+                      Checkout Onboarding Package
+                    </Button>
+                  </div>
+                </div>
+              </PageSection>
+            ) : null}
 
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.9fr)]">
               <div className="space-y-5">
