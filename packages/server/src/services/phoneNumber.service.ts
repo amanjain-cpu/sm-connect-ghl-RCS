@@ -150,6 +150,109 @@ export class PhoneNumberService {
     return normalized;
   }
 
+  async validateAvailableNumberSelection(organizationId: string, phoneNumber: string) {
+    const normalized = this.assertPurchasableLongCode(phoneNumber);
+    const existing = await prisma.phoneNumber.findFirst({
+      where: {
+        phoneNumber: normalized.normalized,
+        status: { not: 'released' },
+      },
+      select: {
+        id: true,
+        organizationId: true,
+      },
+    });
+
+    if (existing) {
+      throw new AppError(
+        existing.organizationId === organizationId
+          ? 'Phone number is already owned by this organization'
+          : 'Phone number is already owned by another organization',
+        existing.organizationId === organizationId ? 'NUMBER_ALREADY_OWNED' : 'NUMBER_ALREADY_LINKED',
+        409
+      );
+    }
+
+    const availableNumbers = await this.searchAvailableNumbers({
+      areaCode: normalized.areaCode,
+      contains: normalized.nationalDigits.slice(-7),
+      limit: 500,
+    });
+    const match = availableNumbers.find((candidate) => {
+      try {
+        return this.normalizeUsLongCode(candidate.phoneNumber).normalized === normalized.normalized;
+      } catch {
+        return false;
+      }
+    });
+
+    if (!match) {
+      throw new AppError(
+        'Selected phone number is no longer available. Search again and choose another number.',
+        'PHONE_NUMBER_NOT_AVAILABLE',
+        409
+      );
+    }
+
+    return {
+      phoneNumber: normalized.normalized,
+      formattedNumber: match.formattedNumber,
+      areaCode: normalized.areaCode,
+      capabilities: match.capabilities,
+    };
+  }
+
+  async savePendingNumberPurchaseIntent(input: {
+    organizationId: string;
+    campaignId?: string;
+    phoneNumber: string;
+    friendlyName?: string;
+    error: AppError;
+  }) {
+    if (!input.campaignId) {
+      return null;
+    }
+
+    const campaign = await prisma.campaign.findFirst({
+      where: {
+        id: input.campaignId,
+        organizationId: input.organizationId,
+      },
+      select: {
+        id: true,
+        status: true,
+        signalmashCampaignId: true,
+      },
+    });
+
+    if (campaign?.status !== 'pending_approval' || !campaign.signalmashCampaignId) {
+      return null;
+    }
+
+    await prisma.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        numberLinkIntent: {
+          mode: 'buy_new',
+          phoneNumber: input.phoneNumber,
+          makeDefaultSender: true,
+          ...(input.friendlyName ? { friendlyName: input.friendlyName } : {}),
+        } as any,
+        numberLinkStatus: 'requested',
+        numberLinkError: input.error.message,
+        numberLinkAttemptedAt: new Date(),
+        numberLinkCompletedAt: null,
+      },
+    });
+
+    return {
+      pending: true,
+      campaignId: campaign.id,
+      phoneNumber: input.phoneNumber,
+      message: 'Number selection saved. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
+    };
+  }
+
   private normalizeProviderLifecycleStatus(status?: string | null) {
     if (!status?.trim()) {
       return undefined;
@@ -363,6 +466,7 @@ export class PhoneNumberService {
       campaignId?: string;
       friendlyName?: string;
       makeDefaultSender?: boolean;
+      onboardingPhoneNumberMrcChargeKey?: string;
     } = {}
   ) {
     logger.info({ organizationId, phoneNumber }, 'Purchasing phone number');
@@ -482,6 +586,7 @@ export class PhoneNumberService {
         organizationId,
         phoneNumberId: number.id,
         phoneNumber: normalizedPhoneNumber,
+        onboardingChargeKey: options.onboardingPhoneNumberMrcChargeKey,
       });
 
       return number;

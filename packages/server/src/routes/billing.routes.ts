@@ -44,6 +44,9 @@ const onboardingCheckoutSchema = z.object({
   topUpAmount: z.coerce.number().min(250).max(100000),
   includeEnhancedVetting: z.boolean().optional(),
   includeCampaignExpedite: z.boolean().optional(),
+  phoneNumber: z.string().min(10).max(15).optional(),
+  friendlyName: z.string().trim().max(100).optional(),
+  campaignId: z.string().uuid().optional(),
 });
 
 const authorizeMarketplaceBillingSchema = z.object({
@@ -128,6 +131,9 @@ router.post(
       topUpAmount: req.body.topUpAmount,
       includeEnhancedVetting: req.body.includeEnhancedVetting,
       includeCampaignExpedite: req.body.includeCampaignExpedite,
+      phoneNumber: req.body.phoneNumber,
+      friendlyName: req.body.friendlyName,
+      campaignId: req.body.campaignId,
     });
     res.json({ success: true, data: result });
   })

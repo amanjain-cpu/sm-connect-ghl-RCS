@@ -446,6 +446,9 @@ class ApiClient {
     topUpAmount: number;
     includeEnhancedVetting?: boolean;
     includeCampaignExpedite?: boolean;
+    phoneNumber?: string;
+    friendlyName?: string;
+    campaignId?: string;
   }) {
     return this.post<{ checkoutUrl: string; sessionId: string; onboardingCart: any }>(
       '/billing/wallet/onboarding/checkout',

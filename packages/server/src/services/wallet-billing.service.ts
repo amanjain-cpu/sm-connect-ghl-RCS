@@ -137,6 +137,36 @@ interface OnboardingSessionAmounts {
   hasExistingNonReleasedPhoneNumber: boolean;
 }
 
+interface OnboardingNumberIntent {
+  phoneNumber: string;
+  formattedNumber?: string;
+  friendlyName?: string;
+  campaignId?: string;
+}
+
+type OnboardingProvisioningResult =
+  | { status: 'none' }
+  | {
+      status: 'succeeded';
+      phoneNumber: string;
+      phoneNumberId: string;
+      campaignId?: string | null;
+      message: string;
+    }
+  | {
+      status: 'pending';
+      phoneNumber: string;
+      campaignId: string;
+      message: string;
+    }
+  | {
+      status: 'failed';
+      phoneNumber: string;
+      campaignId?: string | null;
+      message: string;
+      error: string;
+    };
+
 interface MessageBillingEstimate {
   catalogVersion: string;
   pricingTier: BillingPricingTier;
@@ -266,6 +296,10 @@ function tierForTopUp(amountDollars: number): BillingPricingTier {
   }
 
   return 'tier_250';
+}
+
+function isFixedTopUpOption(amountDollars: number): amountDollars is (typeof FIXED_TOP_UP_OPTIONS)[number] {
+  return FIXED_TOP_UP_OPTIONS.includes(amountDollars as (typeof FIXED_TOP_UP_OPTIONS)[number]);
 }
 
 function estimateMessageCharge(input: {
@@ -1328,26 +1362,123 @@ export class WalletBillingService {
     );
   }
 
+  private assertOnboardingTopUpAmount(amountDollars: number) {
+    const amount = roundLedger(amountDollars);
+
+    if (!isFixedTopUpOption(amount)) {
+      throw new AppError(
+        'Select a supported onboarding package amount.',
+        'ONBOARDING_PACKAGE_INVALID_AMOUNT',
+        400,
+        true,
+        {
+          supportedAmounts: [...FIXED_TOP_UP_OPTIONS],
+        }
+      );
+    }
+
+    return amount;
+  }
+
+  private async validateOnboardingNumberIntent(input: {
+    organizationId: string;
+    phoneNumber?: string;
+    friendlyName?: string;
+    campaignId?: string;
+    requiresFirstNumber: boolean;
+  }): Promise<OnboardingNumberIntent | null> {
+    if (!input.requiresFirstNumber) {
+      if (input.phoneNumber) {
+        throw new AppError(
+          'This onboarding package does not include first-number provisioning.',
+          'ONBOARDING_PHONE_NUMBER_NOT_ALLOWED',
+          400
+        );
+      }
+
+      return null;
+    }
+
+    if (!input.phoneNumber) {
+      throw new AppError(
+        'Select a phone number before starting onboarding checkout.',
+        'ONBOARDING_PHONE_NUMBER_REQUIRED',
+        400
+      );
+    }
+
+    const { phoneNumberService } = await import('./phoneNumber.service.js');
+    const selectedNumber = await phoneNumberService.validateAvailableNumberSelection(
+      input.organizationId,
+      input.phoneNumber
+    );
+
+    if (input.campaignId) {
+      const campaign = await prisma.campaign.findFirst({
+        where: {
+          id: input.campaignId,
+          organizationId: input.organizationId,
+        },
+        select: {
+          id: true,
+          status: true,
+        },
+      });
+
+      if (!campaign) {
+        throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
+      }
+
+      if (!['pending_approval', 'approved'].includes(campaign.status)) {
+        throw new AppError(
+          'Only submitted or approved campaigns can be selected for first-number provisioning.',
+          'CAMPAIGN_NOT_READY',
+          400
+        );
+      }
+    }
+
+    const friendlyName = input.friendlyName?.trim();
+
+    return {
+      phoneNumber: selectedNumber.phoneNumber,
+      formattedNumber: selectedNumber.formattedNumber,
+      ...(friendlyName ? { friendlyName } : {}),
+      ...(input.campaignId ? { campaignId: input.campaignId } : {}),
+    };
+  }
+
   async createOnboardingCheckout(input: {
     organizationId: string;
     topUpAmount: number;
     includeEnhancedVetting?: boolean;
     includeCampaignExpedite?: boolean;
+    phoneNumber?: string;
+    friendlyName?: string;
+    campaignId?: string;
   }) {
+    const topUpAmount = this.assertOnboardingTopUpAmount(input.topUpAmount);
     const cart = await this.getOnboardingCart(input.organizationId, {
-      topUpAmount: input.topUpAmount,
+      topUpAmount,
       includeEnhancedVetting: input.includeEnhancedVetting,
       includeCampaignExpedite: input.includeCampaignExpedite,
     });
     const organization = await this.getOrganizationRecord(input.organizationId);
     const account = await this.getOrCreateAccount(input.organizationId);
-    const customerId = await this.ensureStripeCustomer(account, organization);
 
     const basicSetupAmount = this.getOnboardingLineAmount(cart, 'basic_setup');
     const campaignMrcAmount = this.getOnboardingLineAmount(cart, 'campaign_mrc');
     const phoneNumberMrcAmount = this.getOnboardingLineAmount(cart, 'phone_number_mrc');
     const enhancedVettingAmount = this.getOnboardingLineAmount(cart, 'enhanced_vetting');
     const campaignExpediteAmount = this.getOnboardingLineAmount(cart, 'campaign_expedite');
+    const numberIntent = await this.validateOnboardingNumberIntent({
+      organizationId: input.organizationId,
+      phoneNumber: input.phoneNumber,
+      friendlyName: input.friendlyName,
+      campaignId: input.campaignId,
+      requiresFirstNumber: phoneNumberMrcAmount > 0,
+    });
+    const customerId = await this.ensureStripeCustomer(account, organization);
 
     const session = await stripeService.createOneTimeCheckoutSession({
       organizationId: input.organizationId,
@@ -1373,6 +1504,14 @@ export class WalletBillingService {
         includeEnhancedVetting: String(input.includeEnhancedVetting === true),
         includeCampaignExpedite: String(input.includeCampaignExpedite === true),
         hasExistingNonReleasedPhoneNumber: String(cart.hasExistingNonReleasedPhoneNumber),
+        ...(numberIntent
+          ? {
+              phoneNumber: numberIntent.phoneNumber,
+              formattedPhoneNumber: numberIntent.formattedNumber ?? numberIntent.phoneNumber,
+              ...(numberIntent.friendlyName ? { friendlyName: numberIntent.friendlyName } : {}),
+              ...(numberIntent.campaignId ? { campaignId: numberIntent.campaignId } : {}),
+            }
+          : {}),
         catalogVersion: PRICE_CATALOG_VERSION,
       },
     });
@@ -1451,9 +1590,14 @@ export class WalletBillingService {
 
   async completeOnboardingCheckout(organizationId: string, sessionId: string) {
     const session = await stripeService.getCheckoutSession(sessionId);
-    await this.applyOnboardingCheckoutSession(organizationId, session);
+    const onboardingProvisioning = await this.applyOnboardingCheckoutSession(organizationId, session);
     await this.releaseHeldInboundMessages(organizationId);
-    return this.getWalletSummary(organizationId);
+    const summary = await this.getWalletSummary(organizationId);
+
+    return {
+      ...summary,
+      onboardingProvisioning,
+    };
   }
 
   private parseOnboardingSessionAmounts(
@@ -1512,7 +1656,7 @@ export class WalletBillingService {
   private async applyOnboardingCheckoutSession(
     organizationId: string,
     session: StripeCheckoutSession
-  ) {
+  ): Promise<OnboardingProvisioningResult> {
     const metadata = session.metadata ?? {};
     if (metadata.organizationId !== organizationId || metadata.purpose !== 'wallet_onboarding') {
       throw new AppError('Checkout session does not belong to this onboarding package.', 'CHECKOUT_SESSION_MISMATCH', 400);
@@ -1557,10 +1701,19 @@ export class WalletBillingService {
       },
     });
 
+    const selectedNumberIntent = this.readOnboardingNumberIntent(metadata);
     const nonWalletChargeMetadata = {
       purpose: 'wallet_onboarding',
       stripeCheckoutSessionId: session.id,
       pricingTier: amounts.pricingTier,
+      ...(selectedNumberIntent
+        ? {
+            selectedPhoneNumber: selectedNumberIntent.phoneNumber,
+            ...(selectedNumberIntent.formattedNumber ? { selectedFormattedPhoneNumber: selectedNumberIntent.formattedNumber } : {}),
+            ...(selectedNumberIntent.friendlyName ? { selectedFriendlyName: selectedNumberIntent.friendlyName } : {}),
+            ...(selectedNumberIntent.campaignId ? { selectedCampaignId: selectedNumberIntent.campaignId } : {}),
+          }
+        : {}),
       catalogVersion: PRICE_CATALOG_VERSION,
     };
 
@@ -1655,6 +1808,192 @@ export class WalletBillingService {
     });
 
     await this.clearBillingSuspension(organizationId);
+
+    return this.provisionOnboardingSelectedPhoneNumber({
+      organizationId,
+      sessionId: session.id,
+      metadata,
+      amounts,
+    });
+  }
+
+  private readOnboardingNumberIntent(metadata: Record<string, string>): OnboardingNumberIntent | null {
+    if (!metadata.phoneNumber) {
+      return null;
+    }
+
+    return {
+      phoneNumber: metadata.phoneNumber,
+      ...(metadata.formattedPhoneNumber ? { formattedNumber: metadata.formattedPhoneNumber } : {}),
+      ...(metadata.friendlyName ? { friendlyName: metadata.friendlyName } : {}),
+      ...(metadata.campaignId ? { campaignId: metadata.campaignId } : {}),
+    };
+  }
+
+  private async updateOnboardingPhoneNumberChargeMetadata(input: {
+    organizationId: string;
+    sessionId: string;
+    metadata: Record<string, unknown>;
+  }) {
+    const charge = await prisma.billingCharge.findUnique({
+      where: { chargeKey: `onboarding:${input.sessionId}:phone-number-mrc` },
+    });
+
+    if (!charge || charge.organizationId !== input.organizationId) {
+      return null;
+    }
+
+    return prisma.billingCharge.update({
+      where: { id: charge.id },
+      data: {
+        metadata: asInputJson({
+          ...asRecord(charge.metadata),
+          ...input.metadata,
+        }),
+      },
+    });
+  }
+
+  private async provisionOnboardingSelectedPhoneNumber(input: {
+    organizationId: string;
+    sessionId: string;
+    metadata: Record<string, string>;
+    amounts: OnboardingSessionAmounts;
+  }): Promise<OnboardingProvisioningResult> {
+    const intent = this.readOnboardingNumberIntent(input.metadata);
+
+    if (!intent || input.amounts.phoneNumberMrcAmount <= 0) {
+      return { status: 'none' };
+    }
+
+    const { phoneNumberService } = await import('./phoneNumber.service.js');
+
+    try {
+      const number = await phoneNumberService.purchaseNumber(
+        input.organizationId,
+        intent.phoneNumber,
+        {
+          campaignId: intent.campaignId,
+          friendlyName: intent.friendlyName,
+          makeDefaultSender: true,
+          onboardingPhoneNumberMrcChargeKey: `onboarding:${input.sessionId}:phone-number-mrc`,
+        }
+      );
+
+      await this.updateOnboardingPhoneNumberChargeMetadata({
+        organizationId: input.organizationId,
+        sessionId: input.sessionId,
+        metadata: {
+          provisioningStatus: 'succeeded',
+          provisionedPhoneNumberId: number.id,
+          provisionedPhoneNumber: number.phoneNumber,
+          provisionedAt: new Date().toISOString(),
+        },
+      });
+
+      return {
+        status: 'succeeded',
+        phoneNumber: number.phoneNumber,
+        phoneNumberId: number.id,
+        campaignId: number.campaignId ?? intent.campaignId ?? null,
+        message: 'Payment completed and the selected phone number was provisioned.',
+      };
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'NUMBER_ALREADY_OWNED') {
+        const existing = await prisma.phoneNumber.findUnique({
+          where: { phoneNumber: intent.phoneNumber },
+        });
+
+        if (existing?.organizationId === input.organizationId && existing.status !== 'released') {
+          await this.recordPhoneNumberFirstMonthCharge({
+            organizationId: input.organizationId,
+            phoneNumberId: existing.id,
+            phoneNumber: existing.phoneNumber,
+            onboardingChargeKey: `onboarding:${input.sessionId}:phone-number-mrc`,
+          });
+
+          await this.updateOnboardingPhoneNumberChargeMetadata({
+            organizationId: input.organizationId,
+            sessionId: input.sessionId,
+            metadata: {
+              provisioningStatus: 'succeeded',
+              provisionedPhoneNumberId: existing.id,
+              provisionedPhoneNumber: existing.phoneNumber,
+              provisionedAt: new Date().toISOString(),
+            },
+          });
+
+          return {
+            status: 'succeeded',
+            phoneNumber: existing.phoneNumber,
+            phoneNumberId: existing.id,
+            campaignId: existing.campaignId ?? intent.campaignId ?? null,
+            message: 'Payment completed and the selected phone number is already in this workspace.',
+          };
+        }
+      }
+
+      if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
+        const pendingIntent = await phoneNumberService.savePendingNumberPurchaseIntent({
+          organizationId: input.organizationId,
+          campaignId: intent.campaignId,
+          phoneNumber: intent.phoneNumber,
+          friendlyName: intent.friendlyName,
+          error,
+        });
+
+        if (pendingIntent) {
+          await this.updateOnboardingPhoneNumberChargeMetadata({
+            organizationId: input.organizationId,
+            sessionId: input.sessionId,
+            metadata: {
+              provisioningStatus: 'pending',
+              provisioningError: error.message,
+              pendingCampaignId: pendingIntent.campaignId,
+              pendingPhoneNumber: pendingIntent.phoneNumber,
+              provisioningAttemptedAt: new Date().toISOString(),
+            },
+          });
+
+          return {
+            status: 'pending',
+            campaignId: pendingIntent.campaignId,
+            phoneNumber: pendingIntent.phoneNumber,
+            message: pendingIntent.message,
+          };
+        }
+      }
+
+      const message = error instanceof Error ? error.message : 'Unknown phone-number provisioning failure';
+      logger.error(
+        {
+          error,
+          organizationId: input.organizationId,
+          phoneNumber: intent.phoneNumber,
+          campaignId: intent.campaignId,
+          stripeCheckoutSessionId: input.sessionId,
+        },
+        'Onboarding checkout paid, but selected phone number provisioning failed'
+      );
+
+      await this.updateOnboardingPhoneNumberChargeMetadata({
+        organizationId: input.organizationId,
+        sessionId: input.sessionId,
+        metadata: {
+          provisioningStatus: 'failed',
+          provisioningError: message,
+          provisioningAttemptedAt: new Date().toISOString(),
+        },
+      });
+
+      return {
+        status: 'failed',
+        phoneNumber: intent.phoneNumber,
+        campaignId: intent.campaignId ?? null,
+        message: 'Payment completed, but the selected phone number could not be provisioned automatically.',
+        error: message,
+      };
+    }
   }
 
   async createPaymentMethodSetupSession(organizationId: string) {
@@ -1758,7 +2097,31 @@ export class WalletBillingService {
     });
   }
 
-  private async findUnconsumedOnboardingPhoneNumberCharge(organizationId: string) {
+  private async findUnconsumedOnboardingPhoneNumberCharge(
+    organizationId: string,
+    preferredChargeKey?: string
+  ) {
+    if (preferredChargeKey) {
+      const preferredCharge = await prisma.billingCharge.findUnique({
+        where: { chargeKey: preferredChargeKey },
+      });
+
+      if (
+        preferredCharge?.organizationId === organizationId &&
+        preferredCharge.kind === 'phone_number_mrc' &&
+        preferredCharge.status === 'succeeded'
+      ) {
+        const metadata = asRecord(preferredCharge.metadata);
+        if (
+          metadata.purpose === 'wallet_onboarding' &&
+          metadata.feeKind === 'first_month_phone_number_mrc' &&
+          !metadata.consumedByPhoneNumberId
+        ) {
+          return preferredCharge;
+        }
+      }
+    }
+
     const charges = await prisma.billingCharge.findMany({
       where: {
         organizationId,
@@ -1823,6 +2186,7 @@ export class WalletBillingService {
     organizationId: string;
     phoneNumberId: string;
     phoneNumber: string;
+    onboardingChargeKey?: string;
   }) {
     const onboardingLedgerKey = `phone-number:${input.phoneNumberId}:first-month-mrc:onboarding-package`;
     const walletLedgerKey = `phone-number:${input.phoneNumberId}:first-month-mrc`;
@@ -1847,7 +2211,8 @@ export class WalletBillingService {
     const account = await this.assertCanUsePaidServices(input.organizationId);
     const tier = PRICING_TIERS[account.pricingTier];
     const onboardingPackageCharge = await this.findUnconsumedOnboardingPhoneNumberCharge(
-      input.organizationId
+      input.organizationId,
+      input.onboardingChargeKey
     );
 
     if (onboardingPackageCharge) {
@@ -2265,9 +2630,14 @@ export class WalletBillingService {
       }
 
       if (organizationId && metadata.purpose === 'wallet_onboarding') {
-        await this.applyOnboardingCheckoutSession(organizationId, session);
+        const onboardingProvisioning = await this.applyOnboardingCheckoutSession(organizationId, session);
         await this.releaseHeldInboundMessages(organizationId);
-        return { handled: true, eventType: event.type, purpose: metadata.purpose };
+        return {
+          handled: true,
+          eventType: event.type,
+          purpose: metadata.purpose,
+          onboardingProvisioning,
+        };
       }
 
       if (organizationId && metadata.purpose === 'saved_payment_method_setup') {

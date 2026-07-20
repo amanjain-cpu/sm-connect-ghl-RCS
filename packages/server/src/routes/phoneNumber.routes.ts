@@ -9,7 +9,6 @@ import { phoneNumberService } from '../services/phoneNumber.service.js';
 import { validate, paginationSchema, idParamSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { prisma } from '../config/database.js';
 import { AppError } from '../utils/errors.js';
 import { organizationRuntimeService } from '../services/organization-runtime.service.js';
 import { walletBillingService } from '../services/wallet-billing.service.js';
@@ -135,57 +134,6 @@ const purchaseBodySchema = z.object({
   friendlyName: z.string().max(100).optional(),
 });
 
-async function savePendingNumberPurchaseIntent(input: {
-  organizationId: string;
-  campaignId?: string;
-  phoneNumber: string;
-  friendlyName?: string;
-  error: AppError;
-}) {
-  if (!input.campaignId) {
-    return null;
-  }
-
-  const campaign = await prisma.campaign.findFirst({
-    where: {
-      id: input.campaignId,
-      organizationId: input.organizationId,
-    },
-    select: {
-      id: true,
-      status: true,
-      signalmashCampaignId: true,
-    },
-  });
-
-  if (campaign?.status !== 'pending_approval' || !campaign.signalmashCampaignId) {
-    return null;
-  }
-
-  await prisma.campaign.update({
-    where: { id: campaign.id },
-    data: {
-      numberLinkIntent: {
-        mode: 'buy_new',
-        phoneNumber: input.phoneNumber,
-        makeDefaultSender: true,
-        ...(input.friendlyName ? { friendlyName: input.friendlyName } : {}),
-      } as any,
-      numberLinkStatus: 'requested',
-      numberLinkError: input.error.message,
-      numberLinkAttemptedAt: new Date(),
-      numberLinkCompletedAt: null,
-    },
-  });
-
-  return {
-    pending: true,
-    campaignId: campaign.id,
-    phoneNumber: input.phoneNumber,
-    message: 'Number selection saved. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
-  };
-}
-
 router.post(
   '/checkout',
   validate({ body: purchaseBodySchema }),
@@ -251,7 +199,7 @@ router.post(
       });
     } catch (error) {
       if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
-        const pendingIntent = await savePendingNumberPurchaseIntent({
+        const pendingIntent = await phoneNumberService.savePendingNumberPurchaseIntent({
           organizationId: req.user!.organizationId,
           campaignId,
           phoneNumber,
