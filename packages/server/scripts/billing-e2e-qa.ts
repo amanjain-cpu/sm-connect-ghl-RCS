@@ -474,6 +474,11 @@ async function scenarioWalletTopUps(
   assertEqual(summary.carrierSurcharges[2].carrier, 'T-Mobile', 'Carrier surcharge should include T-Mobile');
   assertNear(summary.carrierSurcharges[2].sms, 0.0045, 'T-Mobile SMS surcharge should match sheet');
   assertNear(summary.carrierSurcharges[2].mms, 0.01, 'T-Mobile MMS surcharge should match sheet');
+  assertEqual(
+    summary.carrierSurchargeNote,
+    'Carrier surcharges are already included in the above pricing.',
+    'Carrier surcharge note should clarify surcharges are included in pricing'
+  );
   assert(
     summary.prepayBalanceNote.includes('Monthly fees and setup charges may be deducted'),
     'Billing summary should include prepayment balance note'
@@ -1179,6 +1184,10 @@ async function scenarioUiStaticAcceptance() {
   assert(oneTimeSection.includes("'Paid'"), 'One-Time Fees should show Paid when setup fee is charged');
   assert(source.includes('Carrier Surcharges'), 'Billing dashboard should show carrier surcharges');
   assert(source.includes('summary.carrierSurcharges'), 'Billing dashboard should render carrier surcharge data from API');
+  assert(
+    source.includes('summary.carrierSurchargeNote'),
+    'Billing dashboard should show carrier surcharge inclusion note from API'
+  );
   assert(source.includes('summary.prepayBalanceNote'), 'Billing dashboard should show the prepayment balance note from API');
 }
 

@@ -20,6 +20,7 @@ const ENHANCED_VETTING_FEE = 55;
 const CAMPAIGN_EXPEDITE_FEE = 50;
 const PREPAY_BALANCE_NOTE =
   'Monthly fees and setup charges may be deducted out of prepayment balance which can result in a lower number of messages.';
+const CARRIER_SURCHARGE_NOTE = 'Carrier surcharges are already included in the above pricing.';
 const CARRIER_SURCHARGES = [
   {
     carrier: 'AT&T',
@@ -269,6 +270,7 @@ export class WalletBillingService {
       fixedTopUpOptions: [...FIXED_TOP_UP_OPTIONS],
       tiers: Object.values(PRICING_TIERS),
       carrierSurcharges: [...CARRIER_SURCHARGES],
+      carrierSurchargeNote: CARRIER_SURCHARGE_NOTE,
       prepayBalanceNote: PREPAY_BALANCE_NOTE,
     };
   }
@@ -1536,6 +1538,7 @@ export class WalletBillingService {
       },
       pricingCatalog: this.getPricingCatalog(),
       carrierSurcharges: [...CARRIER_SURCHARGES],
+      carrierSurchargeNote: CARRIER_SURCHARGE_NOTE,
       prepayBalanceNote: PREPAY_BALANCE_NOTE,
       rates: {
         sms: tier.smsRate,

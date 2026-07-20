@@ -48,6 +48,7 @@ interface WalletBillingSummary {
     sms: number;
     mms: number;
   }>;
+  carrierSurchargeNote?: string;
   prepayBalanceNote?: string;
   topUpOptions: number[];
   usage: {
@@ -463,6 +464,11 @@ export function SubscriptionsPage() {
                           </div>
                         ))}
                       </div>
+                      {summary.carrierSurchargeNote ? (
+                        <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                          {summary.carrierSurchargeNote}
+                        </p>
+                      ) : null}
                     </div>
                   ) : null}
                 </PageSection>
