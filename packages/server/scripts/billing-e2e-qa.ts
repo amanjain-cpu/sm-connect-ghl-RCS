@@ -1179,8 +1179,14 @@ async function scenarioUiStaticAcceptance() {
   const oneTimeSection = source.slice(oneTimeStart);
   assert(monthlySection.includes('Estimated MRC'), 'Monthly Charges should show Estimated MRC');
   assert(monthlySection.includes('Next MRC run'), 'Monthly Charges should show Next MRC run');
-  assert(!monthlySection.includes('Basic setup fee'), 'Monthly Charges should not show setup fee');
-  assert(oneTimeSection.includes('Basic setup fee'), 'One-Time Fees should show basic setup fee');
+  assert(monthlySection.includes('Campaign Monthly'), 'Monthly Charges should show campaign monthly fee');
+  assert(monthlySection.includes('Phone Numbers Monthly'), 'Monthly Charges should show phone number monthly fee');
+  assert(!monthlySection.includes('Basic Setup'), 'Monthly Charges should not show setup fee');
+  assert(oneTimeSection.includes('Basic Setup'), 'One-Time Fees should show basic setup fee');
+  assert(oneTimeSection.includes('Enhanced Vetting Setup - Optional'), 'One-Time Fees should show optional enhanced vetting fee');
+  assert(oneTimeSection.includes('Campaign Expedite Setup - Optional'), 'One-Time Fees should show optional campaign expedite fee');
+  assert(oneTimeSection.includes('summary.rates.enhancedVetting'), 'Enhanced vetting fee should use API rate data');
+  assert(oneTimeSection.includes('summary.rates.campaignExpedite'), 'Campaign expedite fee should use API rate data');
   assert(oneTimeSection.includes("'Paid'"), 'One-Time Fees should show Paid when setup fee is charged');
   assert(source.includes('Carrier Surcharges'), 'Billing dashboard should show carrier surcharges');
   assert(source.includes('summary.carrierSurcharges'), 'Billing dashboard should render carrier surcharge data from API');

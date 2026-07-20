@@ -574,6 +574,24 @@ export function SubscriptionsPage() {
                 <PageSection className="p-6">
                   <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Monthly Charges</h3>
                   <div className="mt-5 space-y-3 text-sm">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <span className="text-slate-600 dark:text-slate-400">Campaign Monthly</span>
+                        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-500">Per approved campaign</p>
+                      </div>
+                      <span className="shrink-0 text-right font-medium text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.campaignMonthly)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <span className="text-slate-600 dark:text-slate-400">Phone Numbers Monthly</span>
+                        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-500">Per active phone number</p>
+                      </div>
+                      <span className="shrink-0 text-right font-medium text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.phoneNumberMonthly)}
+                      </span>
+                    </div>
                     <div className="flex items-center justify-between">
                       <span className="text-slate-600 dark:text-slate-400">Estimated MRC</span>
                       <span className="font-medium text-slate-950 dark:text-slate-50">
@@ -593,9 +611,21 @@ export function SubscriptionsPage() {
                   <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">One-Time Fees</h3>
                   <div className="mt-5 space-y-3 text-sm">
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-600 dark:text-slate-400">Basic setup fee</span>
+                      <span className="text-slate-600 dark:text-slate-400">Basic Setup</span>
                       <span className="font-medium text-slate-950 dark:text-slate-50">
                         {summary.account.setupFeeChargedAt ? 'Paid' : formatCurrency(summary.rates.basicSetup)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="min-w-0 text-slate-600 dark:text-slate-400">Enhanced Vetting Setup - Optional</span>
+                      <span className="shrink-0 text-right font-medium text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.enhancedVetting)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="min-w-0 text-slate-600 dark:text-slate-400">Campaign Expedite Setup - Optional</span>
+                      <span className="shrink-0 text-right font-medium text-slate-950 dark:text-slate-50">
+                        {formatCurrency(summary.rates.campaignExpedite)}
                       </span>
                     </div>
                   </div>
