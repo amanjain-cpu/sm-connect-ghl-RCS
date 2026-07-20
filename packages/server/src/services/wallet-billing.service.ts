@@ -18,6 +18,25 @@ const FIXED_TOP_UP_OPTIONS = [250, 500, 1400] as const;
 const BASIC_SETUP_FEE = 19;
 const ENHANCED_VETTING_FEE = 55;
 const CAMPAIGN_EXPEDITE_FEE = 50;
+const PREPAY_BALANCE_NOTE =
+  'Monthly fees and setup charges may be deducted out of prepayment balance which can result in a lower number of messages.';
+const CARRIER_SURCHARGES = [
+  {
+    carrier: 'AT&T',
+    sms: 0.003,
+    mms: 0.0075,
+  },
+  {
+    carrier: 'VZW',
+    sms: 0.004,
+    mms: 0.0065,
+  },
+  {
+    carrier: 'T-Mobile',
+    sms: 0.0045,
+    mms: 0.01,
+  },
+] as const;
 
 const PRICING_TIERS = {
   tier_250: {
@@ -249,6 +268,8 @@ export class WalletBillingService {
       minTopUpAmount: MIN_TOP_UP_AMOUNT,
       fixedTopUpOptions: [...FIXED_TOP_UP_OPTIONS],
       tiers: Object.values(PRICING_TIERS),
+      carrierSurcharges: [...CARRIER_SURCHARGES],
+      prepayBalanceNote: PREPAY_BALANCE_NOTE,
     };
   }
 
@@ -1514,6 +1535,8 @@ export class WalletBillingService {
         setupFeeChargedAt: account.setupFeeChargedAt,
       },
       pricingCatalog: this.getPricingCatalog(),
+      carrierSurcharges: [...CARRIER_SURCHARGES],
+      prepayBalanceNote: PREPAY_BALANCE_NOTE,
       rates: {
         sms: tier.smsRate,
         mms: tier.mmsRate,

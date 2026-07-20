@@ -43,6 +43,12 @@ interface WalletBillingSummary {
     enhancedVetting: number;
     campaignExpedite: number;
   };
+  carrierSurcharges?: Array<{
+    carrier: string;
+    sms: number;
+    mms: number;
+  }>;
+  prepayBalanceNote?: string;
   topUpOptions: number[];
   usage: {
     cycleMonth: string;
@@ -377,6 +383,15 @@ export function SubscriptionsPage() {
                       Custom Top-up
                     </Button>
                   </div>
+
+                  {summary.prepayBalanceNote ? (
+                    <div className="mt-4 rounded-[8px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <p>{summary.prepayBalanceNote}</p>
+                      </div>
+                    </div>
+                  ) : null}
                 </PageSection>
 
                 <PageSection className="p-6">
@@ -419,6 +434,37 @@ export function SubscriptionsPage() {
                       </p>
                     </PageInset>
                   </div>
+
+                  {(summary.carrierSurcharges?.length ?? 0) > 0 ? (
+                    <div className="mt-5">
+                      <h4 className="text-sm font-semibold text-slate-950 dark:text-slate-50">
+                        Carrier Surcharges
+                      </h4>
+                      <div className="mt-3 overflow-hidden rounded-[8px] border border-slate-200 dark:border-slate-800">
+                        <div className="grid grid-cols-[1.4fr_1fr_1fr] bg-slate-50 px-4 py-2 text-xs font-medium uppercase text-slate-500 dark:bg-slate-900/70 dark:text-slate-400">
+                          <span>Carrier</span>
+                          <span className="text-right">SMS</span>
+                          <span className="text-right">MMS</span>
+                        </div>
+                        {summary.carrierSurcharges?.map((surcharge) => (
+                          <div
+                            key={surcharge.carrier}
+                            className="grid grid-cols-[1.4fr_1fr_1fr] border-t border-slate-200 px-4 py-3 text-sm dark:border-slate-800"
+                          >
+                            <span className="font-medium text-slate-950 dark:text-slate-50">
+                              {surcharge.carrier}
+                            </span>
+                            <span className="text-right text-slate-700 dark:text-slate-300">
+                              {formatCurrency(surcharge.sms, true)}
+                            </span>
+                            <span className="text-right text-slate-700 dark:text-slate-300">
+                              {formatCurrency(surcharge.mms, true)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </PageSection>
 
                 <PageSection className="p-6">
@@ -534,8 +580,14 @@ export function SubscriptionsPage() {
                         {formatDate(summary.account.mrcNextRunAt)}
                       </span>
                     </div>
+                  </div>
+                </PageSection>
+
+                <PageSection className="p-6">
+                  <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">One-Time Fees</h3>
+                  <div className="mt-5 space-y-3 text-sm">
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-600 dark:text-slate-400">Setup fee</span>
+                      <span className="text-slate-600 dark:text-slate-400">Basic setup fee</span>
                       <span className="font-medium text-slate-950 dark:text-slate-50">
                         {summary.account.setupFeeChargedAt ? 'Paid' : formatCurrency(summary.rates.basicSetup)}
                       </span>

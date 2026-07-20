@@ -19,6 +19,7 @@
     "db:seed": "npm run db:seed -w @signalmash-connect/server",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "qa:billing": "npm run qa:billing -w @signalmash-connect/server",
     "test": "jest",
     "clean": "rm -rf node_modules packages/*/node_modules packages/*/dist"
   },
