@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, BookOpen, LifeBuoy, MessageSquareWarning, Plug, Settings } from 'lucide-react';
 import { Header } from '@/components/layout/header';
@@ -40,9 +40,15 @@ interface PlatformConnection {
   } | null;
 }
 
+const SUPPORT_AGENT_ASSET_BASE_URL = '/api/support-agent/assets';
+const SUPPORT_AGENT_ASSET_VERSION = '20260720';
+const SUPPORT_WIDGET_READY_TIMEOUT_MS = 1500;
+
 export function HelpPage() {
   const navigate = useNavigate();
   const { organization } = useAuthStore();
+  const supportAgentMountRef = useRef<HTMLDivElement | null>(null);
+  const supportAgentMountedRef = useRef(false);
   const [operations, setOperations] = useState<OperationsSummary | null>(null);
   const [connections, setConnections] = useState<PlatformConnection[]>([]);
   const [supportAgentStatus, setSupportAgentStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
@@ -75,34 +81,51 @@ export function HelpPage() {
 
     const mountSupportAgent = async () => {
       try {
-        const response = await api.createSupportAgentSession({
-          page: '/help',
-          appStep: 'help',
-          onboardingStatus: connections[0]?.installation?.lifecycleState,
-        });
-
-        if (cancelled || !response.success || !response.data) {
+        if (supportAgentMountedRef.current) {
+          setSupportAgentStatus('ready');
           return;
         }
 
-        await loadSupportAgentAssets(response.data.widgetAssetBaseUrl);
+        const response = await api.createSupportAgentSession({
+          page: '/help',
+          appStep: 'help',
+        });
+
+        if (cancelled) {
+          return;
+        }
+        if (!response.success || !response.data) {
+          throw new Error('Support agent session could not be created');
+        }
+
+        await loadSupportAgentAssets();
 
         if (cancelled) {
           return;
         }
 
-        const mountPoint = document.getElementById('sm-connect-support-agent');
-        if (!mountPoint || !window.SignalmashSupportWidget) {
+        const mountPoint = supportAgentMountRef.current;
+        const supportWidget = await waitForSupportWidget();
+        if (cancelled) {
+          return;
+        }
+        if (!mountPoint) {
           throw new Error('Support widget did not load');
         }
 
-        mountPoint.innerHTML = '';
-        window.SignalmashSupportWidget.mount(mountPoint, {
+        if (supportAgentMountedRef.current) {
+          setSupportAgentStatus('ready');
+          return;
+        }
+
+        supportWidget.mount(mountPoint, {
           apiBaseUrl: response.data.apiBaseUrl,
           token: response.data.token,
         });
+        supportAgentMountedRef.current = true;
         setSupportAgentStatus('ready');
-      } catch {
+      } catch (error) {
+        console.error('Support agent widget unavailable', error);
         if (!cancelled) {
           setSupportAgentStatus('unavailable');
         }
@@ -114,7 +137,7 @@ export function HelpPage() {
     return () => {
       cancelled = true;
     };
-  }, [connections]);
+  }, []);
 
   const connectionNeedsAttention = connections.filter(
     (connection) => connection.status === 'error' || connection.status === 'pending'
@@ -216,7 +239,13 @@ export function HelpPage() {
 
         <PageSection className="px-6 py-6">
           <div className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div id="sm-connect-support-agent" className="min-h-[560px]">
+            <div className="min-h-[560px]">
+              <div
+                id="sm-connect-support-agent"
+                ref={supportAgentMountRef}
+                aria-hidden={supportAgentStatus !== 'ready'}
+                className={supportAgentStatus === 'ready' ? 'min-h-[560px]' : 'hidden min-h-[560px]'}
+              />
               {supportAgentStatus === 'loading' ? (
                 <div className="flex min-h-[560px] items-center justify-center text-sm text-slate-500">
                   Loading support chat...
@@ -304,17 +333,47 @@ export function HelpPage() {
   );
 }
 
-async function loadSupportAgentAssets(assetBaseUrl: string) {
+async function loadSupportAgentAssets() {
   await Promise.all([
-    loadStylesheet(`${assetBaseUrl}/widget.css`),
-    loadScript(`${assetBaseUrl}/signalmash-support-widget.iife.js`),
+    loadStylesheet(buildSupportAgentAssetUrl('widget.css')),
+    loadScript(buildSupportAgentAssetUrl('signalmash-support-widget.iife.js')),
   ]);
 }
 
+function buildSupportAgentAssetUrl(file: string): string {
+  return `${SUPPORT_AGENT_ASSET_BASE_URL}/${file}?v=${SUPPORT_AGENT_ASSET_VERSION}`;
+}
+
+function waitForSupportWidget(): Promise<NonNullable<Window['SignalmashSupportWidget']>> {
+  if (window.SignalmashSupportWidget) {
+    return Promise.resolve(window.SignalmashSupportWidget);
+  }
+
+  const start = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const poll = () => {
+      if (window.SignalmashSupportWidget) {
+        resolve(window.SignalmashSupportWidget);
+        return;
+      }
+
+      if (Date.now() - start >= SUPPORT_WIDGET_READY_TIMEOUT_MS) {
+        reject(new Error('Support widget did not register'));
+        return;
+      }
+
+      window.setTimeout(poll, 50);
+    };
+
+    poll();
+  });
+}
+
 function loadScript(src: string): Promise<void> {
-  const existing = document.querySelector<HTMLScriptElement>(`script[data-support-agent="true"][src="${src}"]`);
+  const existing = findSupportAgentScript(src);
   if (existing) {
-    return Promise.resolve();
+    return waitForElementLoad(existing, 'Support widget script failed to load');
   }
 
   return new Promise((resolve, reject) => {
@@ -322,16 +381,22 @@ function loadScript(src: string): Promise<void> {
     script.src = src;
     script.async = true;
     script.dataset.supportAgent = 'true';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Support widget script failed to load'));
+    script.onload = () => {
+      script.dataset.loaded = 'true';
+      resolve();
+    };
+    script.onerror = () => {
+      script.remove();
+      reject(new Error('Support widget script failed to load'));
+    };
     document.head.appendChild(script);
   });
 }
 
 function loadStylesheet(href: string): Promise<void> {
-  const existing = document.querySelector<HTMLLinkElement>(`link[data-support-agent="true"][href="${href}"]`);
+  const existing = findSupportAgentStylesheet(href);
   if (existing) {
-    return Promise.resolve();
+    return waitForElementLoad(existing, 'Support widget styles failed to load');
   }
 
   return new Promise((resolve, reject) => {
@@ -339,8 +404,51 @@ function loadStylesheet(href: string): Promise<void> {
     link.rel = 'stylesheet';
     link.href = href;
     link.dataset.supportAgent = 'true';
-    link.onload = () => resolve();
-    link.onerror = () => reject(new Error('Support widget styles failed to load'));
+    link.onload = () => {
+      link.dataset.loaded = 'true';
+      resolve();
+    };
+    link.onerror = () => {
+      link.remove();
+      reject(new Error('Support widget styles failed to load'));
+    };
     document.head.appendChild(link);
+  });
+}
+
+function findSupportAgentScript(src: string): HTMLScriptElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLScriptElement>('script[data-support-agent="true"]')).find(
+    (script) => script.getAttribute('src') === src
+  );
+}
+
+function findSupportAgentStylesheet(href: string): HTMLLinkElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLLinkElement>('link[data-support-agent="true"]')).find(
+    (link) => link.getAttribute('href') === href
+  );
+}
+
+function waitForElementLoad(element: HTMLScriptElement | HTMLLinkElement, errorMessage: string): Promise<void> {
+  if (element.dataset.loaded === 'true') {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    element.addEventListener(
+      'load',
+      () => {
+        element.dataset.loaded = 'true';
+        resolve();
+      },
+      { once: true }
+    );
+    element.addEventListener(
+      'error',
+      () => {
+        element.remove();
+        reject(new Error(errorMessage));
+      },
+      { once: true }
+    );
   });
 }
