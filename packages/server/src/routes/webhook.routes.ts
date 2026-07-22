@@ -17,6 +17,7 @@ import { logger } from '../utils/logger.js';
 import type { CrmPlatformAdapter } from '../adapters/crm-platform.adapter.js';
 import { enqueueGhlOutboundMessage } from '../queues/outbound-message.queue.js';
 import { enqueueIncomingInboundEvent, enqueueIncomingStatusEvent } from '../queues/incoming-events.queue.js';
+import { enqueueCrmOutboundWebhookForExactLocation } from '../services/ghl-outbound-webhook-routing.service.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
@@ -480,27 +481,33 @@ async function handleCrmOutboundWebhook(req: Request, res: Response, options?: {
     return res.status(202).json({ success: false, message: 'Unsupported webhook payload' });
   }
 
-  const connection = await platformService.getByPlatformAccount(crmPlatformId, parsed.accountId);
-  if (!connection) {
-    logger.warn({ accountId: parsed.accountId }, 'CRM webhook for an unknown location');
+  const enqueueResult = await enqueueCrmOutboundWebhookForExactLocation(
+    {
+      parsed,
+      contactPhone: req.body.contactPhone as string | undefined,
+    },
+    {
+      getConnectionByLocation: (locationId) =>
+        platformService.getByPlatformAccount(crmPlatformId, locationId),
+      enqueueOutboundMessage: enqueueGhlOutboundMessage,
+    }
+  );
+
+  if (!enqueueResult.queued) {
+    logger.warn(
+      {
+        locationId: enqueueResult.locationId,
+        providerMessageId: enqueueResult.providerMessageId,
+      },
+      'CRM outbound webhook for an unknown location; reconnect this CRM workspace before sending native SMS'
+    );
     return res.status(200).json({ success: true, warning: 'Location not configured' });
   }
-
-  await enqueueGhlOutboundMessage({
-    connectionId: connection.id,
-    providerMessageId: parsed.providerMessageId,
-    conversationId: parsed.conversationId,
-    contactId: parsed.contactId,
-    to: (req.body.contactPhone as string | undefined) || parsed.to,
-    from: parsed.from,
-    body: parsed.body,
-    mediaUrls: parsed.mediaUrls,
-  });
 
   res.status(200).json({
     success: true,
     queued: true,
-    providerMessageId: parsed.providerMessageId,
+    providerMessageId: enqueueResult.providerMessageId,
   });
 }
 
@@ -569,6 +576,20 @@ export async function handleCrmAppWebhook(
   }
 
   switch (type) {
+    case 'INSTALL': {
+      const result = await platformService.handleLeadconnectorInstall({
+        locationId: typeof locationId === 'string' ? locationId : undefined,
+        companyId: typeof companyId === 'string' ? companyId : undefined,
+        appId: typeof appId === 'string' ? appId : undefined,
+        payload: req.body,
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: result,
+      });
+    }
+
     case 'UNINSTALL': {
       const result = await platformService.handleLeadconnectorUninstall({
         locationId: typeof locationId === 'string' ? locationId : undefined,
