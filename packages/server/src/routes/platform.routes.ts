@@ -21,6 +21,11 @@ import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { setAuthCookies } from '../utils/auth-cookies.js';
 import { adminService, SETTINGS_KEYS } from '../services/admin.service.js';
+import {
+  findMatchingCrmInstallWebhookLocation,
+  resolveCrmOAuthLocation,
+  type CrmInstallWebhookSignal,
+} from '../services/ghl-oauth-location-resolution.service.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
@@ -358,17 +363,7 @@ router.get(
           crmTokenContext.locationId ??
           callbackLocationIdValue;
 
-        const resolveLocationFromInstallSignals = async (
-          preferredLocationId?: string
-        ): Promise<string | undefined> => {
-          if (!companyId) {
-            return undefined;
-          }
-
-          if (preferredLocationId) {
-            return preferredLocationId;
-          }
-
+        const readRecentInstallWebhookSignals = async (): Promise<CrmInstallWebhookSignal[]> => {
           const recentInstallEvents = await prisma.webhookEvent.findMany({
             where: {
               platform: crmPlatformId,
@@ -387,107 +382,32 @@ router.get(
             },
           });
 
-          for (const event of recentInstallEvents) {
-            const payload =
-              typeof event.payload === 'object' && event.payload !== null
-                ? event.payload as Record<string, unknown>
-                : null;
-
-            if (!payload) {
-              continue;
-            }
-
-            const payloadCompanyId =
-              typeof payload['companyId'] === 'string' ? payload['companyId'] : null;
-            const payloadLocationId =
-              typeof payload['locationId'] === 'string' ? payload['locationId'] : null;
-            const payloadAppId =
-              typeof payload['appId'] === 'string' ? payload['appId'] : null;
-            const payloadUserId =
-              typeof payload['userId'] === 'string' ? payload['userId'] : null;
-
-            if (!payloadLocationId || !payloadCompanyId || payloadCompanyId !== companyId) {
-              continue;
-            }
-
-            if (userId && payloadUserId && payloadUserId !== userId) {
-              continue;
-            }
-
-            if (payloadAppId && payloadAppId !== appId) {
-              continue;
-            }
-
-            logger.info(
-              { companyId, resolvedLocationId: payloadLocationId, eventCreatedAt: event.createdAt.toISOString() },
-              'Resolved the workspace location from a recent install webhook'
-            );
-            return payloadLocationId;
-          }
-
-          const installedLocations = await crmPlatformAdapter.getInstalledLocations(tokens.accessToken, {
-            companyId,
-            appId,
-            limit: 100,
-            restrictToUserLocations: true,
-          });
-          const fallbackLocations =
-            installedLocations.length > 0
-              ? installedLocations
-              : await crmPlatformAdapter.getInstalledLocations(tokens.accessToken, {
-                  companyId,
-                  appId,
-                  limit: 100,
-                });
-
-          if (fallbackLocations[0]) {
-            const fallbackLocationId = fallbackLocations[0].id;
-            logger.warn(
-              {
-                companyId,
-                resolvedLocationId: fallbackLocationId,
-                installedLocationCount: fallbackLocations.length,
-              },
-              'Resolved the workspace location from the installed locations fallback'
-            );
-            return fallbackLocationId;
-          }
-
-          return undefined;
-        };
-        const resolveLocationWithRetry = async (
-          preferredLocationId?: string
-        ): Promise<string | undefined> => {
-          let candidateLocationId = preferredLocationId;
-          const maxResolutionAttempts = state ? 2 : 8;
-
-          for (let attempt = 1; attempt <= maxResolutionAttempts; attempt += 1) {
-            candidateLocationId = await resolveLocationFromInstallSignals(candidateLocationId);
-            if (candidateLocationId) {
-              return candidateLocationId;
-            }
-
-            if (attempt >= maxResolutionAttempts) {
-              break;
-            }
-
-            logger.warn(
-              {
-                attempt,
-                maxResolutionAttempts,
-                companyId,
-                userId,
-              },
-              'Waiting for install signals to resolve the workspace location'
-            );
-
-            await delay(1200);
-          }
-
-          return undefined;
+          return recentInstallEvents.map((event) => ({
+            payload: event.payload,
+            createdAt: event.createdAt,
+          }));
         };
 
-        resolvedLocationId = await resolveLocationWithRetry(resolvedLocationId);
+        const locationResolution = await resolveCrmOAuthLocation({
+          companyId,
+          preferredLocationId: resolvedLocationId,
+          userId,
+          appId,
+          maxInstallSignalAttempts: state ? 2 : 8,
+          installSignalRetryDelayMs: 1200,
+          readRecentInstallWebhookSignals,
+          readInstalledLocations: (restrictToUserLocations) =>
+            crmPlatformAdapter.getInstalledLocations(tokens.accessToken, {
+              companyId: companyId!,
+              appId,
+              limit: 100,
+              ...(restrictToUserLocations ? { restrictToUserLocations: true } : {}),
+            }),
+          wait: delay,
+          logger,
+        });
+
+        resolvedLocationId = locationResolution.locationId;
 
         if (!companyId || !resolvedLocationId) {
           const maybeReturnedLocationId =
@@ -540,7 +460,13 @@ router.get(
             );
 
             await delay(1200);
-            resolvedLocationId = await resolveLocationFromInstallSignals() ?? resolvedLocationId;
+            const latestInstallWebhookMatch = companyId
+              ? findMatchingCrmInstallWebhookLocation(
+                  await readRecentInstallWebhookSignals(),
+                  { companyId, userId, appId }
+                )
+              : null;
+            resolvedLocationId = latestInstallWebhookMatch?.locationId ?? resolvedLocationId;
           }
         }
 
@@ -583,6 +509,10 @@ router.get(
       tokens.platformAccountId,
       tokens.companyId
     );
+    const crmConnectionCompanyId =
+      platform === crmPlatformId
+        ? tokens.companyId ?? crmTokenContext?.companyId ?? callbackCompanyIdValue
+        : undefined;
 
     // Find or create organization
     const { organizationId, isNew } = await platformService.findOrCreateOrganization(
@@ -593,7 +523,8 @@ router.get(
         email: accountInfo.email ?? `${accountInfo.id}@${platform}.local`,
         phone: accountInfo.phone,
         website: accountInfo.website,
-      }
+      },
+      crmConnectionCompanyId ? { companyId: crmConnectionCompanyId } : undefined
     );
 
     // Create/update platform connection
@@ -610,7 +541,7 @@ router.get(
       scopes: tokens.scope?.split(' ') ?? [],
       metadata: {
         ...(accountInfo.metadata ?? {}),
-        ...(tokens.companyId ? { companyId: tokens.companyId } : {}),
+        ...(crmConnectionCompanyId ? { companyId: crmConnectionCompanyId } : {}),
         ...(crmTokenContext
           ? {
               ghlAuthClass: crmTokenContext.authClass ?? null,
