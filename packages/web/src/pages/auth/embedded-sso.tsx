@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { AlertCircle, CheckCircle, Loader2 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 import { useAuthStore } from '@/stores/auth.store';
 
 function getEmbeddedDataFromQuery(
@@ -23,8 +23,25 @@ export function EmbeddedSsoPage() {
   const { loginViaOAuth, checkAuth } = useAuthStore();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
+  const [reconnectUrl, setReconnectUrl] = useState<string | null>(null);
 
   useEffect(() => {
+    const getReconnectAuthUrl = (err: unknown): string | null => {
+      const details = err instanceof ApiError
+        ? err.details
+        : (err as { details?: Record<string, unknown> } | null | undefined)?.details;
+      const authUrl = details?.authUrl;
+
+      return typeof authUrl === 'string' && authUrl ? authUrl : null;
+    };
+
+    const redirectToReconnect = (authUrl: string) => {
+      setReconnectUrl(authUrl);
+      setError(null);
+      setStatus('loading');
+      window.location.assign(authUrl);
+    };
+
     const requestEncryptedData = async (): Promise<string | null> => {
       if (window.parent !== window) {
         const parentPayload = await new Promise<string | null>((resolve) => {
@@ -67,18 +84,18 @@ export function EmbeddedSsoPage() {
     };
 
     const bootstrap = async () => {
-      const hasExistingSession = await checkAuth();
-      if (hasExistingSession) {
-        setStatus('success');
-        setTimeout(() => {
-          navigate('/onboarding', { replace: true });
-        }, 250);
-        return;
-      }
-
       const encryptedData = await requestEncryptedData();
 
       if (!encryptedData) {
+        const hasExistingSession = await checkAuth();
+        if (hasExistingSession) {
+          setStatus('success');
+          setTimeout(() => {
+            navigate('/onboarding', { replace: true });
+          }, 250);
+          return;
+        }
+
         setStatus('error');
         setError('Missing embedded user context. Open this page from the embedded app entry inside your CRM.');
         return;
@@ -89,6 +106,12 @@ export function EmbeddedSsoPage() {
         try {
           response = await api.exchangeEmbeddedSso(encryptedData);
         } catch (firstError) {
+          const reconnectAuthUrl = getReconnectAuthUrl(firstError);
+          if (reconnectAuthUrl) {
+            redirectToReconnect(reconnectAuthUrl);
+            return;
+          }
+
           await new Promise((resolve) => window.setTimeout(resolve, 750));
           response = await api.exchangeEmbeddedSso(encryptedData);
         }
@@ -108,13 +131,19 @@ export function EmbeddedSsoPage() {
           navigate('/onboarding', { replace: true });
         }, 800);
       } catch (err: any) {
+        const reconnectAuthUrl = getReconnectAuthUrl(err);
+        if (reconnectAuthUrl) {
+          redirectToReconnect(reconnectAuthUrl);
+          return;
+        }
+
         setStatus('error');
         setError(err?.message || 'Failed to complete embedded sign-in');
       }
     };
 
     bootstrap();
-  }, [loginViaOAuth, navigate, searchParams]);
+  }, [checkAuth, loginViaOAuth, navigate, searchParams]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -131,9 +160,13 @@ export function EmbeddedSsoPage() {
         {status === 'loading' && (
           <>
             <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto" />
-            <h2 className="text-xl font-semibold">Opening Signalmash Connect...</h2>
+            <h2 className="text-xl font-semibold">
+              {reconnectUrl ? 'Reconnect workspace' : 'Opening Signalmash Connect...'}
+            </h2>
             <p className="text-muted-foreground">
-              Requesting workspace context from your CRM and preparing the embedded workspace.
+              {reconnectUrl
+                ? 'Redirecting to the CRM authorization screen for this workspace.'
+                : 'Requesting workspace context from your CRM and preparing the embedded workspace.'}
             </p>
           </>
         )}
@@ -166,9 +199,7 @@ export function EmbeddedSsoPage() {
               }}
               className="mt-4 rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:opacity-90"
             >
-              {error?.toLowerCase().includes('workspace')
-                ? 'Return to CRM'
-                : 'Open standard connect flow'}
+              Open standard connect flow
             </button>
           </>
         )}

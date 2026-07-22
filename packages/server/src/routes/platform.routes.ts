@@ -27,6 +27,9 @@ import {
   resolveCrmOAuthLocation,
   type CrmInstallWebhookSignal,
 } from '../services/ghl-oauth-location-resolution.service.js';
+import {
+  leadconnectorConnectionMatchesCompany,
+} from '../services/ghl-install-reconciliation.service.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
@@ -165,6 +168,107 @@ async function getCrmOAuthEmbeddedSessionContext(input: {
 
   return {
     locationId: input.accountInfoId,
+    installationId: installation.id,
+  };
+}
+
+async function findLeadconnectorOrganizationAnchorByCompanyId(
+  companyId: string
+): Promise<PlatformConnection | null> {
+  const connections = await prisma.platformConnection.findMany({
+    where: {
+      platform: crmPlatformId,
+    },
+    orderBy: [
+      { status: 'asc' },
+      { updatedAt: 'desc' },
+      { createdAt: 'desc' },
+    ],
+  });
+
+  return connections.find((connection) =>
+    leadconnectorConnectionMatchesCompany(connection, companyId)
+  ) ?? null;
+}
+
+async function createEmbeddedCrmReconnectState(input: {
+  crmPlatformAdapter: CrmPlatformAdapter;
+  locationId: string;
+  companyId?: string;
+  userId?: string;
+  reason: string;
+}): Promise<{
+  authUrl: string;
+  organizationId: string;
+  installationId: string;
+} | null> {
+  if (!input.companyId) {
+    return null;
+  }
+
+  const organizationAnchor = await findLeadconnectorOrganizationAnchorByCompanyId(input.companyId);
+  if (!organizationAnchor) {
+    return null;
+  }
+
+  const now = new Date();
+  const installation = await prisma.platformInstallation.upsert({
+    where: {
+      organizationId_platform_externalAccountId: {
+        organizationId: organizationAnchor.organizationId,
+        platform: crmPlatformId,
+        externalAccountId: input.locationId,
+      },
+    },
+    create: {
+      organizationId: organizationAnchor.organizationId,
+      platform: crmPlatformId,
+      externalAccountId: input.locationId,
+      status: 'pending',
+      metadata: {
+        companyId: input.companyId,
+        reconnectReason: input.reason,
+        reconnectSource: 'embedded_sso',
+        lastEmbeddedSsoAt: now.toISOString(),
+        lastEmbeddedSsoLocationId: input.locationId,
+        lastEmbeddedSsoCompanyId: input.companyId,
+        lastEmbeddedSsoUserId: input.userId ?? null,
+      },
+    },
+    update: {
+      status: 'pending',
+      metadata: {
+        companyId: input.companyId,
+        reconnectReason: input.reason,
+        reconnectSource: 'embedded_sso',
+        lastEmbeddedSsoAt: now.toISOString(),
+        lastEmbeddedSsoLocationId: input.locationId,
+        lastEmbeddedSsoCompanyId: input.companyId,
+        lastEmbeddedSsoUserId: input.userId ?? null,
+      },
+    },
+  });
+
+  const state = generateUrlSafeToken(32);
+  const redirectUri = buildPlatformCallbackUrl(crmPublicPlatformId);
+
+  await prisma.oAuthState.create({
+    data: {
+      state,
+      platform: crmPlatformId,
+      organizationId: organizationAnchor.organizationId,
+      redirectUri,
+      embeddedLocationId: input.locationId,
+      embeddedInstallationId: installation.id,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    },
+  });
+
+  const authUrl = await input.crmPlatformAdapter.getAuthorizationUrl(state, redirectUri);
+
+  return {
+    authUrl,
+    organizationId: organizationAnchor.organizationId,
     installationId: installation.id,
   };
 }
@@ -591,6 +695,42 @@ router.get(
       tokens.platformAccountId,
       tokens.companyId
     );
+    const expectedCrmLocationId =
+      platform === crmPlatformId
+        ? callbackLocationIdValue ?? storedEmbeddedLocationId ?? undefined
+        : undefined;
+
+    if (
+      platform === crmPlatformId &&
+      expectedCrmLocationId &&
+      accountInfo.id !== expectedCrmLocationId
+    ) {
+      logger.error(
+        {
+          platform,
+          expectedLocationId: expectedCrmLocationId,
+          accountInfoId: accountInfo.id,
+          tokenLocationId: crmTokenContext?.locationId ?? tokens.platformAccountId ?? null,
+          storedEmbeddedLocationId,
+          storedEmbeddedInstallationId,
+        },
+        'Rejected CRM OAuth callback because the authorized workspace did not match the embedded workspace'
+      );
+
+      if (!state) {
+        const installCompleteUrl = new URL(`${config.webUrl}/auth/install-complete`);
+        installCompleteUrl.searchParams.set('platform', getPublicPlatformRouteParam(platform));
+        installCompleteUrl.searchParams.set('success', 'false');
+        installCompleteUrl.searchParams.set('reason', 'location_token_mismatch');
+        res.redirect(installCompleteUrl.toString());
+        return;
+      }
+
+      throw new BadRequestError(
+        'The CRM workspace returned by OAuth did not match the embedded workspace. Reconnect from the target workspace and try again.'
+      );
+    }
+
     const crmConnectionCompanyId =
       platform === crmPlatformId
         ? tokens.companyId ?? crmTokenContext?.companyId ?? callbackCompanyIdValue
@@ -744,6 +884,44 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
     throw new BadRequestError('Invalid embedded sign-in payload');
   }
 
+  const failWithReconnect = async (reason: string, message: string): Promise<void> => {
+    const reconnect = await createEmbeddedCrmReconnectState({
+      crmPlatformAdapter,
+      locationId: ssoPayload.locationId!,
+      companyId: ssoPayload.companyId,
+      userId: ssoPayload.userId,
+      reason,
+    });
+
+    if (reconnect) {
+      logger.info(
+        {
+          locationId: ssoPayload.locationId,
+          companyId: ssoPayload.companyId ?? null,
+          organizationId: reconnect.organizationId,
+          installationId: reconnect.installationId,
+          reason,
+        },
+        'Prepared CRM OAuth reconnect URL for embedded sign-in'
+      );
+
+      throw new BadRequestError(message, {
+        reason: 'workspace_reconnect_required',
+        authUrl: reconnect.authUrl,
+        locationId: ssoPayload.locationId,
+        companyId: ssoPayload.companyId ?? null,
+        organizationId: reconnect.organizationId,
+        installationId: reconnect.installationId,
+      });
+    }
+
+    throw new BadRequestError(message, {
+      reason,
+      locationId: ssoPayload.locationId,
+      companyId: ssoPayload.companyId ?? null,
+    });
+  };
+
   let connection = await platformService.getByPlatformAccount(
     crmPlatformId,
     ssoPayload.locationId
@@ -824,9 +1002,11 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
   }
 
   if (!connection) {
-    throw new BadRequestError(
-      'This workspace is not connected yet. Install or reconnect the Signalmash app first.'
+    await failWithReconnect(
+      'workspace_not_connected',
+      'This workspace is not connected yet. Reconnect the Signalmash app from this workspace to continue.'
     );
+    return;
   }
 
   const installation = connection.installationId
@@ -872,9 +1052,11 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
       'Rejected embedded CRM SSO exchange because the workspace connection is not active'
     );
 
-    throw new BadRequestError(
-      'This workspace connection is inactive. Reconnect the Signalmash app from this workspace and try again.'
+    await failWithReconnect(
+      'workspace_connection_inactive',
+      'This workspace connection is inactive. Reconnect the Signalmash app from this workspace to continue.'
     );
+    return;
   }
 
   const authResult = await authService.loginViaOAuth(connection.organizationId, {
