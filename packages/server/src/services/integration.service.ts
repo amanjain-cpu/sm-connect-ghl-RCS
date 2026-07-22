@@ -15,6 +15,7 @@ import type {
   Platform,
   PlatformConnection,
 } from '@prisma/client';
+import { resolveMessageMappingContext } from './message-mapping-routing.service.js';
 
 export class IntegrationService {
   async getPrimaryInstallationForOrganization(
@@ -301,12 +302,15 @@ export class IntegrationService {
         })
       : null;
 
-    const primaryInstallation = connectionInfo
+    const primaryInstallation = message.platformConnectionId
       ? null
       : await this.getPrimaryInstallation(message.organizationId);
 
-    const installationId = connectionInfo?.installationId ?? primaryInstallation?.id;
-    const platform = connectionInfo?.platform ?? primaryInstallation?.platform ?? 'leadconnector';
+    const { installationId, platform } = resolveMessageMappingContext({
+      hasPlatformConnectionId: Boolean(message.platformConnectionId),
+      connectionInfo,
+      primaryInstallation,
+    });
 
     const result = await this.upsertExternalResourceMapping({
       organizationId: message.organizationId,

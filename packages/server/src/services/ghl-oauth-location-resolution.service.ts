@@ -11,7 +11,8 @@ export interface CrmInstalledLocation {
 
 interface ResolveCrmOAuthLocationInput {
   companyId?: string;
-  preferredLocationId?: string;
+  currentRequestLocationId?: string;
+  tokenLocationId?: string;
   userId?: string;
   appId?: string;
   maxInstallSignalAttempts: number;
@@ -26,9 +27,10 @@ interface ResolveCrmOAuthLocationInput {
 }
 
 export type CrmOAuthLocationResolutionSource =
-  | 'preferred'
+  | 'current_request'
   | 'install_webhook'
   | 'installed_locations'
+  | 'token'
   | 'unresolved';
 
 export interface CrmOAuthLocationResolution {
@@ -98,15 +100,17 @@ export async function resolveCrmOAuthLocation(
     warn: () => undefined,
   };
 
-  if (input.preferredLocationId) {
+  if (input.currentRequestLocationId) {
     return {
-      locationId: input.preferredLocationId,
-      source: 'preferred',
+      locationId: input.currentRequestLocationId,
+      source: 'current_request',
     };
   }
 
   if (!input.companyId) {
-    return { source: 'unresolved' };
+    return input.tokenLocationId
+      ? { locationId: input.tokenLocationId, source: 'token' }
+      : { source: 'unresolved' };
   }
 
   const wait = input.wait ?? ((ms: number) =>
@@ -175,6 +179,21 @@ export async function resolveCrmOAuthLocation(
       locationId: fallbackLocationId,
       source: 'installed_locations',
       installedLocationCount: fallbackLocations.length,
+    };
+  }
+
+  if (input.tokenLocationId) {
+    logger.warn(
+      {
+        companyId: input.companyId,
+        resolvedLocationId: input.tokenLocationId,
+      },
+      'Resolved the workspace location from token context after install webhook and installed-location fallbacks were exhausted'
+    );
+
+    return {
+      locationId: input.tokenLocationId,
+      source: 'token',
     };
   }
 

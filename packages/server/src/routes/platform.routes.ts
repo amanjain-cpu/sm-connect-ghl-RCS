@@ -21,6 +21,7 @@ import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { setAuthCookies } from '../utils/auth-cookies.js';
 import { adminService, SETTINGS_KEYS } from '../services/admin.service.js';
+import type { PlatformConnection } from '@prisma/client';
 import {
   findMatchingCrmInstallWebhookLocation,
   resolveCrmOAuthLocation,
@@ -103,6 +104,69 @@ async function getEmbeddedCrmReturnUrl(
     `/v2/location/${encodeURIComponent(locationId)}/custom-page-link/${encodeURIComponent(customPageLinkId)}`,
     origin
   ).toString();
+}
+
+async function getCrmOAuthEmbeddedSessionContext(input: {
+  organizationId: string;
+  accountInfoId: string;
+  connection: PlatformConnection;
+}) {
+  let installation = input.connection.installationId
+    ? await prisma.platformInstallation.findFirst({
+        where: {
+          id: input.connection.installationId,
+          organizationId: input.organizationId,
+          platform: crmPlatformId,
+          externalAccountId: input.accountInfoId,
+        },
+        select: {
+          id: true,
+          status: true,
+          externalAccountId: true,
+        },
+      })
+    : null;
+
+  if (!installation) {
+    installation = await prisma.platformInstallation.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        platform: crmPlatformId,
+        externalAccountId: input.accountInfoId,
+      },
+      select: {
+        id: true,
+        status: true,
+        externalAccountId: true,
+      },
+    });
+  }
+
+  if (!installation || installation.status !== 'connected') {
+    const syncedInstallation = await integrationService.syncInstallationFromConnection(input.connection);
+    installation = {
+      id: syncedInstallation.id,
+      status: syncedInstallation.status,
+      externalAccountId: syncedInstallation.externalAccountId,
+    };
+  }
+
+  if (installation.externalAccountId !== input.accountInfoId) {
+    throw new BadRequestError(
+      'The connected CRM workspace did not match the OAuth callback workspace.'
+    );
+  }
+
+  if (installation.status !== 'connected') {
+    throw new BadRequestError(
+      'The CRM workspace connection is not active. Reconnect from the target workspace and try again.'
+    );
+  }
+
+  return {
+    locationId: input.accountInfoId,
+    installationId: installation.id,
+  };
 }
 
 // Validation schemas
@@ -194,6 +258,8 @@ router.get(
         platform: platform as any,
         organizationId: req.user?.organizationId,
         redirectUri,
+        embeddedLocationId: req.user?.embeddedLocationId,
+        embeddedInstallationId: req.user?.embeddedInstallationId,
         expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
       },
     });
@@ -227,6 +293,8 @@ router.get(
     const callbackUserIdValue = getQueryString(callbackUserId);
 
     let storedOrganizationId: string | null = null;
+    let storedEmbeddedLocationId: string | null = null;
+    let storedEmbeddedInstallationId: string | null = null;
 
     // Verify state if provided (app-initiated flow)
     // State is optional for direct marketplace installs that originate inside the CRM shell.
@@ -247,6 +315,8 @@ router.get(
       }
 
       storedOrganizationId = storedState.organizationId;
+      storedEmbeddedLocationId = storedState.embeddedLocationId;
+      storedEmbeddedInstallationId = storedState.embeddedInstallationId;
     } else {
       // Marketplace install without a stored state token.
       logger.info({ platform }, 'OAuth callback without state (marketplace install)');
@@ -358,10 +428,7 @@ router.get(
           callbackCompanyIdValue;
         const userId = tokens.userId ?? callbackUserIdValue;
         const appId = await crmPlatformAdapter.getMarketplaceAppId();
-        let resolvedLocationId =
-          tokens.platformAccountId ??
-          crmTokenContext.locationId ??
-          callbackLocationIdValue;
+        let resolvedLocationId: string | undefined;
 
         const readRecentInstallWebhookSignals = async (): Promise<CrmInstallWebhookSignal[]> => {
           const recentInstallEvents = await prisma.webhookEvent.findMany({
@@ -390,7 +457,8 @@ router.get(
 
         const locationResolution = await resolveCrmOAuthLocation({
           companyId,
-          preferredLocationId: resolvedLocationId,
+          currentRequestLocationId: callbackLocationIdValue ?? storedEmbeddedLocationId ?? undefined,
+          tokenLocationId: tokens.platformAccountId ?? crmTokenContext.locationId,
           userId,
           appId,
           maxInstallSignalAttempts: state ? 2 : 8,
@@ -408,6 +476,20 @@ router.get(
         });
 
         resolvedLocationId = locationResolution.locationId;
+
+        logger.info(
+          {
+            platform,
+            companyId,
+            resolvedLocationId,
+            resolutionSource: locationResolution.source,
+            callbackLocationId: callbackLocationIdValue ?? null,
+            storedEmbeddedLocationId,
+            storedEmbeddedInstallationId,
+            tokenLocationId: crmTokenContext.locationId ?? tokens.platformAccountId ?? null,
+          },
+          'Resolved CRM OAuth workspace location'
+        );
 
         if (!companyId || !resolvedLocationId) {
           const maybeReturnedLocationId =
@@ -528,7 +610,7 @@ router.get(
     );
 
     // Create/update platform connection
-    await platformService.createConnection({
+    const connection = await platformService.createConnection({
       organizationId,
       platform: platform as any,
       platformAccountId: accountInfo.id,
@@ -551,12 +633,29 @@ router.get(
               ghlTokenCompanyId: crmTokenContext.companyId ?? null,
               ghlTokenScopes: crmTokenContext.scopes,
             }
-          : {}),
+        : {}),
       },
     });
 
+    const crmEmbeddedSessionContext =
+      platform === crmPlatformId
+        ? await getCrmOAuthEmbeddedSessionContext({
+            organizationId,
+            accountInfoId: accountInfo.id,
+            connection,
+          })
+        : null;
+
     logger.info(
-      { platform, accountId: accountInfo.id, organizationId },
+      {
+        platform,
+        accountId: accountInfo.id,
+        organizationId,
+        connectionId: connection.id,
+        resolvedLocationId: crmEmbeddedSessionContext?.locationId ?? null,
+        installationId: crmEmbeddedSessionContext?.installationId ?? null,
+        tokenLocationId: crmTokenContext?.locationId ?? null,
+      },
       'Platform connected successfully'
     );
 
@@ -571,7 +670,10 @@ router.get(
     }
 
     if (!state) {
-      const authResult = await authService.loginViaOAuth(organizationId);
+      const authResult = await authService.loginViaOAuth(
+        organizationId,
+        crmEmbeddedSessionContext ?? {}
+      );
       setAuthCookies(req, res, authResult.tokens);
       const embeddedCrmReturnUrl =
         platform === crmPlatformId
@@ -597,7 +699,10 @@ router.get(
     }
 
     // Auto-login: Create user session and get JWT tokens for app-initiated OAuth
-    const authResult = await authService.loginViaOAuth(organizationId);
+    const authResult = await authService.loginViaOAuth(
+      organizationId,
+      crmEmbeddedSessionContext ?? {}
+    );
     setAuthCookies(req, res, authResult.tokens);
     const embeddedCrmReturnUrl =
       platform === crmPlatformId

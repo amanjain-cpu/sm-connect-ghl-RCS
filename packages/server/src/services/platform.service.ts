@@ -150,7 +150,9 @@ export class PlatformService {
 
     await integrationService.syncInstallationFromConnection(connection);
 
-    return connection;
+    return prisma.platformConnection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
   }
 
   /**
@@ -386,7 +388,9 @@ export class PlatformService {
 
     await integrationService.syncInstallationFromConnection(connection);
 
-    return connection;
+    return prisma.platformConnection.findUniqueOrThrow({
+      where: { id },
+    });
   }
 
   /**
