@@ -30,6 +30,10 @@ import {
 import {
   leadconnectorConnectionMatchesCompany,
 } from '../services/ghl-install-reconciliation.service.js';
+import {
+  addEmbeddedReconnectCompletionParams,
+  buildEmbeddedCrmReconnectRequiredResult,
+} from '../services/embedded-crm-sso-flow.service.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
@@ -858,6 +862,7 @@ router.get(
     if (embeddedCrmReturnUrl) {
       successUrl.searchParams.set('returnTo', embeddedCrmReturnUrl);
     }
+    addEmbeddedReconnectCompletionParams({ successUrl, storedEmbeddedLocationId });
     if (isNew) {
       successUrl.searchParams.set('isNew', 'true');
     }
@@ -884,7 +889,7 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
     throw new BadRequestError('Invalid embedded sign-in payload');
   }
 
-  const failWithReconnect = async (reason: string, message: string): Promise<void> => {
+  const sendReconnectRequired = async (reason: string, message: string): Promise<void> => {
     const reconnect = await createEmbeddedCrmReconnectState({
       crmPlatformAdapter,
       locationId: ssoPayload.locationId!,
@@ -905,14 +910,20 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
         'Prepared CRM OAuth reconnect URL for embedded sign-in'
       );
 
-      throw new BadRequestError(message, {
-        reason: 'workspace_reconnect_required',
-        authUrl: reconnect.authUrl,
-        locationId: ssoPayload.locationId,
-        companyId: ssoPayload.companyId ?? null,
-        organizationId: reconnect.organizationId,
-        installationId: reconnect.installationId,
+      res.json({
+        success: true,
+        data: {
+          ...buildEmbeddedCrmReconnectRequiredResult({
+            authUrl: reconnect.authUrl,
+            locationId: ssoPayload.locationId!,
+            installationId: reconnect.installationId,
+            message,
+          }),
+          companyId: ssoPayload.companyId ?? null,
+          organizationId: reconnect.organizationId,
+        },
       });
+      return;
     }
 
     throw new BadRequestError(message, {
@@ -1002,7 +1013,7 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
   }
 
   if (!connection) {
-    await failWithReconnect(
+    await sendReconnectRequired(
       'workspace_not_connected',
       'This workspace is not connected yet. Reconnect the Signalmash app from this workspace to continue.'
     );
@@ -1052,7 +1063,7 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
       'Rejected embedded CRM SSO exchange because the workspace connection is not active'
     );
 
-    await failWithReconnect(
+    await sendReconnectRequired(
       'workspace_connection_inactive',
       'This workspace connection is inactive. Reconnect the Signalmash app from this workspace to continue.'
     );
@@ -1065,11 +1076,24 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
   });
   setAuthCookies(req, res, authResult.tokens);
 
+  logger.info(
+    {
+      locationId: ssoPayload.locationId,
+      installationId: installation.id,
+      connectionId: connection.id,
+      organizationId: connection.organizationId,
+    },
+    'Embedded CRM SSO exchange completed successfully'
+  );
+
   res.json({
     success: true,
     data: {
+      action: 'authenticated',
       ...authResult,
       locationId: ssoPayload.locationId,
+      installationId: installation.id,
+      connectionId: connection.id,
     },
   });
 });

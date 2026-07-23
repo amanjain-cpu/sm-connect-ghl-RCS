@@ -17,6 +17,9 @@ export function AuthCallbackPage() {
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
   const [showCloseHint, setShowCloseHint] = useState(false);
+  const isMarketplaceInstall = searchParams.get('marketplaceInstall') === 'true';
+  const isEmbeddedReconnect = searchParams.get('embeddedReconnect') === 'true';
+  const isMarketplaceCompletion = isMarketplaceInstall || isEmbeddedReconnect;
 
   useEffect(() => {
     const handleCallback = async () => {
@@ -24,7 +27,6 @@ export function AuthCallbackPage() {
       const refreshToken = searchParams.get('refreshToken');
       const success = searchParams.get('success');
       const isNew = searchParams.get('isNew');
-      const isMarketplaceInstall = searchParams.get('marketplaceInstall') === 'true';
 
       if (success !== 'true' || !accessToken || !refreshToken) {
         setStatus('error');
@@ -37,7 +39,7 @@ export function AuthCallbackPage() {
         setStatus('success');
 
         setTimeout(() => {
-          if (isMarketplaceInstall) {
+          if (isMarketplaceCompletion) {
             finishMarketplaceInstallTab({
               explicitReturnUrl: searchParams.get('returnTo'),
               onStayOpen: () => setShowCloseHint(true),
@@ -58,7 +60,7 @@ export function AuthCallbackPage() {
     };
 
     handleCallback();
-  }, [searchParams, loginViaOAuth, navigate]);
+  }, [searchParams, loginViaOAuth, navigate, isMarketplaceCompletion]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -76,12 +78,12 @@ export function AuthCallbackPage() {
           <div className="space-y-4">
             <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto" />
             <h2 className="text-xl font-semibold">
-              {searchParams.get('marketplaceInstall') === 'true'
-                ? 'Completing installation...'
+              {isMarketplaceCompletion
+                ? 'Completing authorization...'
                 : 'Completing authentication...'}
             </h2>
             <p className="text-muted-foreground">
-              {searchParams.get('marketplaceInstall') === 'true'
+              {isMarketplaceCompletion
                 ? 'Please wait while we prepare your Signalmash Connect workspace.'
                 : 'Please wait while we set up your session'}
             </p>
@@ -94,16 +96,18 @@ export function AuthCallbackPage() {
               <CheckCircle className="h-10 w-10" />
             </div>
             <h2 className="text-xl font-semibold">
-              {searchParams.get('marketplaceInstall') === 'true'
-                ? 'Installation complete'
-                : 'Authentication successful!'}
+              {isEmbeddedReconnect
+                ? 'Authorization complete'
+                : isMarketplaceInstall
+                  ? 'Installation complete'
+                  : 'Authentication successful!'}
             </h2>
             <p className="text-muted-foreground">
-              {searchParams.get('marketplaceInstall') === 'true'
+              {isMarketplaceCompletion
                 ? 'HighLevel is reopening Signalmash Connect inside the installed workspace.'
                 : 'Redirecting to your dashboard...'}
             </p>
-            {searchParams.get('marketplaceInstall') === 'true' && showCloseHint && (
+            {isMarketplaceCompletion && showCloseHint && (
               <div className="space-y-3">
                 <p className="text-sm text-muted-foreground">
                   This install tab can be closed if it stays open.

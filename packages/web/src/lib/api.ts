@@ -29,6 +29,30 @@ interface ApiResponse<T> {
   };
 }
 
+export type EmbeddedSsoAuthenticatedData = {
+  action: 'authenticated';
+  user: any;
+  organization: any;
+  tokens: { accessToken: string; refreshToken: string; expiresIn: number };
+  locationId: string;
+  installationId: string;
+  connectionId: string;
+};
+
+export type EmbeddedSsoReconnectRequiredData = {
+  action: 'reconnect_required';
+  authUrl: string;
+  locationId: string;
+  installationId: string;
+  message: string;
+  companyId?: string | null;
+  organizationId?: string | null;
+};
+
+export type EmbeddedSsoExchangeData =
+  | EmbeddedSsoAuthenticatedData
+  | EmbeddedSsoReconnectRequiredData;
+
 class ApiClient {
   private baseUrl: string;
   private accessToken: string | null = null;
@@ -67,12 +91,10 @@ class ApiClient {
   }
 
   async exchangeEmbeddedSso(encryptedData: string) {
-    return this.post<{
-      user: any;
-      organization: any;
-      tokens: { accessToken: string; refreshToken: string; expiresIn: number };
-      locationId: string;
-    }>(`/platforms/${crmPublicPlatformId}/sso/exchange`, { encryptedData });
+    return this.post<EmbeddedSsoExchangeData>(
+      `/platforms/${crmPublicPlatformId}/sso/exchange`,
+      { encryptedData }
+    );
   }
 
   private async request<T>(

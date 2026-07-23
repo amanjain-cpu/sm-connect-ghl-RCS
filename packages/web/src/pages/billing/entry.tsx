@@ -133,6 +133,10 @@ export function BillingEntryPage() {
           throw new Error('Failed to complete embedded sign-in');
         }
 
+        if (response.data.action === 'reconnect_required') {
+          throw new Error(response.data.message);
+        }
+
         await loginViaOAuth(
           response.data.tokens.accessToken,
           response.data.tokens.refreshToken
