@@ -28,9 +28,6 @@ import {
   type CrmInstallWebhookSignal,
 } from '../services/ghl-oauth-location-resolution.service.js';
 import {
-  leadconnectorConnectionMatchesCompany,
-} from '../services/ghl-install-reconciliation.service.js';
-import {
   addEmbeddedReconnectCompletionParams,
   buildEmbeddedCrmReconnectRequiredResult,
 } from '../services/embedded-crm-sso-flow.service.js';
@@ -176,25 +173,6 @@ async function getCrmOAuthEmbeddedSessionContext(input: {
   };
 }
 
-async function findLeadconnectorOrganizationAnchorByCompanyId(
-  companyId: string
-): Promise<PlatformConnection | null> {
-  const connections = await prisma.platformConnection.findMany({
-    where: {
-      platform: crmPlatformId,
-    },
-    orderBy: [
-      { status: 'asc' },
-      { updatedAt: 'desc' },
-      { createdAt: 'desc' },
-    ],
-  });
-
-  return connections.find((connection) =>
-    leadconnectorConnectionMatchesCompany(connection, companyId)
-  ) ?? null;
-}
-
 async function createEmbeddedCrmReconnectState(input: {
   crmPlatformAdapter: CrmPlatformAdapter;
   locationId: string;
@@ -210,8 +188,15 @@ async function createEmbeddedCrmReconnectState(input: {
     return null;
   }
 
-  const organizationAnchor = await findLeadconnectorOrganizationAnchorByCompanyId(input.companyId);
-  if (!organizationAnchor) {
+  const organizationIdentity = await platformService.resolveLeadconnectorOrganizationIdentity({
+    locationId: input.locationId,
+    companyId: input.companyId,
+    logContext: 'embedded_reconnect_state',
+    allowUnanchoredStoredOrganization: false,
+    allowUnanchoredRequestedOrganization: false,
+  });
+
+  if (!organizationIdentity.organizationId) {
     return null;
   }
 
@@ -219,13 +204,13 @@ async function createEmbeddedCrmReconnectState(input: {
   const installation = await prisma.platformInstallation.upsert({
     where: {
       organizationId_platform_externalAccountId: {
-        organizationId: organizationAnchor.organizationId,
+        organizationId: organizationIdentity.organizationId,
         platform: crmPlatformId,
         externalAccountId: input.locationId,
       },
     },
     create: {
-      organizationId: organizationAnchor.organizationId,
+      organizationId: organizationIdentity.organizationId,
       platform: crmPlatformId,
       externalAccountId: input.locationId,
       status: 'pending',
@@ -260,7 +245,7 @@ async function createEmbeddedCrmReconnectState(input: {
     data: {
       state,
       platform: crmPlatformId,
-      organizationId: organizationAnchor.organizationId,
+      organizationId: organizationIdentity.organizationId,
       redirectUri,
       embeddedLocationId: input.locationId,
       embeddedInstallationId: installation.id,
@@ -272,7 +257,7 @@ async function createEmbeddedCrmReconnectState(input: {
 
   return {
     authUrl,
-    organizationId: organizationAnchor.organizationId,
+    organizationId: organizationIdentity.organizationId,
     installationId: installation.id,
   };
 }
@@ -471,7 +456,8 @@ router.get(
           {
             name: placeholderAccountName,
             email: `${input.companyId}@${platform}.local`,
-          }
+          },
+          { companyId: input.companyId }
         );
 
         await platformService.createConnection({
@@ -487,7 +473,7 @@ router.get(
           scopes: tokens.scope?.split(' ') ?? [],
           status: 'pending',
           metadata: {
-            ...(tokens.companyId ? { companyId: tokens.companyId } : {}),
+            companyId: input.companyId,
             ...(crmTokenContext
               ? {
                   ghlAuthClass: crmTokenContext.authClass ?? null,
@@ -741,17 +727,50 @@ router.get(
         : undefined;
 
     // Find or create organization
-    const { organizationId, isNew } = await platformService.findOrCreateOrganization(
-      platform as any,
-      accountInfo.id,
-      {
-        name: accountInfo.name,
-        email: accountInfo.email ?? `${accountInfo.id}@${platform}.local`,
-        phone: accountInfo.phone,
-        website: accountInfo.website,
-      },
-      crmConnectionCompanyId ? { companyId: crmConnectionCompanyId } : undefined
-    );
+    let organizationId: string;
+    let isNew = false;
+
+    if (platform === crmPlatformId) {
+      const organizationIdentity = await platformService.resolveLeadconnectorOrganizationIdentity({
+        locationId: accountInfo.id,
+        companyId: crmConnectionCompanyId,
+        storedOrganizationId,
+        allowUnanchoredStoredOrganization: false,
+        allowUnanchoredRequestedOrganization: false,
+        logContext: 'oauth_callback',
+      });
+
+      if (organizationIdentity.organizationId) {
+        organizationId = organizationIdentity.organizationId;
+      } else {
+        const organization = await platformService.findOrCreateOrganization(
+          platform as any,
+          accountInfo.id,
+          {
+            name: accountInfo.name,
+            email: accountInfo.email ?? `${accountInfo.id}@${platform}.local`,
+            phone: accountInfo.phone,
+            website: accountInfo.website,
+          },
+          crmConnectionCompanyId ? { companyId: crmConnectionCompanyId } : undefined
+        );
+        organizationId = organization.organizationId;
+        isNew = organization.isNew;
+      }
+    } else {
+      const organization = await platformService.findOrCreateOrganization(
+        platform as any,
+        accountInfo.id,
+        {
+          name: accountInfo.name,
+          email: accountInfo.email ?? `${accountInfo.id}@${platform}.local`,
+          phone: accountInfo.phone,
+          website: accountInfo.website,
+        }
+      );
+      organizationId = organization.organizationId;
+      isNew = organization.isNew;
+    }
 
     // Create/update platform connection
     const connection = await platformService.createConnection({
@@ -780,11 +799,15 @@ router.get(
         : {}),
       },
     });
+    const resolvedOrganizationId = connection.organizationId;
+    if (resolvedOrganizationId !== organizationId) {
+      isNew = false;
+    }
 
     const crmEmbeddedSessionContext =
       platform === crmPlatformId
         ? await getCrmOAuthEmbeddedSessionContext({
-            organizationId,
+            organizationId: resolvedOrganizationId,
             accountInfoId: accountInfo.id,
             connection,
           })
@@ -794,7 +817,7 @@ router.get(
       {
         platform,
         accountId: accountInfo.id,
-        organizationId,
+        organizationId: resolvedOrganizationId,
         connectionId: connection.id,
         resolvedLocationId: crmEmbeddedSessionContext?.locationId ?? null,
         installationId: crmEmbeddedSessionContext?.installationId ?? null,
@@ -804,10 +827,10 @@ router.get(
     );
 
     if (platform === crmPlatformId) {
-      const replaySummary = await deadLetterService.replayPendingInboundForOrganization(organizationId, 100);
+      const replaySummary = await deadLetterService.replayPendingInboundForOrganization(resolvedOrganizationId, 100);
       if (replaySummary.replayed > 0 || replaySummary.failed > 0) {
         logger.info(
-          { organizationId, replaySummary },
+          { organizationId: resolvedOrganizationId, replaySummary },
           'Replayed deferred inbound jobs after the CRM reconnect'
         );
       }
@@ -815,7 +838,7 @@ router.get(
 
     if (!state) {
       const authResult = await authService.loginViaOAuth(
-        organizationId,
+        resolvedOrganizationId,
         crmEmbeddedSessionContext ?? {}
       );
       setAuthCookies(req, res, authResult.tokens);
@@ -844,7 +867,7 @@ router.get(
 
     // Auto-login: Create user session and get JWT tokens for app-initiated OAuth
     const authResult = await authService.loginViaOAuth(
-      organizationId,
+      resolvedOrganizationId,
       crmEmbeddedSessionContext ?? {}
     );
     setAuthCookies(req, res, authResult.tokens);
@@ -933,14 +956,26 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
     });
   };
 
-  let connection = await platformService.getByPlatformAccount(
-    crmPlatformId,
-    ssoPayload.locationId
-  );
+  const organizationIdentity = await platformService.resolveLeadconnectorOrganizationIdentity({
+    locationId: ssoPayload.locationId,
+    companyId: ssoPayload.companyId,
+    logContext: 'embedded_sso_exchange',
+    allowUnanchoredStoredOrganization: false,
+    allowUnanchoredRequestedOrganization: false,
+  });
+  const resolvedOrganizationId = organizationIdentity.organizationId;
+
+  let connection = resolvedOrganizationId
+    ? await platformService.getLeadconnectorConnectionByLocationForOrganization(
+        resolvedOrganizationId,
+        ssoPayload.locationId
+      )
+    : null;
 
   if (!connection && ssoPayload.companyId) {
     const agencyConnection = await platformService.getLeadconnectorAgencyConnectionByCompanyId(
-      ssoPayload.companyId
+      ssoPayload.companyId,
+      resolvedOrganizationId ?? undefined
     );
 
     if (agencyConnection) {
@@ -993,7 +1028,7 @@ const handleEmbeddedCrmSsoExchange = asyncHandler(async (req, res) => {
               locationId: ssoPayload.locationId,
               companyId: ssoPayload.companyId,
               agencyConnectionId: agencyConnection.id,
-              organizationId: agencyConnection.organizationId,
+              organizationId: connection.organizationId,
             },
             'Created location-scoped CRM connection from agency installation during embedded sign-in'
           );

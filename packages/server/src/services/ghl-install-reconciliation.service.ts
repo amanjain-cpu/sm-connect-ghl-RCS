@@ -26,7 +26,18 @@ interface ReconcileLeadconnectorInstallInput {
 }
 
 interface ReconcileLeadconnectorInstallDependencies {
-  findConnectionByLocation: (locationId: string) => Promise<LeadconnectorConnectionSnapshot | null>;
+  resolveCanonicalOrganization?: (input: {
+    locationId: string;
+    companyId?: string;
+  }) => Promise<{
+    organizationId: string | null;
+    resolutionSource: string;
+    duplicateCandidateCounts?: unknown;
+  } | null>;
+  findConnectionByLocation: (
+    locationId: string,
+    organizationId?: string | null
+  ) => Promise<LeadconnectorConnectionSnapshot | null>;
   findConnectionsByCompanyId: (companyId: string) => Promise<LeadconnectorConnectionSnapshot[]>;
   syncInstallationFromConnection: (
     connection: LeadconnectorConnectionSnapshot
@@ -115,7 +126,17 @@ export async function reconcileLeadconnectorInstallWebhook(
     };
   }
 
-  const existingConnection = await dependencies.findConnectionByLocation(input.locationId);
+  const canonicalOrganization = dependencies.resolveCanonicalOrganization
+    ? await dependencies.resolveCanonicalOrganization({
+        locationId: input.locationId,
+        ...(input.companyId ? { companyId: input.companyId } : {}),
+      })
+    : null;
+
+  const existingConnection = await dependencies.findConnectionByLocation(
+    input.locationId,
+    canonicalOrganization?.organizationId ?? undefined
+  );
   if (existingConnection) {
     const installation = await dependencies.syncInstallationFromConnection(existingConnection);
     const metadata = buildLeadconnectorInstallMetadata(installation.metadata, input);
@@ -136,7 +157,9 @@ export async function reconcileLeadconnectorInstallWebhook(
   const companyConnections = input.companyId
     ? await dependencies.findConnectionsByCompanyId(input.companyId)
     : [];
-  const organizationAnchor = companyConnections[0];
+  const organizationAnchor = canonicalOrganization?.organizationId
+    ? { organizationId: canonicalOrganization.organizationId }
+    : companyConnections[0];
 
   if (!organizationAnchor) {
     return {

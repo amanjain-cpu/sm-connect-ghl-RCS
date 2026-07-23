@@ -152,3 +152,61 @@ test('INSTALL webhook for an existing location refreshes installation metadata',
     },
   ]);
 });
+
+test('INSTALL webhook uses canonical organization instead of exact blank duplicate location', async () => {
+  const upserts: Array<{ organizationId: string; locationId: string; metadata: Record<string, unknown> }> = [];
+
+  const result = await reconcileLeadconnectorInstallWebhook(
+    {
+      locationId: 'sWmK39aPQAVSVxqGib0Z',
+      companyId: 'company-mash',
+      appId: 'app-1',
+      receivedAt: new Date('2026-07-22T12:10:00.000Z'),
+    },
+    {
+      resolveCanonicalOrganization: async () => ({
+        organizationId: 'org-canonical',
+        resolutionSource: 'company_connection',
+      }),
+      findConnectionByLocation: async (_locationId, organizationId) => {
+        assert.equal(organizationId, 'org-canonical');
+        return null;
+      },
+      findConnectionsByCompanyId: async () => [],
+      syncInstallationFromConnection: async () => {
+        throw new Error('should not sync the blank duplicate location connection');
+      },
+      updateInstallationMetadata: async () => {
+        throw new Error('should not update an existing installation');
+      },
+      upsertPendingLocationInstallation: async (input): Promise<LeadconnectorInstallationSnapshot> => {
+        upserts.push(input);
+        return {
+          id: 'installation-canonical-location',
+          organizationId: input.organizationId,
+          externalAccountId: input.locationId,
+          status: 'pending',
+          metadata: input.metadata,
+        };
+      },
+    }
+  );
+
+  assert.equal(result.status, 'reconciled');
+  assert.equal(result.action, 'upserted_pending_installation');
+  assert.equal(result.organizationId, 'org-canonical');
+  assert.deepEqual(upserts, [
+    {
+      organizationId: 'org-canonical',
+      locationId: 'sWmK39aPQAVSVxqGib0Z',
+      metadata: {
+        companyId: 'company-mash',
+        appId: 'app-1',
+        lastInstallWebhookAt: '2026-07-22T12:10:00.000Z',
+        lastInstallWebhookLocationId: 'sWmK39aPQAVSVxqGib0Z',
+        lastInstallWebhookCompanyId: 'company-mash',
+        lastInstallWebhookAppId: 'app-1',
+      },
+    },
+  ]);
+});

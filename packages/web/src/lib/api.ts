@@ -75,10 +75,16 @@ class ApiClient {
     return this.accessToken;
   }
 
+  clearAuthTokens() {
+    this.setAccessToken(null);
+    safeRemoveItem('refreshToken');
+  }
+
   /**
    * Set tokens from OAuth callback (SSO flow)
    */
   setTokensFromOAuth(accessToken: string, refreshToken: string) {
+    this.clearAuthTokens();
     this.setAccessToken(accessToken);
     safeSetItem('refreshToken', refreshToken);
   }
@@ -261,8 +267,7 @@ class ApiClient {
     } catch {
       // Ignore errors during logout
     }
-    this.setAccessToken(null);
-    safeRemoveItem('refreshToken');
+    this.clearAuthTokens();
   }
 
   async getMe() {
