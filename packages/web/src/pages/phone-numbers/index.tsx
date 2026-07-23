@@ -26,8 +26,11 @@ import {
 } from '@/components/ui/dialog';
 import { ApiError, api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
+import { recordProvisioningLock } from '@/lib/phone-number-provisioning';
+import { ProvisioningNoteDialog } from '@/components/phone-numbers/provisioning-note-dialog';
 import { SearchNumbersDialog } from './search-dialog';
 import { notify } from '@/stores/notification.store';
+import { useAuthStore } from '@/stores/auth.store';
 
 interface PhoneNumber {
   id: string;
@@ -100,6 +103,7 @@ const getCheckoutProvisioningErrorMessage = (error: unknown) => {
 
 export function PhoneNumbersPage() {
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumber[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -112,10 +116,12 @@ export function PhoneNumbersPage() {
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [campaignOptions, setCampaignOptions] = useState<CampaignOption[]>([]);
+  const [provisioningNoticeNumber, setProvisioningNoticeNumber] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({
     friendlyName: '',
     campaignId: '',
   });
+  const hasEmbeddedLocationContext = Boolean(user?.embeddedInstallationId);
 
   useEffect(() => {
     const loadData = async () => {
@@ -128,10 +134,24 @@ export function PhoneNumbersPage() {
         if (checkoutStatus === 'success' && sessionId) {
           try {
             const response = await api.completePhoneNumberCheckout({ sessionId });
-            if (response.success && response.data && 'pending' in response.data && response.data.pending) {
-              notify.success('Checkout completed', response.data.message);
+            const checkoutData = response.data;
+            if (response.success && checkoutData && 'pending' in checkoutData && checkoutData.pending) {
+              notify.success('Checkout completed', checkoutData.message);
             } else {
-              notify.success('Number purchased', 'The selected phone number was linked and saved as the default sender.');
+              if (checkoutData && !('pending' in checkoutData)) {
+                recordProvisioningLock({
+                  phoneNumberId: checkoutData.id,
+                  phoneNumber: checkoutData.phoneNumber,
+                  purchasedAt: new Date(),
+                });
+                setProvisioningNoticeNumber(checkoutData.phoneNumber);
+              }
+              notify.success(
+                'Number purchased',
+                hasEmbeddedLocationContext
+                  ? 'The selected phone number was linked and saved as the default sender.'
+                  : 'The selected phone number was linked.'
+              );
             }
           } catch (checkoutError) {
             console.error('Phone number checkout provisioning failed:', checkoutError);
@@ -171,7 +191,7 @@ export function PhoneNumbersPage() {
     };
 
     loadData();
-  }, []);
+  }, [hasEmbeddedLocationContext]);
 
   const reloadData = async () => {
     setIsLoading(true);
@@ -268,6 +288,11 @@ export function PhoneNumbersPage() {
   };
 
   const handleMakeDefaultSender = async (number: PhoneNumber) => {
+    if (!hasEmbeddedLocationContext) {
+      notify.error('CRM location required', 'Open Signalmash Connect from a CRM location before selecting a default sender.');
+      return;
+    }
+
     try {
       const response = await api.updatePhoneNumber(number.id, {
         friendlyName: number.friendlyName || undefined,
@@ -281,7 +306,12 @@ export function PhoneNumbersPage() {
       }
     } catch (saveError) {
       console.error('Failed to update default sender:', saveError);
-      notify.error('Default sender update failed', 'The selected number could not be set as the outbound default.');
+      notify.error(
+        'Default sender update failed',
+        saveError instanceof ApiError && saveError.code === 'LOCATION_CONTEXT_REQUIRED'
+          ? 'Open Signalmash Connect from a CRM location before selecting a default sender.'
+          : 'The selected number could not be set as the outbound default.'
+      );
     }
   };
 
@@ -297,6 +327,10 @@ export function PhoneNumbersPage() {
 
   const hasPurchasableCampaigns = campaignOptions.length > 0;
   const buyNumberLabel = 'Buy Number';
+  const defaultSender = phoneNumbers.find((number) => number.isDefaultSender);
+  const hasEligibleDefaultSender = phoneNumbers.some(
+    (number) => number.status === 'active' && number.campaign?.status === 'approved'
+  );
 
   return (
     <div>
@@ -366,6 +400,22 @@ export function PhoneNumbersPage() {
                 <Button onClick={() => setShowSearchDialog(true)}>
                   Buy Number
                 </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {hasEmbeddedLocationContext && !defaultSender && hasEligibleDefaultSender && (
+          <Card className="border-amber-200 bg-amber-50 shadow-none dark:border-amber-500/30 dark:bg-amber-500/10">
+            <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
+              <div className="space-y-2">
+                <Badge variant="warning" className="w-fit">Default sender needed</Badge>
+                <h3 className="text-lg font-semibold text-amber-950 dark:text-amber-100">
+                  Select a default sender for this CRM location
+                </h3>
+                <p className="max-w-2xl text-sm leading-6 text-amber-800 dark:text-amber-200">
+                  Shared phone numbers are available here, but this location has no outbound default yet.
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -508,7 +558,7 @@ export function PhoneNumbersPage() {
 
                     <div className="mt-5 flex justify-end">
                       <div className="flex gap-2">
-                        {!number.isDefaultSender && number.status === 'active' && number.campaign?.status === 'approved' ? (
+                        {hasEmbeddedLocationContext && !number.isDefaultSender && number.status === 'active' && number.campaign?.status === 'approved' ? (
                           <Button
                             variant="outline"
                             onClick={() => handleMakeDefaultSender(number)}
@@ -565,6 +615,16 @@ export function PhoneNumbersPage() {
         open={showSearchDialog}
         onClose={() => setShowSearchDialog(false)}
         onPurchased={reloadData}
+      />
+
+      <ProvisioningNoteDialog
+        open={Boolean(provisioningNoticeNumber)}
+        phoneNumber={provisioningNoticeNumber}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setProvisioningNoticeNumber(null);
+          }
+        }}
       />
 
       <Dialog open={showReleaseDialog} onOpenChange={setShowReleaseDialog}>

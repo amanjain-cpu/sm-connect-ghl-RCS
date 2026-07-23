@@ -193,7 +193,10 @@ router.post(
     const campaign = await campaignService.submitForApproval(
       req.params.id,
       req.user!.organizationId,
-      req.body
+      {
+        ...req.body,
+        installationId: req.user!.embeddedInstallationId ?? null,
+      }
     );
 
     res.json({
@@ -216,7 +219,8 @@ router.post(
     const campaign = await campaignService.linkPhoneNumber(
       req.params.id,
       req.user!.organizationId,
-      req.body
+      req.body,
+      { installationId: req.user!.embeddedInstallationId ?? null }
     );
 
     res.json({
@@ -242,7 +246,8 @@ router.post(
     );
     const campaign = await campaignService.refreshApprovalStatus(
       req.params.id,
-      req.user!.organizationId
+      req.user!.organizationId,
+      { installationId: req.user!.embeddedInstallationId ?? null }
     );
 
     res.json({

@@ -35,5 +35,8 @@ cd ../..
 echo -e "${YELLOW}Step 5: Restart server${NC}"
 pm2 restart signalmash-server
 
+echo -e "${YELLOW}Step 6: Verify billing wallet API contract${NC}"
+bash deploy/smoke-billing-wallet.sh
+
 echo -e "${GREEN}=== Deployment complete! ===${NC}"
 pm2 status

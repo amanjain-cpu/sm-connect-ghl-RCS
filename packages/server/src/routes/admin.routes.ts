@@ -69,6 +69,11 @@ const requireSuperAdmin = async (
   }
 };
 
+const getAdminContext = (req: AdminRequest) => ({
+  ipAddress: req.ip,
+  userAgent: req.get('user-agent') || undefined,
+});
+
 // ===========================================
 // Auth Routes
 // ===========================================
@@ -282,10 +287,7 @@ router.post('/settings/signalmash/test-connection', requireSuperAdmin, async (re
       'signalmash_connectivity',
       undefined,
       diagnostic as unknown as Record<string, unknown>,
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -407,10 +409,7 @@ router.post('/settings/signalmash/assign-brand-campaign', requireSuperAdmin, asy
         providerBrandStatus: linked.providerBrandStatus,
         providerCampaignStatus: linked.providerCampaignStatus,
       },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.status(201).json({
@@ -471,6 +470,165 @@ router.get('/organizations/:id/onboarding', requireSuperAdmin, async (req: Admin
   }
 });
 
+const organizationBillingParamsSchema = z.object({
+  organizationId: z.string().uuid(),
+});
+
+const walletAdjustmentSchema = z.object({
+  type: z.enum(['credit', 'debit']),
+  amount: z.coerce.number().positive().max(1000000),
+  reason: z.string().trim().min(1).max(1000),
+});
+
+const billingAccountPatchSchema = z.object({
+  status: z.enum(['active', 'suspended']).optional(),
+  suspensionReason: z.string().trim().max(1000).optional().transform((value) => value || undefined),
+  pricingTier: z.enum(['tier_250', 'tier_500', 'tier_1400']).optional(),
+}).superRefine((value, ctx) => {
+  if (!value.status && !value.suspensionReason && !value.pricingTier) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'At least one billing account field must be provided.',
+    });
+  }
+
+  if (value.status === 'suspended' && !value.suspensionReason) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['suspensionReason'],
+      message: 'Suspension reason is required when suspending billing.',
+    });
+  }
+});
+
+router.get('/organizations/:organizationId/billing', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = organizationBillingParamsSchema.parse(req.params);
+    const detail = await adminService.getOrganizationBilling(
+      req.admin!.id,
+      params.organizationId,
+      getAdminContext(req)
+    );
+
+    res.json({
+      success: true,
+      data: detail,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/billing/wallet-adjustments', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = organizationBillingParamsSchema.parse(req.params);
+    const data = walletAdjustmentSchema.parse(req.body ?? {});
+    const idempotencyKey =
+      req.get('idempotency-key') || req.get('x-idempotency-key') || undefined;
+
+    const result = await adminService.applyOrganizationWalletAdjustment({
+      adminId: req.admin!.id,
+      adminEmail: req.admin!.email,
+      organizationId: params.organizationId,
+      type: data.type,
+      amount: data.amount,
+      reason: data.reason,
+      idempotencyKey,
+      context: getAdminContext(req),
+    });
+
+    res.status(201).json({
+      success: true,
+      data: result,
+      message: data.type === 'credit' ? 'Wallet credited' : 'Wallet debited',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/organizations/:organizationId/billing/account', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = organizationBillingParamsSchema.parse(req.params);
+    const data = billingAccountPatchSchema.parse(req.body ?? {});
+    const result = await adminService.updateOrganizationBillingAccount({
+      adminId: req.admin!.id,
+      organizationId: params.organizationId,
+      status: data.status,
+      suspensionReason: data.suspensionReason,
+      pricingTier: data.pricingTier,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Billing account updated',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/billing/portal', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = organizationBillingParamsSchema.parse(req.params);
+    const result = await adminService.createOrganizationBillingPortal({
+      adminId: req.admin!.id,
+      organizationId: params.organizationId,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: {
+        url: result.portal.url,
+        billing: result.billing,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/billing/release-held', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = organizationBillingParamsSchema.parse(req.params);
+    const result = await adminService.releaseOrganizationHeldInbound({
+      adminId: req.admin!.id,
+      organizationId: params.organizationId,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Held inbound release processed',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/organizations/:organizationId/billing/mrc/process', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = organizationBillingParamsSchema.parse(req.params);
+    const result = await adminService.processOrganizationMrc({
+      adminId: req.admin!.id,
+      organizationId: params.organizationId,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Monthly recurring charge processing finished',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/organizations/:id/suspend', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
   try {
     const params = z.object({
@@ -491,10 +649,7 @@ router.post('/organizations/:id/suspend', requireSuperAdmin, async (req: AdminRe
         status: organization.status,
         reason: organization.suspensionReason,
       },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -522,10 +677,7 @@ router.post('/organizations/:id/unsuspend', requireSuperAdmin, async (req: Admin
       {
         status: organization.status,
       },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -582,10 +734,7 @@ router.post('/organizations/link-existing-assets', requireSuperAdmin, async (req
         webhookConfigured: linked.webhookConfigured,
         webhookError: linked.webhookError,
       },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.status(201).json({
@@ -614,10 +763,7 @@ router.post('/organizations/:organizationId/brands/:brandId/submit', requireSupe
       'brand',
       params.brandId,
       { organizationId: params.organizationId, status: brand.status },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -644,10 +790,7 @@ router.post('/organizations/:organizationId/brands/:brandId/refresh-status', req
       'brand',
       params.brandId,
       { organizationId: params.organizationId, status: brand.status },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -690,10 +833,7 @@ router.post('/organizations/:organizationId/brands/:brandId/manual-status', requ
         providerStatus: brand.providerStatus,
         reason: data.reason,
       },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -720,10 +860,7 @@ router.post('/organizations/:organizationId/campaigns/:campaignId/submit', requi
       'campaign',
       params.campaignId,
       { organizationId: params.organizationId, status: campaign.status },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -750,10 +887,7 @@ router.post('/organizations/:organizationId/campaigns/:campaignId/refresh-status
       'campaign',
       params.campaignId,
       { organizationId: params.organizationId, status: campaign.status },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({
@@ -796,10 +930,7 @@ router.post('/organizations/:organizationId/campaigns/:campaignId/manual-status'
         providerStatus: campaign.providerStatus,
         reason: data.reason,
       },
-      {
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent') || undefined,
-      }
+      getAdminContext(req)
     );
 
     res.json({

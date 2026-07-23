@@ -20,8 +20,19 @@ import { resolveMessageMappingContext } from './message-mapping-routing.service.
 export class IntegrationService {
   async getPrimaryInstallationForOrganization(
     organizationId: string,
-    platform?: Platform
+    platform?: Platform,
+    installationId?: string | null
   ) {
+    if (installationId) {
+      return prisma.platformInstallation.findFirst({
+        where: {
+          id: installationId,
+          organizationId,
+          ...(platform ? { platform } : {}),
+        },
+      });
+    }
+
     return this.getPrimaryInstallation(organizationId, platform);
   }
 
@@ -263,12 +274,9 @@ export class IntegrationService {
       return null;
     }
 
-    const installation = await this.getPrimaryInstallation(number.organizationId);
-
     await this.upsertExternalResourceMapping({
       organizationId: number.organizationId,
-      installationId: installation?.id,
-      platform: installation?.platform ?? 'leadconnector',
+      platform: 'leadconnector',
       kind: 'phone_number',
       localResourceType: 'PhoneNumber',
       localResourceId: number.id,
@@ -281,11 +289,7 @@ export class IntegrationService {
       },
     });
 
-    if (installation) {
-      await this.syncDefaultSenderProfile(installation.id, number);
-    }
-
-    await this.reconcileLifecycleState(number.organizationId, installation?.platform, installation?.id);
+    await this.reconcileLifecycleState(number.organizationId, 'leadconnector');
 
     return true;
   }
@@ -723,45 +727,6 @@ export class IntegrationService {
     }
 
     return value as Record<string, unknown>;
-  }
-
-  private async syncDefaultSenderProfile(installationId: string, number: PhoneNumber) {
-    const existingDefault = await prisma.senderProfile.findFirst({
-      where: {
-        installationId,
-        isDefault: true,
-      },
-    });
-
-    await prisma.senderProfile.upsert({
-      where: {
-        installationId_phoneNumberId: {
-          installationId,
-          phoneNumberId: number.id,
-        },
-      },
-      create: {
-        organizationId: number.organizationId,
-        installationId,
-        phoneNumberId: number.id,
-        platform: 'leadconnector',
-        senderKey: number.phoneNumber,
-        senderLabel: number.friendlyName ?? number.formattedNumber,
-        isDefault: !existingDefault,
-        metadata: {
-          signalmashNumberId: number.signalmashNumberId,
-          campaignId: number.campaignId,
-        },
-      },
-      update: {
-        senderKey: number.phoneNumber,
-        senderLabel: number.friendlyName ?? number.formattedNumber,
-        metadata: {
-          signalmashNumberId: number.signalmashNumberId,
-          campaignId: number.campaignId,
-        },
-      },
-    });
   }
 
   private async upsertExternalResourceMapping(input: {

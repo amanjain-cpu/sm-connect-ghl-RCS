@@ -45,6 +45,7 @@ interface LinkExistingAssetsInput {
   friendlyName?: string;
   configureWebhook?: boolean;
   makeDefaultSender?: boolean;
+  installationId?: string | null;
 }
 
 const TOLL_FREE_NPAS = new Set(['800', '833', '844', '855', '866', '877', '888']);
@@ -207,6 +208,8 @@ export class PhoneNumberService {
     campaignId?: string;
     phoneNumber: string;
     friendlyName?: string;
+    makeDefaultSender?: boolean;
+    installationId?: string | null;
     error: AppError;
   }) {
     if (!input.campaignId) {
@@ -229,13 +232,19 @@ export class PhoneNumberService {
       return null;
     }
 
+    const makeDefaultSender = input.makeDefaultSender === true;
+    if (makeDefaultSender) {
+      this.assertLocationContext(input.installationId);
+    }
+
     await prisma.campaign.update({
       where: { id: campaign.id },
       data: {
         numberLinkIntent: {
           mode: 'buy_new',
           phoneNumber: input.phoneNumber,
-          makeDefaultSender: true,
+          makeDefaultSender,
+          ...(makeDefaultSender ? { installationId: input.installationId } : {}),
           ...(input.friendlyName ? { friendlyName: input.friendlyName } : {}),
         } as any,
         numberLinkStatus: 'requested',
@@ -466,12 +475,18 @@ export class PhoneNumberService {
       campaignId?: string;
       friendlyName?: string;
       makeDefaultSender?: boolean;
+      installationId?: string | null;
       onboardingPhoneNumberMrcChargeKey?: string;
     } = {}
   ) {
     logger.info({ organizationId, phoneNumber }, 'Purchasing phone number');
     const normalizedLongCode = this.assertPurchasableLongCode(phoneNumber);
     const normalizedPhoneNumber = normalizedLongCode.normalized;
+    const makeDefaultSender = options.makeDefaultSender === true;
+
+    if (makeDefaultSender) {
+      this.assertLocationContext(options.installationId);
+    }
 
     // Check if number is already owned
     const existing = await prisma.phoneNumber.findUnique({
@@ -562,7 +577,9 @@ export class PhoneNumberService {
       await integrationService.syncPhoneNumberMapping(number);
 
       if (smsEnablementCampaignId && campaign) {
-        await this.ensureDefaultSenderProfiles(number, options.makeDefaultSender ?? true);
+        if (makeDefaultSender) {
+          await this.ensureDefaultSenderProfiles(number, true, options.installationId);
+        }
         await this.syncCampaignNumberLinkState(organizationId, campaign.id, 'linked');
       } else if (campaign) {
         await prisma.campaign.update({
@@ -571,7 +588,8 @@ export class PhoneNumberService {
             numberLinkIntent: {
               mode: 'existing',
               phoneNumberId: number.id,
-              makeDefaultSender: options.makeDefaultSender ?? true,
+              makeDefaultSender,
+              ...(makeDefaultSender ? { installationId: options.installationId } : {}),
               ...(options.friendlyName ? { friendlyName: options.friendlyName } : {}),
             } as any,
             numberLinkStatus: 'requested',
@@ -701,6 +719,11 @@ export class PhoneNumberService {
     webhookConfigured: boolean;
     webhookError?: string;
   }> {
+    const makeDefaultSender = input.makeDefaultSender === true;
+    if (makeDefaultSender) {
+      this.assertLocationContext(input.installationId);
+    }
+
     const normalizedPhoneNumber = input.phoneNumber
       ? formatPhoneE164(input.phoneNumber)
       : undefined;
@@ -894,7 +917,9 @@ export class PhoneNumberService {
 
     if (result.phoneNumber) {
       await integrationService.syncPhoneNumberMapping(result.phoneNumber);
-      await this.ensureDefaultSenderProfiles(result.phoneNumber, input.makeDefaultSender ?? true);
+      if (makeDefaultSender) {
+        await this.ensureDefaultSenderProfiles(result.phoneNumber, true, input.installationId);
+      }
     }
 
     let webhookConfigured = false;
@@ -1063,14 +1088,16 @@ export class PhoneNumberService {
     ]);
 
     return {
-      data: numbers.map((number) => ({
-        ...number,
-        isDefaultSender: number.senderProfiles.some((profile) =>
-          options.installationId
-            ? profile.installationId === options.installationId
-            : true
-        ),
-      })),
+      data: numbers.map((number) => {
+        const { senderProfiles, ...numberData } = number;
+
+        return {
+          ...numberData,
+          isDefaultSender: options.installationId
+            ? senderProfiles.some((profile) => profile.installationId === options.installationId)
+            : false,
+        };
+      }),
       meta: {
         page,
         limit,
@@ -1143,6 +1170,11 @@ export class PhoneNumberService {
     } = {}
   ) {
     const number = await this.getNumber(organizationId, numberId);
+    const makeDefault = data.makeDefault === true;
+    if (makeDefault) {
+      this.assertLocationContext(options.installationId);
+    }
+
     const previousCampaignId = number.campaign?.id ?? null;
     const previousCampaignName = number.campaign?.name ?? null;
     let targetCampaign: Campaign | null = null;
@@ -1186,7 +1218,8 @@ export class PhoneNumberService {
             numberLinkIntent: {
               mode: 'existing',
               phoneNumberId: number.id,
-              makeDefaultSender: data.makeDefault ?? true,
+              makeDefaultSender: makeDefault,
+              ...(makeDefault ? { installationId: options.installationId } : {}),
               ...(data.friendlyName ? { friendlyName: data.friendlyName } : {}),
               ...(data.confirmReassignment ? { confirmReassignment: true } : {}),
             } as any,
@@ -1233,7 +1266,9 @@ export class PhoneNumberService {
     logger.info({ numberId }, 'Phone number updated');
 
     await integrationService.syncPhoneNumberMapping(updated);
-    await this.ensureDefaultSenderProfiles(updated, data.makeDefault === true, options.installationId);
+    if (options.installationId) {
+      await this.ensureDefaultSenderProfiles(updated, makeDefault, options.installationId);
+    }
 
     if (nextCampaignId) {
       await this.syncCampaignNumberLinkState(organizationId, nextCampaignId, 'linked');
@@ -1286,8 +1321,6 @@ export class PhoneNumberService {
           isDefault: false,
         },
       });
-
-      await this.ensureFallbackDefaultSenders(organizationId, numberId);
 
       logger.info({ numberId, phoneNumber: number.phoneNumber }, 'Phone number released');
 
@@ -1360,72 +1393,51 @@ export class PhoneNumberService {
   // Helpers
   // ===========================================
 
+  private assertLocationContext(installationId?: string | null): asserts installationId is string {
+    if (!installationId) {
+      throw new AppError(
+        'Open Signalmash Connect from a CRM location before changing the default sender.',
+        'LOCATION_CONTEXT_REQUIRED',
+        400
+      );
+    }
+  }
+
   private async ensureDefaultSenderProfiles(
     number: PhoneNumber,
     makeDefault: boolean,
     installationId?: string | null
   ) {
-    const targets = installationId
-      ? [installationId]
-      : await this.resolveSenderProfileTargets(number.organizationId);
+    this.assertLocationContext(installationId);
 
-    for (const installationId of targets) {
-      if (makeDefault) {
-        await prisma.senderProfile.updateMany({
-          where: {
-            organizationId: number.organizationId,
-            platform: 'leadconnector',
-            installationId,
-            isDefault: true,
-          },
-          data: { isDefault: false },
-        });
-      }
-
-      const existing = await prisma.senderProfile.findFirst({
-        where: {
-          organizationId: number.organizationId,
-          platform: 'leadconnector',
-          installationId,
-          phoneNumberId: number.id,
-        },
-      });
-
-      if (existing) {
-        await prisma.senderProfile.update({
-          where: { id: existing.id },
-          data: {
-            senderKey: number.phoneNumber,
-            senderLabel: number.friendlyName ?? number.formattedNumber,
-            isDefault: makeDefault ? true : existing.isDefault,
-            metadata: {
-              signalmashNumberId: number.signalmashNumberId,
-              campaignId: number.campaignId,
-              linkedExisting: true,
-            },
-          },
-        });
-        continue;
-      }
-
-      const existingDefault = await prisma.senderProfile.findFirst({
+    if (makeDefault) {
+      await prisma.senderProfile.updateMany({
         where: {
           organizationId: number.organizationId,
           platform: 'leadconnector',
           installationId,
           isDefault: true,
         },
+        data: { isDefault: false },
       });
+    }
 
-      await prisma.senderProfile.create({
+    const existing = await prisma.senderProfile.findFirst({
+      where: {
+        organizationId: number.organizationId,
+        platform: 'leadconnector',
+        installationId,
+        phoneNumberId: number.id,
+      },
+    });
+
+    if (existing) {
+      await prisma.senderProfile.update({
+        where: { id: existing.id },
         data: {
-          organizationId: number.organizationId,
-          installationId,
-          phoneNumberId: number.id,
-          platform: 'leadconnector',
           senderKey: number.phoneNumber,
           senderLabel: number.friendlyName ?? number.formattedNumber,
-          isDefault: makeDefault || !existingDefault,
+          isDefault: makeDefault ? true : existing.isDefault,
           metadata: {
             signalmashNumberId: number.signalmashNumberId,
             campaignId: number.campaignId,
@@ -1433,104 +1445,29 @@ export class PhoneNumberService {
           },
         },
       });
+      return;
     }
-  }
 
-  private async resolveSenderProfileTargets(organizationId: string) {
-    const installations = await prisma.platformInstallation.findMany({
-      where: {
-        organizationId,
-        platform: 'leadconnector',
-      },
-      select: { id: true },
-    });
-
-    const installationIds = installations.map((installation) => installation.id);
-    return installationIds.length > 0 ? installationIds : [null];
-  }
-
-  private async ensureFallbackDefaultSenders(organizationId: string, releasedNumberId: string) {
-    const installations = await prisma.platformInstallation.findMany({
-      where: {
-        organizationId,
-        platform: 'leadconnector',
-      },
-      select: { id: true },
-    });
-
-    const targetInstallationIds = installations.length > 0
-      ? installations.map((installation) => installation.id)
-      : [null];
-
-    const fallbackNumber = await prisma.phoneNumber.findFirst({
-      where: {
-        organizationId,
-        status: 'active',
-        id: { not: releasedNumberId },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    for (const installationId of targetInstallationIds) {
-      const existingDefault = await prisma.senderProfile.findFirst({
-        where: {
-          organizationId,
-          platform: 'leadconnector',
-          installationId,
-          isDefault: true,
-          phoneNumber: {
-            status: 'active',
-          },
-        },
-      });
-
-      if (existingDefault || !fallbackNumber) {
-        continue;
-      }
-
-      const fallbackProfile = await prisma.senderProfile.findFirst({
-        where: {
-          organizationId,
-          platform: 'leadconnector',
-          installationId,
-          phoneNumberId: fallbackNumber.id,
-        },
-      });
-
-      if (fallbackProfile) {
-        await prisma.senderProfile.update({
-          where: { id: fallbackProfile.id },
-          data: {
-            isDefault: true,
-            senderKey: fallbackNumber.phoneNumber,
-            senderLabel: fallbackNumber.friendlyName ?? fallbackNumber.formattedNumber,
-            metadata: {
-              signalmashNumberId: fallbackNumber.signalmashNumberId,
-              campaignId: fallbackNumber.campaignId,
-              linkedExisting: true,
-            },
-          },
-        });
-        continue;
-      }
-
-      await prisma.senderProfile.create({
-        data: {
-          organizationId,
-          installationId,
-          phoneNumberId: fallbackNumber.id,
-          platform: 'leadconnector',
-          senderKey: fallbackNumber.phoneNumber,
-          senderLabel: fallbackNumber.friendlyName ?? fallbackNumber.formattedNumber,
-          isDefault: true,
-          metadata: {
-            signalmashNumberId: fallbackNumber.signalmashNumberId,
-            campaignId: fallbackNumber.campaignId,
-            linkedExisting: true,
-          },
-        },
-      });
+    if (!makeDefault) {
+      return;
     }
+
+    await prisma.senderProfile.create({
+      data: {
+        organizationId: number.organizationId,
+        installationId,
+        phoneNumberId: number.id,
+        platform: 'leadconnector',
+        senderKey: number.phoneNumber,
+        senderLabel: number.friendlyName ?? number.formattedNumber,
+        isDefault: true,
+        metadata: {
+          signalmashNumberId: number.signalmashNumberId,
+          campaignId: number.campaignId,
+          linkedExisting: true,
+        },
+      },
+    });
   }
 
   private formatPhoneNumber(phoneNumber: string): string {

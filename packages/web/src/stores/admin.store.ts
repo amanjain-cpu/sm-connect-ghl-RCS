@@ -348,6 +348,59 @@ class AdminApiClient {
     return this.get<{ success: boolean; data: any }>(`/organizations/${id}/onboarding`);
   }
 
+  async getOrganizationBilling(id: string) {
+    return this.get<{ success: boolean; data: any }>(`/organizations/${id}/billing`);
+  }
+
+  async createOrganizationWalletAdjustment(
+    id: string,
+    data: {
+      type: 'credit' | 'debit';
+      amount: number;
+      reason: string;
+    }
+  ) {
+    return this.post<{ success: boolean; data: any; message?: string }>(
+      `/organizations/${id}/billing/wallet-adjustments`,
+      data
+    );
+  }
+
+  async updateOrganizationBillingAccount(
+    id: string,
+    data: {
+      status?: 'active' | 'suspended';
+      suspensionReason?: string;
+      pricingTier?: 'tier_250' | 'tier_500' | 'tier_1400';
+    }
+  ) {
+    return this.request<{ success: boolean; data: any; message?: string }>(
+      `/organizations/${id}/billing/account`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }
+    );
+  }
+
+  async createOrganizationBillingPortal(id: string) {
+    return this.post<{ success: boolean; data: { url?: string | null; billing: any } }>(
+      `/organizations/${id}/billing/portal`
+    );
+  }
+
+  async releaseOrganizationHeldInbound(id: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(
+      `/organizations/${id}/billing/release-held`
+    );
+  }
+
+  async processOrganizationMrc(id: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(
+      `/organizations/${id}/billing/mrc/process`
+    );
+  }
+
   async suspendOrganization(id: string, reason?: string) {
     return this.post<{ success: boolean; data: any; message?: string }>(`/organizations/${id}/suspend`, reason ? { reason } : {});
   }

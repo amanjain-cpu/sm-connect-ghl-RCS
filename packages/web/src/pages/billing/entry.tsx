@@ -111,12 +111,12 @@ export function BillingEntryPage() {
         }
       }
 
-      if (isAuthenticated) {
+      const encryptedData = await requestEncryptedData();
+
+      if (!encryptedData && isAuthenticated) {
         navigate('/subscriptions', { replace: true });
         return;
       }
-
-      const encryptedData = await requestEncryptedData();
 
       if (!encryptedData) {
         setStatus('error');

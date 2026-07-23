@@ -63,7 +63,7 @@ function getReconnectInfoFromError(err: unknown): ReconnectInfo | null {
 export function EmbeddedSsoPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { loginViaOAuth, checkAuth } = useAuthStore();
+  const { loginViaOAuth } = useAuthStore();
   const [status, setStatus] = useState<EmbeddedSsoStatus>('loading');
   const [error, setError] = useState<string | null>(null);
   const [encryptedData, setEncryptedData] = useState<string | null>(null);
@@ -147,15 +147,6 @@ export function EmbeddedSsoPage() {
       const payload = await requestEncryptedData();
 
       if (!payload) {
-        const hasExistingSession = await checkAuth();
-        if (hasExistingSession) {
-          setStatus('success');
-          window.setTimeout(() => {
-            navigate('/onboarding', { replace: true });
-          }, 250);
-          return;
-        }
-
         setStatus('error');
         setError('Missing embedded user context. Open this page from the embedded app entry inside your CRM.');
         return;
@@ -199,7 +190,7 @@ export function EmbeddedSsoPage() {
     };
 
     bootstrap();
-  }, [checkAuth, exchangePayload, navigate, searchParams]);
+  }, [exchangePayload, searchParams]);
 
   useEffect(() => {
     if (status !== 'waiting' || !encryptedData) {

@@ -1,10 +1,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
-import { Bell, LifeBuoy, Plus, RefreshCcw, Settings } from 'lucide-react';
+import { Bell, Clock, LifeBuoy, Plus, RefreshCcw, Settings } from 'lucide-react';
 import { Sidebar } from './sidebar';
 import { safeGetItem, safeSetItem } from '@/lib/storage';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import {
+  formatProvisioningCountdown,
+  getRemainingProvisioningMs,
+  getSoonestActiveProvisioningLock,
+  useProvisioningLocks,
+} from '@/lib/phone-number-provisioning';
 import {
   Dialog,
   DialogContent,
@@ -17,6 +23,9 @@ import {
 type HeaderAction = {
   label: string;
   onClick: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
+  disabledText?: string;
 };
 
 export type AppChromeConfig = {
@@ -56,6 +65,7 @@ export function AppLayout() {
   const [collapsed, setCollapsed] = useState(() => safeGetItem('sm-v3-sidebar-collapsed') === '1');
   const [config, setConfigState] = useState<AppChromeConfig>(defaultChromeConfig);
   const [showNotifications, setShowNotifications] = useState(false);
+  const provisioningLocks = useProvisioningLocks();
   const [notificationSummary, setNotificationSummary] = useState<{
     pendingDeadLetters: number;
     pendingBilling: number;
@@ -177,6 +187,13 @@ export function AppLayout() {
   }, [navigate, notificationSummary]);
 
   const notificationCount = notificationItems.length;
+  const activeProvisioningLock = getSoonestActiveProvisioningLock(provisioningLocks);
+  const activeProvisioningRemainingMs = activeProvisioningLock
+    ? getRemainingProvisioningMs(activeProvisioningLock)
+    : 0;
+  const provisioningCountdown = activeProvisioningRemainingMs > 0
+    ? formatProvisioningCountdown(activeProvisioningRemainingMs)
+    : null;
 
   return (
     <AppChromeContext.Provider value={contextValue}>
@@ -217,6 +234,17 @@ export function AppLayout() {
             </div>
 
             <div className="flex-1" />
+
+            {provisioningCountdown ? (
+              <div
+                className="inline-flex h-8 items-center gap-1.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3 text-[12.5px] font-semibold text-amber-800"
+                title={activeProvisioningLock?.phoneNumber}
+              >
+                <Clock className="h-3.5 w-3.5" />
+                <span>Number provisioning</span>
+                <span>{provisioningCountdown}</span>
+              </div>
+            ) : null}
 
             {config.mode === 'dashboard' ? (
               <div className="inline-flex rounded-[10px] bg-black/[0.06] p-[3px]">
@@ -277,10 +305,20 @@ export function AppLayout() {
               <button
                 type="button"
                 onClick={config.action.onClick}
-                className="inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-[#2FB267] px-3 text-[12.5px] font-semibold text-white shadow-[0_2px_6px_-1px_rgba(47,178,103,0.35),0_1px_2px_rgba(47,178,103,0.20)] transition-colors hover:bg-[#258A50]"
+                disabled={config.action.disabled}
+                title={config.action.disabledReason}
+                className={[
+                  'inline-flex h-8 items-center gap-1.5 rounded-[10px] bg-[#2FB267] px-3 text-[12.5px] font-semibold text-white transition-colors',
+                  config.action.disabled
+                    ? 'cursor-not-allowed opacity-50'
+                    : 'shadow-[0_2px_6px_-1px_rgba(47,178,103,0.35),0_1px_2px_rgba(47,178,103,0.20)] hover:bg-[#258A50]',
+                ].join(' ')}
               >
                 <Plus className="h-3.5 w-3.5" />
                 <span>{config.action.label}</span>
+                {config.action.disabledText ? (
+                  <span className="text-white/80">{config.action.disabledText}</span>
+                ) : null}
               </button>
             ) : null}
           </div>

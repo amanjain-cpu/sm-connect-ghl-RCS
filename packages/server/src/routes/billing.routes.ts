@@ -134,6 +134,7 @@ router.post(
       phoneNumber: req.body.phoneNumber,
       friendlyName: req.body.friendlyName,
       campaignId: req.body.campaignId,
+      installationId: req.user!.embeddedInstallationId ?? null,
     });
     res.json({ success: true, data: result });
   })

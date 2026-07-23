@@ -31,7 +31,10 @@ import {
 import { api } from '@/lib/api';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { recordProvisioningLock } from '@/lib/phone-number-provisioning';
+import { ProvisioningNoteDialog } from '@/components/phone-numbers/provisioning-note-dialog';
 import { notify } from '@/stores/notification.store';
+import { useAuthStore } from '@/stores/auth.store';
 
 interface AvailableNumber {
   phoneNumber: string;
@@ -91,6 +94,7 @@ const formatNumberPricing = (monthlyPrice?: number | null) =>
     : 'Wallet pricing applies';
 
 export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumbersDialogProps) {
+  const { user } = useAuthStore();
   const [step, setStep] = useState<'search' | 'select' | 'purchase'>('search');
   const [isSearching, setIsSearching] = useState(false);
   const [isPurchasing, setIsPurchasing] = useState(false);
@@ -105,6 +109,8 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
   const [friendlyName, setFriendlyName] = useState('');
   const [error, setError] = useState('');
   const [providerBlocked, setProviderBlocked] = useState<string | null>(null);
+  const [provisioningNoticeNumber, setProvisioningNoticeNumber] = useState<string | null>(null);
+  const hasEmbeddedLocationContext = Boolean(user?.embeddedInstallationId);
 
   useEffect(() => {
     if (open) {
@@ -192,9 +198,21 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
           campaignId: selectedCampaignId || undefined,
           friendlyName: friendlyName || undefined,
         });
+
+        const purchaseData = purchaseResponse.data;
+        let purchasedPhoneNumber: string | null = null;
+        if (purchaseData && !('pending' in purchaseData)) {
+          recordProvisioningLock({
+            phoneNumberId: purchaseData.id,
+            phoneNumber: purchaseData.phoneNumber,
+            purchasedAt: new Date(),
+          });
+          purchasedPhoneNumber = purchaseData.phoneNumber;
+        }
+
         await onPurchased();
-        if (purchaseResponse.success && purchaseResponse.data && 'pending' in purchaseResponse.data && purchaseResponse.data.pending) {
-          notify.success('Number selection saved', purchaseResponse.data.message);
+        if (purchaseData && 'pending' in purchaseData && purchaseData.pending) {
+          notify.success('Number selection saved', purchaseData.message);
         } else {
           const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId);
           notify.success(
@@ -202,11 +220,16 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
             !selectedCampaign
               ? 'The selected phone number was purchased. SMS/MMS starts after an approved campaign is linked.'
               : selectedCampaign.status === 'pending_approval'
-              ? 'The selected phone number was purchased and queued for campaign assignment. SMS/MMS starts after campaign approval.'
-              : 'The selected phone number was linked and saved as the default sender.'
+                ? 'The selected phone number was purchased and queued for campaign assignment. SMS/MMS starts after campaign approval.'
+                : hasEmbeddedLocationContext
+                  ? 'The selected phone number was linked and saved as the default sender.'
+                  : 'The selected phone number was linked.'
           );
         }
         handleClose();
+        if (purchasedPhoneNumber) {
+          setProvisioningNoticeNumber(purchasedPhoneNumber);
+        }
         return;
       }
     } catch (error: unknown) {
@@ -243,8 +266,9 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+    <>
+      <Dialog open={open} onOpenChange={handleClose}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Phone className="h-5 w-5" />
@@ -555,7 +579,18 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
             )}
           </AnimatePresence>
         </div>
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
+
+      <ProvisioningNoteDialog
+        open={Boolean(provisioningNoticeNumber)}
+        phoneNumber={provisioningNoticeNumber}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setProvisioningNoticeNumber(null);
+          }
+        }}
+      />
+    </>
   );
 }

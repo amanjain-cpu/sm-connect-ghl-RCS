@@ -176,7 +176,7 @@ const lifecycleConfig: Record<
   provider_not_activated: {
     label: 'Sender validation needed',
     tone: 'text-muted-foreground',
-    helper: 'Approved assets are linked. Send an embedded test message to confirm the outbound path.',
+    helper: 'Approved assets are linked. Send SMS to confirm the outbound path.',
   },
   ready: {
     label: 'Ready',

@@ -38,7 +38,10 @@ import {
 } from '@signalmash-connect/shared';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
+import { recordProvisioningLock } from '@/lib/phone-number-provisioning';
+import { ProvisioningNoteDialog } from '@/components/phone-numbers/provisioning-note-dialog';
 import { notify } from '@/stores/notification.store';
+import { useAuthStore } from '@/stores/auth.store';
 
 interface PhoneNumber {
   id: string;
@@ -136,6 +139,21 @@ interface SubscriptionSummary {
   };
 }
 
+type NumberLinkIntent =
+  | {
+      mode: 'existing';
+      phoneNumberId: string;
+      friendlyName?: string;
+      makeDefaultSender: boolean;
+      confirmReassignment?: boolean;
+    }
+  | {
+      mode: 'buy_new';
+      phoneNumber: string;
+      friendlyName?: string;
+      makeDefaultSender: boolean;
+    };
+
 const statusConfig = {
   draft: { label: 'Draft', icon: FileText, variant: 'secondary' as const },
   pending_approval: { label: 'Pending Approval', icon: Clock, variant: 'warning' as const },
@@ -163,6 +181,7 @@ function formatUseCaseLabel(value: string): string {
 export function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [brand, setBrand] = useState<BrandSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -184,6 +203,7 @@ export function CampaignDetailPage() {
   const [subscriptionSummary, setSubscriptionSummary] = useState<SubscriptionSummary | null>(null);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [provisioningNoticeNumber, setProvisioningNoticeNumber] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({
     name: '',
     description: '',
@@ -217,6 +237,7 @@ export function CampaignDetailPage() {
   const requiresEditSubUsecases = useCasesRequiringSubUsecases.has(editForm.useCase);
   const minimumEditSubUsecases = editForm.useCase === 'mixed' ? 2 : requiresEditSubUsecases ? 1 : 0;
   const selectedExistingNumber = existingNumbers.find((number) => number.id === selectedExistingNumberId) ?? null;
+  const hasEmbeddedLocationContext = Boolean(user?.embeddedInstallationId);
 
   const loadCampaign = async () => {
     if (!id) return;
@@ -311,7 +332,7 @@ export function CampaignDetailPage() {
     }
   };
 
-  const buildNumberLinkIntent = () => {
+  const buildNumberLinkIntent = (): NumberLinkIntent | undefined | null => {
     if (numberFlowMode === 'none') {
       return undefined;
     }
@@ -338,7 +359,7 @@ export function CampaignDetailPage() {
         mode: 'existing' as const,
         phoneNumberId: selectedExistingNumberId,
         friendlyName: numberFriendlyName || undefined,
-        makeDefaultSender: true,
+        makeDefaultSender: hasEmbeddedLocationContext,
         ...(requiresReassignment ? { confirmReassignment: true } : {}),
       };
     }
@@ -352,7 +373,7 @@ export function CampaignDetailPage() {
       mode: 'buy_new' as const,
       phoneNumber: selectedAvailableNumber,
       friendlyName: numberFriendlyName || undefined,
-      makeDefaultSender: true,
+      makeDefaultSender: hasEmbeddedLocationContext,
     };
   };
 
@@ -360,7 +381,12 @@ export function CampaignDetailPage() {
     await Promise.all([loadCampaign(), loadNumberSetupData()]);
 
     if (responseData?.numberLinkAction?.mode === 'linked') {
-      notify.success(successMessage, 'The campaign and phone number are now linked and saved as the default sender.');
+      notify.success(
+        successMessage,
+        hasEmbeddedLocationContext
+          ? 'The campaign and phone number are now linked and saved as the default sender.'
+          : 'The campaign and phone number are now linked.'
+      );
       return;
     }
 
@@ -368,8 +394,12 @@ export function CampaignDetailPage() {
       notify.success(
         successMessage,
         responseData.numberLinkAction.previousCampaignName
-          ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName}, linked to this campaign, and saved as the default sender.`
-          : 'The existing number was reassigned, linked to this campaign, and saved as the default sender.'
+          ? hasEmbeddedLocationContext
+            ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName}, linked to this campaign, and saved as the default sender.`
+            : `The number was moved from ${responseData.numberLinkAction.previousCampaignName} and linked to this campaign.`
+          : hasEmbeddedLocationContext
+            ? 'The existing number was reassigned, linked to this campaign, and saved as the default sender.'
+            : 'The existing number was reassigned and linked to this campaign.'
       );
       return;
     }
@@ -392,6 +422,35 @@ export function CampaignDetailPage() {
     notify.success(successMessage, 'The campaign request was saved successfully.');
   };
 
+  const recordNewNumberProvisioningLock = (
+    numberLinkIntent: NumberLinkIntent | undefined | null,
+    responseData: any
+  ): string | null => {
+    if (numberLinkIntent?.mode !== 'buy_new') {
+      return null;
+    }
+
+    const action = responseData?.numberLinkAction;
+    if (!action || !['linked', 'blocked_until_campaign_approved'].includes(action.mode)) {
+      return null;
+    }
+
+    const phoneNumber = typeof action.phoneNumber === 'string'
+      ? action.phoneNumber
+      : numberLinkIntent.phoneNumber;
+    const phoneNumberId = typeof action.phoneNumberId === 'string'
+      ? action.phoneNumberId
+      : undefined;
+
+    recordProvisioningLock({
+      phoneNumber,
+      phoneNumberId,
+      purchasedAt: new Date(),
+    });
+
+    return phoneNumber;
+  };
+
   const handleSubmitForApproval = async () => {
     if (!campaign) return;
 
@@ -405,10 +464,14 @@ export function CampaignDetailPage() {
       const response = await api.submitCampaign(campaign.id, numberLinkIntent ? { numberLinkIntent } : undefined);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
+        const purchasedPhoneNumber = recordNewNumberProvisioningLock(numberLinkIntent, response.data);
         await handleNumberLinkResponse(
           response.data,
           'Campaign submitted'
         );
+        if (purchasedPhoneNumber) {
+          setProvisioningNoticeNumber(purchasedPhoneNumber);
+        }
       }
     } catch (error) {
       console.error('Failed to submit campaign:', error);
@@ -431,10 +494,14 @@ export function CampaignDetailPage() {
       const response = await api.linkCampaignPhoneNumber(campaign.id, numberLinkIntent);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
+        const purchasedPhoneNumber = recordNewNumberProvisioningLock(numberLinkIntent, response.data);
         await handleNumberLinkResponse(
           response.data,
           'Campaign number link updated'
         );
+        if (purchasedPhoneNumber) {
+          setProvisioningNoticeNumber(purchasedPhoneNumber);
+        }
       }
     } catch (error) {
       console.error('Failed to link campaign phone number:', error);
@@ -1421,6 +1488,16 @@ export function CampaignDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ProvisioningNoteDialog
+        open={Boolean(provisioningNoticeNumber)}
+        phoneNumber={provisioningNoticeNumber}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setProvisioningNoticeNumber(null);
+          }
+        }}
+      />
     </div>
   );
 }

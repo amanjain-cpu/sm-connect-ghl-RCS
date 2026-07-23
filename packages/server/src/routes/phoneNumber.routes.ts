@@ -185,12 +185,18 @@ router.post(
       'purchase numbers'
     );
     const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
+    const installationId = req.user!.embeddedInstallationId ?? null;
 
     try {
       const number = await phoneNumberService.purchaseNumber(
         req.user!.organizationId,
         phoneNumber,
-        { campaignId, friendlyName }
+        {
+          campaignId,
+          friendlyName,
+          makeDefaultSender: Boolean(installationId),
+          installationId,
+        }
       );
 
       res.status(201).json({
@@ -204,6 +210,8 @@ router.post(
           campaignId,
           phoneNumber,
           friendlyName,
+          makeDefaultSender: Boolean(installationId),
+          installationId,
           error,
         });
 

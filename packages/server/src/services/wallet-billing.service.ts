@@ -1,11 +1,13 @@
 import {
   Prisma,
   type BillingAccount,
+  type BillingAccountStatus,
   type BillingChargeKind,
   type BillingLedgerCategory,
   type BillingPricingTier,
   type Message,
 } from '@prisma/client';
+import { createHash, randomUUID } from 'crypto';
 import { prisma } from '../config/database.js';
 import { config } from '../config/index.js';
 import { AppError } from '../utils/errors.js';
@@ -142,6 +144,7 @@ interface OnboardingNumberIntent {
   formattedNumber?: string;
   friendlyName?: string;
   campaignId?: string;
+  installationId?: string;
 }
 
 type OnboardingProvisioningResult =
@@ -214,6 +217,10 @@ function asRecord(value: Prisma.JsonValue | null | undefined): Record<string, un
   }
 
   return value as Record<string, unknown>;
+}
+
+function stableKey(input: string) {
+  return createHash('sha256').update(input).digest('hex').slice(0, 32);
 }
 
 function parseMoneyMetadata(value: string | undefined, field: string) {
@@ -784,6 +791,233 @@ export class WalletBillingService {
         },
       });
     }
+  }
+
+  async applyAdminWalletAdjustment(input: {
+    organizationId: string;
+    type: 'credit' | 'debit';
+    amount: number;
+    reason: string;
+    adminId: string;
+    adminEmail: string;
+    idempotencyKey?: string;
+  }) {
+    const amount = roundLedger(input.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new AppError('Adjustment amount must be positive.', 'INVALID_WALLET_ADJUSTMENT_AMOUNT', 400);
+    }
+
+    const organization = await this.getOrganizationRecord(input.organizationId);
+    const account = await this.getOrCreateAccount(input.organizationId);
+    const keySource = input.idempotencyKey?.trim() || randomUUID();
+    const adjustmentKey = stableKey(`${input.organizationId}:${keySource}`);
+    const ledgerKey = `admin-wallet-adjustment:${adjustmentKey}`;
+    const chargeKey = `admin-wallet-adjustment:${adjustmentKey}`;
+    const now = new Date();
+    const metadata = {
+      source: 'admin_console',
+      direction: input.type,
+      reason: input.reason,
+      adminId: input.adminId,
+      adminEmail: input.adminEmail,
+      idempotencyKey: input.idempotencyKey ?? null,
+    };
+
+    const result = await prisma.$transaction(async (tx) => {
+      const existingLedgerEntry = await tx.billingLedgerEntry.findUnique({
+        where: { ledgerKey },
+      });
+
+      if (existingLedgerEntry) {
+        const existingCharge = await tx.billingCharge.upsert({
+          where: { chargeKey },
+          create: {
+            chargeKey,
+            kind: 'invoice_adjustment',
+            status: 'succeeded',
+            amount: amount.toFixed(4),
+            description: `Admin wallet ${input.type}`,
+            organizationId: input.organizationId,
+            processedAt: now,
+            metadata: asInputJson({
+              ...metadata,
+              ledgerEntryId: existingLedgerEntry.id,
+              ledgerKey,
+            }),
+          },
+          update: {
+            status: 'succeeded',
+            processedAt: now,
+          },
+        });
+
+        return {
+          ledgerEntry: existingLedgerEntry,
+          charge: existingCharge,
+          previousBalance: null as number | null,
+          walletBalance: toAmount(existingLedgerEntry.balanceAfter),
+          idempotentReplay: true,
+        };
+      }
+
+      const previousBalance = toAmount(account.walletBalance);
+      let updatedAccount: BillingAccount;
+
+      if (input.type === 'credit') {
+        updatedAccount = await tx.billingAccount.update({
+          where: { id: account.id },
+          data: {
+            walletBalance: {
+              increment: amount,
+            },
+            status: 'active',
+            suspendedAt: null,
+            suspensionReason: null,
+          },
+        });
+
+        if (
+          organization.status === 'suspended' &&
+          organization.suspensionReason?.startsWith('Billing suspended:')
+        ) {
+          await tx.organization.update({
+            where: { id: input.organizationId },
+            data: {
+              status: 'active',
+              suspendedAt: null,
+              suspensionReason: null,
+            },
+          });
+        }
+      } else {
+        const debitResult = await tx.billingAccount.updateMany({
+          where: {
+            id: account.id,
+            walletBalance: {
+              gte: amount,
+            },
+          },
+          data: {
+            walletBalance: {
+              decrement: amount,
+            },
+          },
+        });
+
+        if (debitResult.count !== 1) {
+          throw new AppError(
+            'Wallet balance is too low for this manual debit.',
+            'WALLET_FUNDS_REQUIRED',
+            402,
+            true,
+            {
+              requiredAmount: amount,
+              walletBalance: previousBalance,
+            }
+          );
+        }
+
+        const refreshedAccount = await tx.billingAccount.findUnique({
+          where: { id: account.id },
+        });
+
+        if (!refreshedAccount) {
+          throw new AppError('Billing account not found', 'BILLING_ACCOUNT_NOT_FOUND', 404);
+        }
+
+        updatedAccount = refreshedAccount;
+      }
+
+      const ledgerEntry = await tx.billingLedgerEntry.create({
+        data: {
+          ledgerKey,
+          entryType: input.type,
+          category: 'adjustment',
+          amount: amount.toFixed(4),
+          balanceAfter: updatedAccount.walletBalance,
+          description: `Admin wallet ${input.type}: ${input.reason}`,
+          sourceId: input.adminId,
+          organizationId: input.organizationId,
+          billingAccountId: account.id,
+          metadata: asInputJson(metadata),
+        },
+      });
+
+      const charge = await tx.billingCharge.create({
+        data: {
+          chargeKey,
+          kind: 'invoice_adjustment',
+          status: 'succeeded',
+          amount: amount.toFixed(4),
+          description: `Admin wallet ${input.type}: ${input.reason}`,
+          organizationId: input.organizationId,
+          processedAt: now,
+          metadata: asInputJson({
+            ...metadata,
+            ledgerEntryId: ledgerEntry.id,
+            ledgerKey,
+          }),
+        },
+      });
+
+      return {
+        ledgerEntry,
+        charge,
+        previousBalance,
+        walletBalance: toAmount(updatedAccount.walletBalance),
+        idempotentReplay: false,
+      };
+    });
+
+    return {
+      ...result,
+      amount,
+      type: input.type,
+      reason: input.reason,
+    };
+  }
+
+  async updateAdminBillingAccount(input: {
+    organizationId: string;
+    status?: BillingAccountStatus;
+    suspensionReason?: string;
+    pricingTier?: BillingPricingTier;
+  }) {
+    await this.getOrganizationRecord(input.organizationId);
+    const account = await this.getOrCreateAccount(input.organizationId);
+    const targetStatus = input.status ?? account.status;
+
+    if (targetStatus === 'suspended' && !input.suspensionReason?.trim() && !account.suspensionReason) {
+      throw new AppError('A suspension reason is required to suspend billing.', 'SUSPENSION_REASON_REQUIRED', 400);
+    }
+
+    const data: Prisma.BillingAccountUpdateInput = {};
+
+    if (input.pricingTier) {
+      data.pricingTier = input.pricingTier;
+    }
+
+    if (input.status === 'active') {
+      data.status = 'active';
+      data.suspendedAt = null;
+      data.suspensionReason = null;
+    } else if (targetStatus === 'suspended') {
+      data.status = 'suspended';
+      data.suspendedAt = account.status === 'suspended' && account.suspendedAt ? account.suspendedAt : new Date();
+      data.suspensionReason = input.suspensionReason?.trim() || account.suspensionReason || 'Suspended by admin';
+    } else if (input.suspensionReason?.trim() && account.status === 'suspended') {
+      data.suspensionReason = input.suspensionReason.trim();
+    }
+
+    const updatedAccount = await prisma.billingAccount.update({
+      where: { id: account.id },
+      data,
+    });
+
+    return {
+      previousAccount: account,
+      account: updatedAccount,
+    };
   }
 
   private async writeZeroAmountLedgerEntry(input: {
@@ -1385,6 +1619,7 @@ export class WalletBillingService {
     phoneNumber?: string;
     friendlyName?: string;
     campaignId?: string;
+    installationId?: string | null;
     requiresFirstNumber: boolean;
   }): Promise<OnboardingNumberIntent | null> {
     if (!input.requiresFirstNumber) {
@@ -1445,6 +1680,7 @@ export class WalletBillingService {
       formattedNumber: selectedNumber.formattedNumber,
       ...(friendlyName ? { friendlyName } : {}),
       ...(input.campaignId ? { campaignId: input.campaignId } : {}),
+      ...(input.installationId ? { installationId: input.installationId } : {}),
     };
   }
 
@@ -1456,6 +1692,7 @@ export class WalletBillingService {
     phoneNumber?: string;
     friendlyName?: string;
     campaignId?: string;
+    installationId?: string | null;
   }) {
     const topUpAmount = this.assertOnboardingTopUpAmount(input.topUpAmount);
     const cart = await this.getOnboardingCart(input.organizationId, {
@@ -1476,6 +1713,7 @@ export class WalletBillingService {
       phoneNumber: input.phoneNumber,
       friendlyName: input.friendlyName,
       campaignId: input.campaignId,
+      installationId: input.installationId,
       requiresFirstNumber: phoneNumberMrcAmount > 0,
     });
     const customerId = await this.ensureStripeCustomer(account, organization);
@@ -1510,6 +1748,7 @@ export class WalletBillingService {
               formattedPhoneNumber: numberIntent.formattedNumber ?? numberIntent.phoneNumber,
               ...(numberIntent.friendlyName ? { friendlyName: numberIntent.friendlyName } : {}),
               ...(numberIntent.campaignId ? { campaignId: numberIntent.campaignId } : {}),
+              ...(numberIntent.installationId ? { installationId: numberIntent.installationId } : {}),
             }
           : {}),
         catalogVersion: PRICE_CATALOG_VERSION,
@@ -1827,6 +2066,7 @@ export class WalletBillingService {
       ...(metadata.formattedPhoneNumber ? { formattedNumber: metadata.formattedPhoneNumber } : {}),
       ...(metadata.friendlyName ? { friendlyName: metadata.friendlyName } : {}),
       ...(metadata.campaignId ? { campaignId: metadata.campaignId } : {}),
+      ...(metadata.installationId ? { installationId: metadata.installationId } : {}),
     };
   }
 
@@ -1875,7 +2115,8 @@ export class WalletBillingService {
         {
           campaignId: intent.campaignId,
           friendlyName: intent.friendlyName,
-          makeDefaultSender: true,
+          makeDefaultSender: Boolean(intent.installationId),
+          installationId: intent.installationId,
           onboardingPhoneNumberMrcChargeKey: `onboarding:${input.sessionId}:phone-number-mrc`,
         }
       );
@@ -1939,6 +2180,8 @@ export class WalletBillingService {
           campaignId: intent.campaignId,
           phoneNumber: intent.phoneNumber,
           friendlyName: intent.friendlyName,
+          makeDefaultSender: Boolean(intent.installationId),
+          installationId: intent.installationId,
           error,
         });
 
@@ -2086,14 +2329,14 @@ export class WalletBillingService {
     return this.getWalletSummary(organizationId);
   }
 
-  async createBillingPortalSession(organizationId: string) {
+  async createBillingPortalSession(organizationId: string, options?: { returnUrl?: string }) {
     const organization = await this.getOrganizationRecord(organizationId);
     const account = await this.getOrCreateAccount(organizationId);
     const customerId = await this.ensureStripeCustomer(account, organization);
 
     return stripeService.createBillingPortalSession({
       customerId,
-      returnUrl: `${config.webUrl}/subscriptions`,
+      returnUrl: options?.returnUrl ?? `${config.webUrl}/subscriptions`,
     });
   }
 

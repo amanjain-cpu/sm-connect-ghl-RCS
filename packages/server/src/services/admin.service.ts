@@ -2,7 +2,9 @@
 // Admin Service
 // ===========================================
 
+import { Prisma, type BillingAccountStatus, type BillingPricingTier } from '@prisma/client';
 import { prisma } from '../config/database.js';
+import { config } from '../config/index.js';
 import { redis } from '../config/redis.js';
 import { encrypt, decrypt, hashPassword, verifyPassword } from '../utils/crypto.js';
 import { generateTokens, verifyAdminRefreshToken } from '../utils/jwt.js';
@@ -31,6 +33,23 @@ export const SETTINGS_KEYS = {
 
 // Cache TTL (5 minutes)
 const SETTINGS_CACHE_TTL = 300;
+
+type AdminActionContext = {
+  ipAddress?: string;
+  userAgent?: string;
+};
+
+function toAmount(value: Prisma.Decimal | string | number | null | undefined): number {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  return Number(value);
+}
 
 export class AdminService {
   // ===========================================
@@ -598,6 +617,390 @@ export class AdminService {
       subscriptionSummary,
       externalMappings,
       recentProviderOperations,
+    };
+  }
+
+  private async buildOrganizationBillingDetail(organizationId: string) {
+    const organization = await prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        website: true,
+        logoUrl: true,
+        status: true,
+        suspendedAt: true,
+        suspensionReason: true,
+        createdAt: true,
+        updatedAt: true,
+        billingAccount: {
+          select: {
+            id: true,
+            status: true,
+            pricingTier: true,
+            walletBalance: true,
+            stripeCustomerId: true,
+            stripeDefaultPaymentMethodId: true,
+            suspensionReason: true,
+            suspendedAt: true,
+            mrcNextRunAt: true,
+            setupFeeChargedAt: true,
+            updatedAt: true,
+          },
+        },
+        _count: {
+          select: {
+            users: true,
+            brands: true,
+            campaigns: true,
+            phoneNumbers: true,
+            messages: true,
+          },
+        },
+      },
+    });
+
+    if (!organization) {
+      throw new AppError('Organization not found', 'ORGANIZATION_NOT_FOUND', 404);
+    }
+
+    const [walletSummary, recentLedgerEntries, recentCharges, recentBillingEvents, recentAuditLogs] =
+      await Promise.all([
+        walletBillingService.getWalletSummary(organizationId),
+        prisma.billingLedgerEntry.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          include: {
+            message: {
+              select: {
+                id: true,
+                direction: true,
+                type: true,
+                from: true,
+                to: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        }),
+        prisma.billingCharge.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        }),
+        prisma.billingEvent.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          include: {
+            message: {
+              select: {
+                id: true,
+                direction: true,
+                type: true,
+                from: true,
+                to: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        }),
+        prisma.adminAuditLog.findMany({
+          where: {
+            resource: 'organization_billing',
+            resourceId: organizationId,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+          include: {
+            admin: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+    return {
+      organization: {
+        ...organization,
+        billingAccount: organization.billingAccount
+          ? {
+              id: organization.billingAccount.id,
+              status: organization.billingAccount.status,
+              pricingTier: organization.billingAccount.pricingTier,
+              walletBalance: toAmount(organization.billingAccount.walletBalance),
+              suspensionReason: organization.billingAccount.suspensionReason,
+              suspendedAt: organization.billingAccount.suspendedAt,
+              mrcNextRunAt: organization.billingAccount.mrcNextRunAt,
+              setupFeeChargedAt: organization.billingAccount.setupFeeChargedAt,
+              updatedAt: organization.billingAccount.updatedAt,
+              hasStripeCustomer: Boolean(organization.billingAccount.stripeCustomerId),
+              hasSavedPaymentMethod: Boolean(organization.billingAccount.stripeDefaultPaymentMethodId),
+            }
+          : null,
+      },
+      walletSummary,
+      recentLedgerEntries: recentLedgerEntries.map((entry) => ({
+        ...entry,
+        amount: toAmount(entry.amount),
+        balanceAfter: toAmount(entry.balanceAfter),
+      })),
+      recentCharges: recentCharges.map((charge) => ({
+        ...charge,
+        amount: toAmount(charge.amount),
+      })),
+      recentBillingEvents,
+      recentAuditLogs,
+    };
+  }
+
+  async getOrganizationBilling(
+    adminId: string,
+    organizationId: string,
+    context?: AdminActionContext
+  ) {
+    const detail = await this.buildOrganizationBillingDetail(organizationId);
+
+    await this.logAuditAction(
+      adminId,
+      'VIEW_ORGANIZATION_BILLING',
+      'organization_billing',
+      organizationId,
+      {
+        organizationId,
+      },
+      context
+    );
+
+    return detail;
+  }
+
+  async applyOrganizationWalletAdjustment(input: {
+    adminId: string;
+    adminEmail: string;
+    organizationId: string;
+    type: 'credit' | 'debit';
+    amount: number;
+    reason: string;
+    idempotencyKey?: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    const adjustment = await walletBillingService.applyAdminWalletAdjustment({
+      organizationId: input.organizationId,
+      type: input.type,
+      amount: input.amount,
+      reason: input.reason,
+      adminId: input.adminId,
+      adminEmail: input.adminEmail,
+      idempotencyKey: input.idempotencyKey,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_WALLET_ADJUSTMENT',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        type: input.type,
+        amount: adjustment.amount,
+        reason: input.reason,
+        previousValues: {
+          walletBalance: before.account.walletBalance,
+          billingStatus: before.account.status,
+        },
+        newValues: {
+          walletBalance: adjustment.walletBalance,
+          billingStatus: billing.walletSummary.account.status,
+        },
+        affectedLedgerEntryId: adjustment.ledgerEntry.id,
+        affectedLedgerKey: adjustment.ledgerEntry.ledgerKey,
+        affectedChargeId: adjustment.charge.id,
+        affectedChargeKey: adjustment.charge.chargeKey,
+        idempotentReplay: adjustment.idempotentReplay,
+      },
+      input.context
+    );
+
+    return {
+      adjustment: {
+        ledgerEntry: adjustment.ledgerEntry,
+        charge: adjustment.charge,
+        previousBalance: adjustment.previousBalance,
+        walletBalance: adjustment.walletBalance,
+        amount: adjustment.amount,
+        type: adjustment.type,
+        reason: adjustment.reason,
+        idempotentReplay: adjustment.idempotentReplay,
+      },
+      billing,
+    };
+  }
+
+  async updateOrganizationBillingAccount(input: {
+    adminId: string;
+    organizationId: string;
+    status?: BillingAccountStatus;
+    suspensionReason?: string;
+    pricingTier?: BillingPricingTier;
+    context?: AdminActionContext;
+  }) {
+    const result = await walletBillingService.updateAdminBillingAccount({
+      organizationId: input.organizationId,
+      status: input.status,
+      suspensionReason: input.suspensionReason,
+      pricingTier: input.pricingTier,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_ACCOUNT_UPDATE',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        reason: input.suspensionReason,
+        previousValues: {
+          status: result.previousAccount.status,
+          pricingTier: result.previousAccount.pricingTier,
+          suspensionReason: result.previousAccount.suspensionReason,
+          suspendedAt: result.previousAccount.suspendedAt,
+        },
+        newValues: {
+          status: result.account.status,
+          pricingTier: result.account.pricingTier,
+          suspensionReason: result.account.suspensionReason,
+          suspendedAt: result.account.suspendedAt,
+        },
+      },
+      input.context
+    );
+
+    return {
+      account: result.account,
+      billing,
+    };
+  }
+
+  async createOrganizationBillingPortal(input: {
+    adminId: string;
+    organizationId: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    const portal = await walletBillingService.createBillingPortalSession(input.organizationId, {
+      returnUrl: `${config.webUrl}/admin/organizations`,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_PORTAL_SESSION',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        previousValues: {
+          hasStripeCustomer: before.account.hasStripeCustomer,
+        },
+        newValues: {
+          hasStripeCustomer: billing.walletSummary.account.hasStripeCustomer,
+        },
+        portalSessionCreated: true,
+      },
+      input.context
+    );
+
+    return {
+      portal,
+      billing,
+    };
+  }
+
+  async releaseOrganizationHeldInbound(input: {
+    adminId: string;
+    organizationId: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    const result = await walletBillingService.releaseHeldInboundMessages(input.organizationId);
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_RELEASE_HELD_INBOUND',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        previousValues: {
+          heldInboundCount: before.usage.heldInboundCount,
+          walletBalance: before.account.walletBalance,
+        },
+        newValues: {
+          heldInboundCount: billing.walletSummary.usage.heldInboundCount,
+          walletBalance: billing.walletSummary.account.walletBalance,
+        },
+        result,
+      },
+      input.context
+    );
+
+    return {
+      result,
+      billing,
+    };
+  }
+
+  async processOrganizationMrc(input: {
+    adminId: string;
+    organizationId: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    await walletBillingService.getOrCreateAccount(input.organizationId);
+    const result = await walletBillingService.processMonthlyRecurringCharges({
+      organizationId: input.organizationId,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_PROCESS_MRC',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        previousValues: {
+          billingStatus: before.account.status,
+          walletBalance: before.account.walletBalance,
+          mrcNextRunAt: before.account.mrcNextRunAt,
+        },
+        newValues: {
+          billingStatus: billing.walletSummary.account.status,
+          walletBalance: billing.walletSummary.account.walletBalance,
+          mrcNextRunAt: billing.walletSummary.account.mrcNextRunAt,
+        },
+        result,
+      },
+      input.context
+    );
+
+    return {
+      result,
+      billing,
     };
   }
 

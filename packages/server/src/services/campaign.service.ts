@@ -94,6 +94,11 @@ interface CampaignNumberLinkIntent {
   friendlyName?: string;
   confirmReassignment?: boolean;
   makeDefaultSender?: boolean;
+  installationId?: string;
+}
+
+interface CampaignLocationContext {
+  installationId?: string | null;
 }
 
 type CampaignNumberLinkAction =
@@ -382,7 +387,11 @@ export class CampaignService {
         ? record.friendlyName.trim()
         : undefined;
     const confirmReassignment = record.confirmReassignment === true;
-    const makeDefaultSender = record.makeDefaultSender !== false;
+    const makeDefaultSender = record.makeDefaultSender === true;
+    const installationId =
+      typeof record.installationId === 'string' && record.installationId.trim().length > 0
+        ? record.installationId.trim()
+        : undefined;
 
     if (mode === 'existing' && !phoneNumberId) {
       return null;
@@ -399,11 +408,13 @@ export class CampaignService {
       ...(friendlyName ? { friendlyName } : {}),
       ...(confirmReassignment ? { confirmReassignment: true } : {}),
       makeDefaultSender,
+      ...(installationId ? { installationId } : {}),
     };
   }
 
   private normalizeNumberLinkIntent(
-    value?: CampaignNumberLinkIntentInput | null
+    value?: CampaignNumberLinkIntentInput | null,
+    context: CampaignLocationContext = {}
   ): CampaignNumberLinkIntent | null {
     if (!value) {
       return null;
@@ -412,6 +423,15 @@ export class CampaignService {
     const mode = value.mode;
     if (mode !== 'existing' && mode !== 'buy_new') {
       throw new BadRequestError('Select a valid phone-number linking mode');
+    }
+    const makeDefaultSender = value.makeDefaultSender === true;
+
+    if (makeDefaultSender && !context.installationId) {
+      throw new AppError(
+        'Open Signalmash Connect from a CRM location before changing the default sender.',
+        'LOCATION_CONTEXT_REQUIRED',
+        400
+      );
     }
 
     if (mode === 'existing') {
@@ -425,7 +445,8 @@ export class CampaignService {
         phoneNumberId,
         ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
         ...(value.confirmReassignment ? { confirmReassignment: true } : {}),
-        makeDefaultSender: value.makeDefaultSender ?? true,
+        makeDefaultSender,
+        ...(makeDefaultSender ? { installationId: context.installationId! } : {}),
       };
     }
 
@@ -438,7 +459,8 @@ export class CampaignService {
       mode,
       phoneNumber,
       ...(value.friendlyName?.trim() ? { friendlyName: value.friendlyName.trim() } : {}),
-      makeDefaultSender: value.makeDefaultSender ?? true,
+      makeDefaultSender,
+      ...(makeDefaultSender ? { installationId: context.installationId! } : {}),
     };
   }
 
@@ -483,13 +505,14 @@ export class CampaignService {
 
   private async setNumberLinkIntent(
     campaign: Campaign,
-    intentInput?: CampaignNumberLinkIntentInput | null
+    intentInput?: CampaignNumberLinkIntentInput | null,
+    context: CampaignLocationContext = {}
   ): Promise<Campaign> {
     if (intentInput === undefined) {
       return campaign;
     }
 
-    const intent = this.normalizeNumberLinkIntent(intentInput);
+    const intent = this.normalizeNumberLinkIntent(intentInput, context);
 
     return prisma.campaign.update({
       where: { id: campaign.id },
@@ -529,8 +552,9 @@ export class CampaignService {
             friendlyName: intent.friendlyName,
             campaignId: campaign.id,
             confirmReassignment: intent.confirmReassignment,
-            makeDefault: intent.makeDefaultSender ?? true,
-          }
+            makeDefault: intent.makeDefaultSender === true,
+          },
+          { installationId: intent.installationId ?? null }
         );
         const updatedCampaign = await prisma.campaign.update({
           where: { id: campaign.id },
@@ -577,7 +601,8 @@ export class CampaignService {
         {
           campaignId: campaign.id,
           friendlyName: intent.friendlyName,
-          makeDefaultSender: intent.makeDefaultSender ?? true,
+          makeDefaultSender: intent.makeDefaultSender === true,
+          installationId: intent.installationId ?? null,
         }
       );
       const updatedCampaign = await prisma.campaign.findUnique({
@@ -866,6 +891,7 @@ export class CampaignService {
     organizationId: string,
     options?: {
       numberLinkIntent?: CampaignNumberLinkIntentInput | null;
+      installationId?: string | null;
     }
   ): Promise<CampaignResultWithNumberLink> {
     const campaign = await this.getById(id, organizationId);
@@ -889,7 +915,11 @@ export class CampaignService {
       throw new BadRequestError('Brand must be verified and linked to Signalmash before submitting a campaign');
     }
 
-    const installation = await integrationService.getPrimaryInstallationForOrganization(organizationId);
+    const installation = await integrationService.getPrimaryInstallationForOrganization(
+      organizationId,
+      'leadconnector',
+      options?.installationId
+    );
     if (!installation || installation.status !== 'connected') {
       throw new BadRequestError('Connect your GHL workspace before submitting a campaign');
     }
@@ -1017,7 +1047,8 @@ export class CampaignService {
 
       const campaignWithIntent = await this.setNumberLinkIntent(
         updatedCampaign,
-        options?.numberLinkIntent
+        options?.numberLinkIntent,
+        { installationId: options?.installationId ?? null }
       );
 
       const intent = this.parseNumberLinkIntent(campaignWithIntent.numberLinkIntent);
@@ -1137,7 +1168,11 @@ export class CampaignService {
     return this.maybeFulfillPendingNumberLink(updatedCampaign);
   }
 
-  async refreshApprovalStatus(id: string, organizationId: string): Promise<Campaign> {
+  async refreshApprovalStatus(
+    id: string,
+    organizationId: string,
+    context: CampaignLocationContext = {}
+  ): Promise<Campaign> {
     const campaign = await this.getById(id, organizationId);
 
     if (!campaign.signalmashCampaignId) {
@@ -1186,6 +1221,7 @@ export class CampaignService {
       await integrationService.syncCampaignMapping(updatedCampaign);
       await providerOperationService.log({
         organizationId,
+        installationId: context.installationId,
         operation: 'refresh_campaign_status',
         localResourceType: 'Campaign',
         localResourceId: campaign.id,
@@ -1199,6 +1235,7 @@ export class CampaignService {
     } catch (error) {
       await providerOperationService.log({
         organizationId,
+        installationId: context.installationId,
         operation: 'refresh_campaign_status',
         localResourceType: 'Campaign',
         localResourceId: campaign.id,
@@ -1230,7 +1267,8 @@ export class CampaignService {
   async linkPhoneNumber(
     id: string,
     organizationId: string,
-    intentInput: CampaignNumberLinkIntentInput
+    intentInput: CampaignNumberLinkIntentInput,
+    context: CampaignLocationContext = {}
   ): Promise<CampaignResultWithNumberLink> {
     const campaign = await this.getById(id, organizationId);
 
@@ -1242,7 +1280,7 @@ export class CampaignService {
       throw new BadRequestError('Campaign must be linked to Signalmash before buying a number');
     }
 
-    const campaignWithIntent = await this.setNumberLinkIntent(campaign, intentInput);
+    const campaignWithIntent = await this.setNumberLinkIntent(campaign, intentInput, context);
     return this.fulfillNumberLinkIntent(campaignWithIntent);
   }
 
