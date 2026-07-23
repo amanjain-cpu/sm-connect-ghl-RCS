@@ -8,6 +8,7 @@ import { prisma } from '../config/database.js';
 import { decrypt } from '../utils/crypto.js';
 import { ExternalServiceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { isSmsAlreadyEnabledMessage } from './signalmash-sms-enablement.service.js';
 import {
   CAMPAIGN_SUB_USE_CASE_VALUES,
   CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES,
@@ -509,6 +510,13 @@ export class SignalmashService {
         'SMS enablement requires the provider campaign ID that is exactly 7 characters and starts with C.'
       );
     }
+  }
+
+  private getLegacyResultMessage(result: {
+    message?: string;
+    error?: { message?: string; description?: string };
+  }): string | undefined {
+    return result.error?.message || result.error?.description || result.message;
   }
 
   private pickNumber(...values: unknown[]): number | undefined {
@@ -1825,22 +1833,45 @@ export class SignalmashService {
     this.assertSmsEnablementCampaignId(campaignId);
 
     const did = this.formatSmsEndpointPhone(phoneNumber);
-    const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
-      'POST',
-      '/enablesms',
-      new URLSearchParams({
-        DID: did,
-        CampaignId: campaignId,
-      })
-    );
+    let enableSmsResult: LegacyEnableSmsResult | null = null;
 
-    if ((enableSmsResult.status ?? 500) >= 400) {
-      throw new ExternalServiceError(
-        'Signalmash',
-        enableSmsResult.error?.message ||
-          enableSmsResult.message ||
-          `SMS enablement failed for DID ${did}`
+    try {
+      enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
+        'POST',
+        '/enablesms',
+        new URLSearchParams({
+          DID: did,
+          CampaignId: campaignId,
+        })
       );
+    } catch (error) {
+      if (!isSmsAlreadyEnabledMessage(error instanceof Error ? error.message : error)) {
+        throw error;
+      }
+
+      logger.info(
+        { did, campaignId },
+        'Signalmash reported SMS was already enabled for DID; continuing idempotently'
+      );
+    }
+
+    const enableSmsMessage = enableSmsResult
+      ? this.getLegacyResultMessage(enableSmsResult)
+      : undefined;
+
+    if (enableSmsResult && (enableSmsResult.status ?? 500) >= 400) {
+      if (isSmsAlreadyEnabledMessage(enableSmsMessage)) {
+        logger.info(
+          { did, campaignId },
+          'Signalmash reported SMS was already enabled for DID; continuing idempotently'
+        );
+      } else {
+        throw new ExternalServiceError(
+          'Signalmash',
+          enableSmsMessage ||
+            `SMS enablement failed for DID ${did}`
+        );
+      }
     }
 
     await this.setPurchasedNumberConnection(did);
