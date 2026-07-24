@@ -16,6 +16,7 @@ import {
   getErrorMessage,
   isNumberNotApprovedForMnoError,
 } from '../utils/provider-errors.js';
+import { sendDefaultSenderValidationSms } from './default-sender-validation.service.js';
 
 interface AvailableNumber {
   phoneNumber: string;
@@ -1681,14 +1682,14 @@ export class PhoneNumberService {
     const smsEnablementCampaignId = await this.resolveSmsEnablementCampaignId(campaign);
 
     try {
-      await signalmashService.enableSmsForNumber(number.signalmashNumberId, smsEnablementCampaignId);
-
-      const validationResult = await signalmashService.sendMessage({
+      const validationResult = await sendDefaultSenderValidationSms({
+        signalmashNumberId: number.signalmashNumberId,
+        smsEnablementCampaignId,
         from: number.phoneNumber,
         to: validationTo,
         body: DEFAULT_SENDER_VALIDATION_BODY,
         webhookUrl: this.getSignalmashWebhookUrl(),
-      });
+      }, signalmashService, logger);
 
       const evidence: DefaultSenderValidationEvidence = {
         validatedAt: new Date().toISOString(),
