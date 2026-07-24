@@ -40,6 +40,8 @@ interface AdminRequest extends Request {
     id: string;
     email: string;
     role: string;
+    name?: string;
+    mustChangePassword?: boolean;
   };
 }
 
@@ -56,11 +58,27 @@ const requireSuperAdmin = async (
 
     const token = authHeader.substring(7);
     const payload = await verifyAdminAccessToken(token);
+    const admin = await prisma.superAdmin.findUnique({
+      where: { id: payload.adminId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        isActive: true,
+        mustChangePassword: true,
+      },
+    });
+
+    if (!admin || !admin.isActive) {
+      throw new AppError('Admin account is disabled', 'ADMIN_DISABLED', 403);
+    }
 
     req.admin = {
-      id: payload.adminId,
-      email: payload.email,
+      id: admin.id,
+      email: admin.email,
       role: 'superadmin',
+      name: admin.name,
+      mustChangePassword: admin.mustChangePassword,
     };
 
     next();
@@ -136,9 +154,61 @@ router.post('/auth/logout', async (req: Request, res: Response, next: NextFuncti
   }
 });
 
+router.post('/invites/:token/accept', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      token: z.string().min(20),
+    }).parse(req.params);
+    const schema = z.object({
+      password: z.string().min(12),
+      name: z.string().trim().min(1).max(120).optional(),
+    });
+    const data = schema.parse(req.body);
+    const admin = await adminService.acceptAdminInvite({
+      token: params.token,
+      password: data.password,
+      name: data.name,
+    });
+
+    res.status(201).json({
+      success: true,
+      data: admin,
+      message: 'Admin invite accepted',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ===========================================
 // Protected Admin Routes
 // ===========================================
+
+router.post('/auth/change-password', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const schema = z.object({
+      currentPassword: z.string().min(1),
+      newPassword: z.string().min(12),
+      refreshToken: z.string().optional(),
+    });
+    const data = schema.parse(req.body);
+    const admin = await adminService.changeAdminPassword({
+      adminId: req.admin!.id,
+      currentPassword: data.currentPassword,
+      newPassword: data.newPassword,
+      currentRefreshToken: data.refreshToken,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: admin,
+      message: 'Password changed',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // Get current admin
 router.get('/me', requireSuperAdmin, async (req: AdminRequest, res: Response) => {
@@ -148,6 +218,113 @@ router.get('/me', requireSuperAdmin, async (req: AdminRequest, res: Response) =>
       admin: req.admin,
     },
   });
+});
+
+router.get('/admin-users', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const result = await adminService.listAdminUsers(req.admin!.id);
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/admin-users/invites', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const schema = z.object({
+      email: z.string().email(),
+      name: z.string().trim().min(1).max(120).optional(),
+      expiresInHours: z.number().int().min(1).max(24 * 14).optional(),
+    });
+    const data = schema.parse(req.body);
+    const result = await adminService.createAdminInvite({
+      adminId: req.admin!.id,
+      email: data.email,
+      name: data.name,
+      expiresInHours: data.expiresInHours,
+      context: getAdminContext(req),
+    });
+
+    res.status(201).json({
+      success: true,
+      data: result,
+      message: 'Admin invite created',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/admin-users/invites/:id/revoke', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      id: z.string().uuid(),
+    }).parse(req.params);
+    const result = await adminService.revokeAdminInvite({
+      adminId: req.admin!.id,
+      inviteId: params.id,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Admin invite revoked',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/admin-users/:id/reset-password', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      id: z.string().uuid(),
+    }).parse(req.params);
+    const schema = z.object({
+      temporaryPassword: z.string().min(12),
+    });
+    const data = schema.parse(req.body);
+    const admin = await adminService.resetAdminPassword({
+      actorAdminId: req.admin!.id,
+      targetAdminId: params.id,
+      temporaryPassword: data.temporaryPassword,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: admin,
+      message: 'Admin temporary password set and refresh tokens revoked',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/admin-users/:id/deactivate', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      id: z.string().uuid(),
+    }).parse(req.params);
+    const admin = await adminService.deactivateAdmin({
+      actorAdminId: req.admin!.id,
+      targetAdminId: params.id,
+      context: getAdminContext(req),
+    });
+
+    res.json({
+      success: true,
+      data: admin,
+      message: 'Admin deactivated and refresh tokens revoked',
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ===========================================
@@ -703,12 +880,28 @@ const linkExistingAssetsSchema = z.object({
   friendlyName: z.string().max(100).optional().transform((value) => value?.trim() || undefined),
   configureWebhook: z.boolean().optional(),
   makeDefaultSender: z.boolean().optional(),
+  validationTo: z.string().min(10).max(20).optional().transform((value) => value?.trim() || undefined),
+  installationId: z.string().uuid().optional(),
 }).superRefine((value, ctx) => {
   if (value.configureWebhook && !value.signalmashNumberId) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['signalmashNumberId'],
       message: 'Signalmash Number ID is required when configuring the inbound webhook.',
+    });
+  }
+  if (value.makeDefaultSender && !value.validationTo) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['validationTo'],
+      message: 'A validation recipient is required before setting the default sender.',
+    });
+  }
+  if (value.makeDefaultSender && !value.installationId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['installationId'],
+      message: 'A CRM location installation ID is required before setting the default sender.',
     });
   }
 });
@@ -731,6 +924,7 @@ router.post('/organizations/link-existing-assets', requireSuperAdmin, async (req
         signalmashCampaignId: data.signalmashCampaignId,
         signalmashNumberId: data.signalmashNumberId,
         phoneNumber: data.phoneNumber,
+        installationId: data.installationId,
         webhookConfigured: linked.webhookConfigured,
         webhookError: linked.webhookError,
       },
@@ -743,6 +937,53 @@ router.post('/organizations/link-existing-assets', requireSuperAdmin, async (req
       message: linked.webhookError
         ? 'Existing assets linked, but webhook configuration needs review'
         : 'Existing Signalmash assets linked',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const adminDefaultSenderSchema = z.object({
+  phoneNumberId: z.string().uuid(),
+  validationTo: z.string().min(10).max(20),
+});
+
+router.put('/organizations/:organizationId/locations/:installationId/default-sender', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const params = z.object({
+      organizationId: z.string().uuid(),
+      installationId: z.string().uuid(),
+    }).parse(req.params);
+    const data = adminDefaultSenderSchema.parse(req.body);
+
+    const number = await phoneNumberService.updateNumber(
+      params.organizationId,
+      data.phoneNumberId,
+      {
+        makeDefault: true,
+        validationTo: data.validationTo,
+      },
+      { installationId: params.installationId }
+    );
+
+    await adminService.logAuditAction(
+      req.admin!.id,
+      'ADMIN_SET_DEFAULT_SENDER',
+      'sender_profile',
+      data.phoneNumberId,
+      {
+        organizationId: params.organizationId,
+        installationId: params.installationId,
+        phoneNumberId: data.phoneNumberId,
+        validationTo: data.validationTo,
+      },
+      getAdminContext(req)
+    );
+
+    res.json({
+      success: true,
+      data: number,
+      message: 'Default sender validated and updated',
     });
   } catch (error) {
     next(error);

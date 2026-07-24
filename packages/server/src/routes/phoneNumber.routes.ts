@@ -132,6 +132,7 @@ const purchaseBodySchema = z.object({
   phoneNumber: z.string().min(10).max(15),
   campaignId: z.string().uuid().optional(),
   friendlyName: z.string().max(100).optional(),
+  validationTo: z.string().min(10).max(20).optional(),
 });
 
 router.post(
@@ -142,7 +143,7 @@ router.post(
       req.user!.organizationId,
       'start number checkout'
     );
-    const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
+    const { phoneNumber, campaignId, friendlyName, validationTo } = req.body as z.infer<typeof purchaseBodySchema>;
 
     const result = await walletBillingService.preparePhoneNumberProvisioning(
       req.user!.organizationId
@@ -184,7 +185,7 @@ router.post(
       req.user!.organizationId,
       'purchase numbers'
     );
-    const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
+    const { phoneNumber, campaignId, friendlyName, validationTo } = req.body as z.infer<typeof purchaseBodySchema>;
     const installationId = req.user!.embeddedInstallationId ?? null;
 
     try {
@@ -194,7 +195,8 @@ router.post(
         {
           campaignId,
           friendlyName,
-          makeDefaultSender: Boolean(installationId),
+          makeDefaultSender: Boolean(installationId && validationTo),
+          validationTo,
           installationId,
         }
       );
@@ -210,7 +212,8 @@ router.post(
           campaignId,
           phoneNumber,
           friendlyName,
-          makeDefaultSender: Boolean(installationId),
+          makeDefaultSender: Boolean(installationId && validationTo),
+          validationTo,
           installationId,
           error,
         });
@@ -238,28 +241,37 @@ const updateBodySchema = z.object({
   campaignId: z.string().uuid().nullable().optional(),
   makeDefault: z.boolean().optional(),
   confirmReassignment: z.boolean().optional(),
+  validationTo: z.string().min(10).max(20).optional(),
+});
+
+const updatePhoneNumberHandler = asyncHandler(async (req: Request, res: Response) => {
+  await organizationRuntimeService.assertActionAllowed(
+    req.user!.organizationId,
+    'update number assignments'
+  );
+  const number = await phoneNumberService.updateNumber(
+    req.user!.organizationId,
+    req.params.id,
+    req.body,
+    { installationId: req.user!.embeddedInstallationId ?? null }
+  );
+
+  res.json({
+    success: true,
+    data: number,
+  });
 });
 
 router.patch(
   '/:id',
   validate({ params: idParamSchema, body: updateBodySchema }),
-  asyncHandler(async (req: Request, res: Response) => {
-    await organizationRuntimeService.assertActionAllowed(
-      req.user!.organizationId,
-      'update number assignments'
-    );
-    const number = await phoneNumberService.updateNumber(
-      req.user!.organizationId,
-      req.params.id,
-      req.body,
-      { installationId: req.user!.embeddedInstallationId ?? null }
-    );
+  updatePhoneNumberHandler
+);
 
-    res.json({
-      success: true,
-      data: number,
-    });
-  })
+router.put(
+  '/:id',
+  validate({ params: idParamSchema, body: updateBodySchema }),
+  updatePhoneNumberHandler
 );
 
 // ===========================================

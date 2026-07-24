@@ -11,6 +11,7 @@ interface Admin {
   email: string;
   name?: string;
   role?: string;
+  mustChangePassword?: boolean;
 }
 
 interface AdminAuthState {
@@ -466,8 +467,53 @@ class AdminApiClient {
     friendlyName?: string;
     configureWebhook?: boolean;
     makeDefaultSender?: boolean;
+    validationTo?: string;
+    installationId?: string;
   }) {
     return this.post<{ success: boolean; data: any; message?: string }>('/organizations/link-existing-assets', data);
+  }
+
+  async getAdminUsers() {
+    return this.get<{ success: boolean; data: { admins: any[]; invites: any[] } }>('/admin-users');
+  }
+
+  async createAdminInvite(data: { email: string; name?: string; expiresInHours?: number }) {
+    return this.post<{ success: boolean; data: { invite: any; inviteUrl: string; token: string }; message?: string }>(
+      '/admin-users/invites',
+      data
+    );
+  }
+
+  async revokeAdminInvite(id: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/admin-users/invites/${id}/revoke`);
+  }
+
+  async resetAdminPassword(id: string, temporaryPassword: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(
+      `/admin-users/${id}/reset-password`,
+      { temporaryPassword }
+    );
+  }
+
+  async deactivateAdmin(id: string) {
+    return this.post<{ success: boolean; data: any; message?: string }>(`/admin-users/${id}/deactivate`);
+  }
+
+  async acceptAdminInvite(token: string, data: { password: string; name?: string }) {
+    return this.request<{ success: boolean; data: any; message?: string }>(
+      `/invites/${encodeURIComponent(token)}/accept`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+  }
+
+  async changePassword(data: { currentPassword: string; newPassword: string }) {
+    return this.post<{ success: boolean; data: any; message?: string }>('/auth/change-password', {
+      ...data,
+      refreshToken: safeGetItem('adminRefreshToken') || undefined,
+    });
   }
 
   // Audit logs

@@ -13,6 +13,10 @@ import { platformAdapterRegistry } from '../services/platform-adapter-registry.s
 import { toPlatformAdapterConnection } from '../adapters/base.adapter.js';
 import { AppError, BadRequestError, NotFoundError } from '../utils/errors.js';
 import { deadLetterService } from '../services/dead-letter.service.js';
+import {
+  getErrorMessage,
+  isNumberNotApprovedForMnoError,
+} from '../utils/provider-errors.js';
 
 const OUTBOUND_QUEUE_NAME = 'outbound-platform-messages';
 
@@ -75,6 +79,7 @@ function isTerminalOutboundError(error: unknown): boolean {
 
   const normalizedMessage = error.message.toLowerCase();
   return (
+    isNumberNotApprovedForMnoError(error) ||
     normalizedMessage.includes('opted out') ||
     normalizedMessage.includes('missing sender') ||
     normalizedMessage.includes('destination number') ||
@@ -244,7 +249,7 @@ export function startOutboundMessageWorker() {
         data.providerMessageId
       );
 
-       await deadLetterService.record({
+      await deadLetterService.record({
         queueName: OUTBOUND_QUEUE_NAME,
         jobName: job?.name ?? 'platform-outbound',
         jobKey: String(job?.id ?? data.providerMessageId),
@@ -257,7 +262,11 @@ export function startOutboundMessageWorker() {
         },
       });
 
-      if (existingMessage && (isTerminalOutboundError(error) || error instanceof UnrecoverableError)) {
+      if (
+        existingMessage &&
+        existingMessage.status !== 'failed' &&
+        (isTerminalOutboundError(error) || error instanceof UnrecoverableError)
+      ) {
         await messageService.markFailed(existingMessage.id, error instanceof Error ? error.message : 'Outbound send failed');
       }
 
@@ -272,7 +281,12 @@ export function startOutboundMessageWorker() {
       await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
         toPlatformAdapterConnection(connection),
         data.providerMessageId,
-        'failed'
+        'failed',
+        {
+          error: {
+            message: getErrorMessage(error, 'Outbound send failed'),
+          },
+        }
       );
     } catch (statusError) {
       logger.error({ err: statusError, jobId: job?.id }, 'Failed to push failed status back to the CRM platform');

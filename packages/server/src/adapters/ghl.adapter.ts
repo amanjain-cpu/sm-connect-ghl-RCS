@@ -763,7 +763,13 @@ export class GHLAdapter extends BasePlatformAdapter {
   async updateMessageStatus(
     connection: GHLConnection,
     externalMessageId: string,
-    status: string
+    status: string,
+    options?: {
+      error?: {
+        message: string;
+        code?: string;
+      };
+    }
   ): Promise<void> {
     const normalizedConnection = normalizeConnection(connection);
     const ghlStatusMap: Record<string, string> = {
@@ -785,7 +791,17 @@ export class GHLAdapter extends BasePlatformAdapter {
           {
             method: 'PUT',
             accessToken,
-            body: { status: ghlStatus },
+            body: {
+              status: ghlStatus,
+              ...(options?.error
+                ? {
+                    error: {
+                      message: options.error.message,
+                      ...(options.error.code ? { code: options.error.code } : {}),
+                    },
+                  }
+                : {}),
+            },
           }
         )
       );

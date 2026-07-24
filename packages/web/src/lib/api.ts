@@ -613,7 +613,7 @@ class ApiClient {
     return this.get<any>(`/phone-numbers/${id}`);
   }
 
-  async purchasePhoneNumber(data: { phoneNumber: string; campaignId?: string; friendlyName?: string }) {
+  async purchasePhoneNumber(data: { phoneNumber: string; campaignId?: string; friendlyName?: string; validationTo?: string }) {
     return this.post<
       | {
           id: string;
@@ -662,7 +662,7 @@ class ApiClient {
     >('/phone-numbers/checkout/complete', data);
   }
 
-  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean; confirmReassignment?: boolean }) {
+  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean; confirmReassignment?: boolean; validationTo?: string }) {
     return this.patch<any>(`/phone-numbers/${id}`, data);
   }
 
