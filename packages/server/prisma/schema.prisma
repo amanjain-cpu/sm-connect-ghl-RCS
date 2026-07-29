@@ -1026,14 +1026,38 @@ model SuperAdmin {
   passwordHash String   @map("password_hash")
   name         String
   isActive     Boolean  @default(true) @map("is_active")
+  mustChangePassword Boolean @default(false) @map("must_change_password")
   lastLoginAt  DateTime? @map("last_login_at")
+  deactivatedAt DateTime? @map("deactivated_at")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
   refreshTokens SuperAdminRefreshToken[]
   auditLogs     AdminAuditLog[]
+  createdInvites SuperAdminInvite[] @relation("AdminInviteCreatedBy")
 
   @@map("super_admins")
+}
+
+model SuperAdminInvite {
+  id               String   @id @default(uuid())
+  email            String
+  name             String?
+  tokenHash        String   @unique @map("token_hash")
+  expiresAt        DateTime @map("expires_at")
+  acceptedAt       DateTime? @map("accepted_at")
+  acceptedAdminId  String?  @map("accepted_admin_id")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  createdByAdminId String     @map("created_by_admin_id")
+  createdByAdmin   SuperAdmin @relation("AdminInviteCreatedBy", fields: [createdByAdminId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([createdByAdminId])
+  @@index([expiresAt])
+  @@map("super_admin_invites")
 }
 
 model SuperAdminRefreshToken {

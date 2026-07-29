@@ -182,6 +182,17 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
   const handlePurchase = async () => {
     if (!selectedNumber) return;
 
+    const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId);
+    let validationTo: string | undefined;
+    if (hasEmbeddedLocationContext && selectedCampaign?.status === 'approved') {
+      const entered = window.prompt('Send a validation SMS to which recipient number before making this the default sender?');
+      if (!entered?.trim()) {
+        notify.error('Validation recipient required', 'Enter a recipient number to validate the default sender before purchase.');
+        return;
+      }
+      validationTo = entered.trim();
+    }
+
     setIsPurchasing(true);
     setError('');
 
@@ -197,6 +208,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
           phoneNumber: selectedNumber.phoneNumber,
           campaignId: selectedCampaignId || undefined,
           friendlyName: friendlyName || undefined,
+          validationTo,
         });
 
         const purchaseData = purchaseResponse.data;
@@ -214,7 +226,6 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
         if (purchaseData && 'pending' in purchaseData && purchaseData.pending) {
           notify.success('Number selection saved', purchaseData.message);
         } else {
-          const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId);
           notify.success(
             'Number purchased',
             !selectedCampaign

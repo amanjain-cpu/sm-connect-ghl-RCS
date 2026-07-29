@@ -6,12 +6,13 @@ import { Prisma, type BillingAccountStatus, type BillingPricingTier } from '@pri
 import { prisma } from '../config/database.js';
 import { config } from '../config/index.js';
 import { redis } from '../config/redis.js';
-import { encrypt, decrypt, hashPassword, verifyPassword } from '../utils/crypto.js';
+import { encrypt, decrypt, generateUrlSafeToken, hashPassword, verifyPassword } from '../utils/crypto.js';
 import { generateTokens, verifyAdminRefreshToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { integrationService } from './integration.service.js';
 import { walletBillingService } from './wallet-billing.service.js';
+import { createHash } from 'crypto';
 
 // Settings keys
 export const SETTINGS_KEYS = {
@@ -38,6 +39,12 @@ type AdminActionContext = {
   ipAddress?: string;
   userAgent?: string;
 };
+
+const DEFAULT_ADMIN_INVITE_EXPIRY_HOURS = 48;
+
+function hashInviteToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
 
 function toAmount(value: Prisma.Decimal | string | number | null | undefined): number {
   if (value === null || value === undefined) {
@@ -154,6 +161,7 @@ export class AdminService {
         id: admin.id,
         email: admin.email,
         name: admin.name,
+        mustChangePassword: admin.mustChangePassword,
       },
       tokens,
     };
@@ -207,6 +215,416 @@ export class AdminService {
     await prisma.superAdminRefreshToken.deleteMany({
       where: { token: refreshToken },
     });
+  }
+
+  async listAdminUsers(adminId: string) {
+    const [admins, invites] = await Promise.all([
+      prisma.superAdmin.findMany({
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          mustChangePassword: true,
+          lastLoginAt: true,
+          deactivatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          _count: {
+            select: {
+              refreshTokens: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.superAdminInvite.findMany({
+        where: {
+          acceptedAt: null,
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          expiresAt: true,
+          createdAt: true,
+          createdByAdmin: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    await this.logAuditAction(adminId, 'VIEW_ADMIN_USERS', 'super_admins');
+
+    return { admins, invites };
+  }
+
+  async createAdminInvite(input: {
+    adminId: string;
+    email: string;
+    name?: string;
+    expiresInHours?: number;
+    context?: AdminActionContext;
+  }) {
+    const email = input.email.trim().toLowerCase();
+    const existingAdmin = await prisma.superAdmin.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+
+    if (existingAdmin) {
+      throw new AppError('An admin with this email already exists', 'ADMIN_EXISTS', 409);
+    }
+
+    await prisma.superAdminInvite.updateMany({
+      where: {
+        email,
+        acceptedAt: null,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+      },
+    });
+
+    const token = generateUrlSafeToken(48);
+    const expiresAt = new Date(
+      Date.now() + (input.expiresInHours ?? DEFAULT_ADMIN_INVITE_EXPIRY_HOURS) * 60 * 60 * 1000
+    );
+
+    const invite = await prisma.superAdminInvite.create({
+      data: {
+        email,
+        name: input.name?.trim() || null,
+        tokenHash: hashInviteToken(token),
+        expiresAt,
+        createdByAdminId: input.adminId,
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        expiresAt: true,
+        createdAt: true,
+      },
+    });
+
+    await this.logAuditAction(
+      input.adminId,
+      'CREATE_ADMIN_INVITE',
+      'super_admin_invites',
+      invite.id,
+      {
+        email,
+        expiresAt,
+      },
+      input.context
+    );
+
+    return {
+      invite,
+      token,
+      inviteUrl: `${config.webUrl.replace(/\/$/, '')}/admin/invites/${token}`,
+    };
+  }
+
+  async revokeAdminInvite(input: {
+    adminId: string;
+    inviteId: string;
+    context?: AdminActionContext;
+  }) {
+    const invite = await prisma.superAdminInvite.findUnique({
+      where: { id: input.inviteId },
+    });
+
+    if (!invite) {
+      throw new AppError('Admin invite not found', 'ADMIN_INVITE_NOT_FOUND', 404);
+    }
+
+    if (invite.acceptedAt) {
+      throw new AppError('Accepted admin invites cannot be revoked', 'ADMIN_INVITE_ACCEPTED', 409);
+    }
+
+    const updated = await prisma.superAdminInvite.update({
+      where: { id: invite.id },
+      data: { revokedAt: new Date() },
+      select: {
+        id: true,
+        email: true,
+        revokedAt: true,
+      },
+    });
+
+    await this.logAuditAction(
+      input.adminId,
+      'REVOKE_ADMIN_INVITE',
+      'super_admin_invites',
+      invite.id,
+      { email: invite.email },
+      input.context
+    );
+
+    return updated;
+  }
+
+  async acceptAdminInvite(input: {
+    token: string;
+    password: string;
+    name?: string;
+  }) {
+    const tokenHash = hashInviteToken(input.token);
+    const invite = await prisma.superAdminInvite.findUnique({
+      where: { tokenHash },
+    });
+
+    if (!invite || invite.revokedAt || invite.acceptedAt || invite.expiresAt < new Date()) {
+      throw new AppError('Admin invite is invalid or expired', 'ADMIN_INVITE_INVALID', 400);
+    }
+
+    const existingAdmin = await prisma.superAdmin.findUnique({
+      where: { email: invite.email },
+      select: { id: true },
+    });
+
+    if (existingAdmin) {
+      throw new AppError('An admin with this email already exists', 'ADMIN_EXISTS', 409);
+    }
+
+    const passwordHash = await hashPassword(input.password);
+    const admin = await prisma.$transaction(async (tx) => {
+      const created = await tx.superAdmin.create({
+        data: {
+          email: invite.email,
+          name: input.name?.trim() || invite.name || invite.email,
+          passwordHash,
+          isActive: true,
+          mustChangePassword: false,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          createdAt: true,
+        },
+      });
+
+      await tx.superAdminInvite.update({
+        where: { id: invite.id },
+        data: {
+          acceptedAt: new Date(),
+          acceptedAdminId: created.id,
+        },
+      });
+
+      return created;
+    });
+
+    return admin;
+  }
+
+  async resetAdminPassword(input: {
+    actorAdminId: string;
+    targetAdminId: string;
+    temporaryPassword: string;
+    context?: AdminActionContext;
+  }) {
+    const target = await prisma.superAdmin.findUnique({
+      where: { id: input.targetAdminId },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+      },
+    });
+
+    if (!target) {
+      throw new AppError('Admin not found', 'ADMIN_NOT_FOUND', 404);
+    }
+
+    if (!target.isActive) {
+      throw new AppError('Cannot reset a deactivated admin', 'ADMIN_DEACTIVATED', 400);
+    }
+
+    const passwordHash = await hashPassword(input.temporaryPassword);
+    const admin = await prisma.$transaction(async (tx) => {
+      const updated = await tx.superAdmin.update({
+        where: { id: target.id },
+        data: {
+          passwordHash,
+          mustChangePassword: true,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          mustChangePassword: true,
+          updatedAt: true,
+        },
+      });
+
+      await tx.superAdminRefreshToken.deleteMany({
+        where: { adminId: target.id },
+      });
+
+      return updated;
+    });
+
+    await this.logAuditAction(
+      input.actorAdminId,
+      'RESET_ADMIN_PASSWORD',
+      'super_admins',
+      target.id,
+      {
+        email: target.email,
+        revokedRefreshTokens: true,
+        mustChangePassword: true,
+      },
+      input.context
+    );
+
+    return admin;
+  }
+
+  async deactivateAdmin(input: {
+    actorAdminId: string;
+    targetAdminId: string;
+    context?: AdminActionContext;
+  }) {
+    if (input.actorAdminId === input.targetAdminId) {
+      throw new AppError('Admins cannot deactivate their own account', 'ADMIN_SELF_DEACTIVATE_BLOCKED', 400);
+    }
+
+    const activeAdminCount = await prisma.superAdmin.count({
+      where: { isActive: true },
+    });
+
+    if (activeAdminCount <= 1) {
+      throw new AppError('At least one active admin must remain', 'LAST_ADMIN_DEACTIVATE_BLOCKED', 400);
+    }
+
+    const target = await prisma.superAdmin.findUnique({
+      where: { id: input.targetAdminId },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+      },
+    });
+
+    if (!target) {
+      throw new AppError('Admin not found', 'ADMIN_NOT_FOUND', 404);
+    }
+
+    const admin = await prisma.$transaction(async (tx) => {
+      const updated = await tx.superAdmin.update({
+        where: { id: target.id },
+        data: {
+          isActive: false,
+          deactivatedAt: new Date(),
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          deactivatedAt: true,
+        },
+      });
+
+      await tx.superAdminRefreshToken.deleteMany({
+        where: { adminId: target.id },
+      });
+
+      return updated;
+    });
+
+    await this.logAuditAction(
+      input.actorAdminId,
+      'DEACTIVATE_ADMIN',
+      'super_admins',
+      target.id,
+      {
+        email: target.email,
+        revokedRefreshTokens: true,
+      },
+      input.context
+    );
+
+    return admin;
+  }
+
+  async changeAdminPassword(input: {
+    adminId: string;
+    currentPassword: string;
+    newPassword: string;
+    currentRefreshToken?: string;
+    context?: AdminActionContext;
+  }) {
+    const admin = await prisma.superAdmin.findUnique({
+      where: { id: input.adminId },
+    });
+
+    if (!admin || !admin.isActive) {
+      throw new AppError('Admin account is disabled', 'ADMIN_DISABLED', 403);
+    }
+
+    const isValid = await verifyPassword(input.currentPassword, admin.passwordHash);
+    if (!isValid) {
+      throw new AppError('Current password is incorrect', 'INVALID_CREDENTIALS', 401);
+    }
+
+    const passwordHash = await hashPassword(input.newPassword);
+    const updated = await prisma.$transaction(async (tx) => {
+      const changed = await tx.superAdmin.update({
+        where: { id: admin.id },
+        data: {
+          passwordHash,
+          mustChangePassword: false,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          mustChangePassword: true,
+          updatedAt: true,
+        },
+      });
+
+      await tx.superAdminRefreshToken.deleteMany({
+        where: input.currentRefreshToken
+          ? {
+              adminId: admin.id,
+              token: { not: input.currentRefreshToken },
+            }
+          : {
+              adminId: admin.id,
+            },
+      });
+
+      return changed;
+    });
+
+    await this.logAuditAction(
+      input.adminId,
+      'CHANGE_ADMIN_PASSWORD',
+      'super_admins',
+      admin.id,
+      { revokedOtherRefreshTokens: true },
+      input.context
+    );
+
+    return updated;
   }
 
   // ===========================================

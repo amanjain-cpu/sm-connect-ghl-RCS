@@ -293,11 +293,18 @@ export function PhoneNumbersPage() {
       return;
     }
 
+    const validationTo = window.prompt('Send a validation SMS to which recipient number before making this the default sender?');
+    if (!validationTo?.trim()) {
+      notify.error('Validation recipient required', 'Enter a recipient number to prove this sender is approved for that carrier before changing the default sender.');
+      return;
+    }
+
     try {
       const response = await api.updatePhoneNumber(number.id, {
         friendlyName: number.friendlyName || undefined,
         campaignId: number.campaign?.id || null,
         makeDefault: true,
+        validationTo: validationTo.trim(),
       });
 
       if (response.success) {
@@ -310,7 +317,9 @@ export function PhoneNumbersPage() {
         'Default sender update failed',
         saveError instanceof ApiError && saveError.code === 'LOCATION_CONTEXT_REQUIRED'
           ? 'Open Signalmash Connect from a CRM location before selecting a default sender.'
-          : 'The selected number could not be set as the outbound default.'
+          : saveError instanceof Error
+            ? saveError.message
+            : 'The selected number could not be set as the outbound default.'
       );
     }
   };

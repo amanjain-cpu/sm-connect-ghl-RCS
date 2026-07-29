@@ -68,6 +68,12 @@ export function AdminDashboardPage() {
       href: '/admin/organizations',
       icon: Building2,
     },
+    {
+      title: 'Admin Users',
+      description: 'Invite app administrators, reset temporary passwords, and deactivate access.',
+      href: '/admin/users',
+      icon: Users,
+    },
   ];
 
   return (
@@ -114,7 +120,7 @@ export function AdminDashboardPage() {
           ))}
         </section>
 
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
           {quickActions.map((action) => (
             <Card
               key={action.title}

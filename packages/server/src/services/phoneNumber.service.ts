@@ -12,6 +12,11 @@ import { integrationService } from './integration.service.js';
 import { deadLetterService } from './dead-letter.service.js';
 import { formatPhoneE164 } from '@signalmash-connect/shared';
 import { walletBillingService } from './wallet-billing.service.js';
+import {
+  getErrorMessage,
+  isNumberNotApprovedForMnoError,
+} from '../utils/provider-errors.js';
+import { sendDefaultSenderValidationSms } from './default-sender-validation.service.js';
 
 interface AvailableNumber {
   phoneNumber: string;
@@ -45,11 +50,21 @@ interface LinkExistingAssetsInput {
   friendlyName?: string;
   configureWebhook?: boolean;
   makeDefaultSender?: boolean;
+  validationTo?: string;
   installationId?: string | null;
+}
+
+interface DefaultSenderValidationEvidence {
+  validatedAt?: string;
+  validatedTo?: string;
+  validationMessageId?: string | null;
+  lastValidationError?: string | null;
 }
 
 const TOLL_FREE_NPAS = new Set(['800', '833', '844', '855', '866', '877', '888']);
 const SMS_ENABLEMENT_CAMPAIGN_ID_PATTERN = /^C[A-Za-z0-9]{6}$/;
+const DEFAULT_SENDER_VALIDATION_BODY =
+  'SignalMash Connect sender validation. This SMS confirms this sender is approved for this recipient carrier.';
 
 export class PhoneNumberService {
   private getSignalmashWebhookUrl(): string {
@@ -209,6 +224,7 @@ export class PhoneNumberService {
     phoneNumber: string;
     friendlyName?: string;
     makeDefaultSender?: boolean;
+    validationTo?: string;
     installationId?: string | null;
     error: AppError;
   }) {
@@ -244,6 +260,7 @@ export class PhoneNumberService {
           mode: 'buy_new',
           phoneNumber: input.phoneNumber,
           makeDefaultSender,
+          ...(input.validationTo ? { validationTo: input.validationTo } : {}),
           ...(makeDefaultSender ? { installationId: input.installationId } : {}),
           ...(input.friendlyName ? { friendlyName: input.friendlyName } : {}),
         } as any,
@@ -475,6 +492,7 @@ export class PhoneNumberService {
       campaignId?: string;
       friendlyName?: string;
       makeDefaultSender?: boolean;
+      validationTo?: string;
       installationId?: string | null;
       onboardingPhoneNumberMrcChargeKey?: string;
     } = {}
@@ -578,7 +596,14 @@ export class PhoneNumberService {
 
       if (smsEnablementCampaignId && campaign) {
         if (makeDefaultSender) {
-          await this.ensureDefaultSenderProfiles(number, true, options.installationId);
+          const validationEvidence = await this.validateDefaultSenderCandidate({
+            organizationId,
+            installationId: options.installationId,
+            phoneNumberId: number.id,
+            campaignId: campaign.id,
+            validationTo: options.validationTo,
+          });
+          await this.ensureDefaultSenderProfiles(number, true, options.installationId, validationEvidence);
         }
         await this.syncCampaignNumberLinkState(organizationId, campaign.id, 'linked');
       } else if (campaign) {
@@ -918,7 +943,14 @@ export class PhoneNumberService {
     if (result.phoneNumber) {
       await integrationService.syncPhoneNumberMapping(result.phoneNumber);
       if (makeDefaultSender) {
-        await this.ensureDefaultSenderProfiles(result.phoneNumber, true, input.installationId);
+        const validationEvidence = await this.validateDefaultSenderCandidate({
+          organizationId: input.organizationId,
+          installationId: input.installationId,
+          phoneNumberId: result.phoneNumber.id,
+          campaignId: result.campaign.id,
+          validationTo: input.validationTo,
+        });
+        await this.ensureDefaultSenderProfiles(result.phoneNumber, true, input.installationId, validationEvidence);
       }
     }
 
@@ -1164,6 +1196,7 @@ export class PhoneNumberService {
       campaignId?: string | null;
       makeDefault?: boolean;
       confirmReassignment?: boolean;
+      validationTo?: string;
     },
     options: {
       installationId?: string | null;
@@ -1178,7 +1211,7 @@ export class PhoneNumberService {
     const previousCampaignId = number.campaign?.id ?? null;
     const previousCampaignName = number.campaign?.name ?? null;
     let targetCampaign: Campaign | null = null;
-    let nextCampaignId = data.campaignId;
+    let nextCampaignId = data.campaignId === undefined ? previousCampaignId : data.campaignId;
 
     // Validate new campaign if provided
     if (data.campaignId) {
@@ -1239,12 +1272,25 @@ export class PhoneNumberService {
         }
 
         const smsEnablementCampaignId = await this.resolveSmsEnablementCampaignId(targetCampaign);
-        await signalmashService.enableSmsForNumber(
-          number.signalmashNumberId ?? number.phoneNumber,
-          smsEnablementCampaignId
-        );
+        if (!makeDefault) {
+          await signalmashService.enableSmsForNumber(
+            number.signalmashNumberId ?? number.phoneNumber,
+            smsEnablementCampaignId
+          );
+        }
       }
     }
+
+    const validationCampaignId = data.campaignId === undefined ? previousCampaignId : nextCampaignId ?? null;
+    const validationEvidence = makeDefault
+      ? await this.validateDefaultSenderCandidate({
+          organizationId,
+          installationId: options.installationId,
+          phoneNumberId: number.id,
+          campaignId: validationCampaignId,
+          validationTo: data.validationTo,
+        })
+      : undefined;
 
     const updated = await prisma.phoneNumber.update({
       where: { id: numberId },
@@ -1267,7 +1313,7 @@ export class PhoneNumberService {
 
     await integrationService.syncPhoneNumberMapping(updated);
     if (options.installationId) {
-      await this.ensureDefaultSenderProfiles(updated, makeDefault, options.installationId);
+      await this.ensureDefaultSenderProfiles(updated, makeDefault, options.installationId, validationEvidence);
     }
 
     if (nextCampaignId) {
@@ -1403,10 +1449,331 @@ export class PhoneNumberService {
     }
   }
 
+  private normalizeValidationRecipient(validationTo?: string | null) {
+    if (!validationTo?.trim()) {
+      throw new AppError(
+        'A validation recipient is required before changing the default sender.',
+        'DEFAULT_SENDER_VALIDATION_TO_REQUIRED',
+        400
+      );
+    }
+
+    try {
+      return formatPhoneE164(validationTo);
+    } catch {
+      throw new AppError(
+        'Enter a valid validation recipient phone number before changing the default sender.',
+        'DEFAULT_SENDER_VALIDATION_TO_INVALID',
+        400
+      );
+    }
+  }
+
+  private metadataRecord(metadata: unknown): Record<string, unknown> {
+    return metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? metadata as Record<string, unknown>
+      : {};
+  }
+
+  private buildSenderProfileMetadata(
+    number: Pick<PhoneNumber, 'signalmashNumberId' | 'campaignId'>,
+    existingMetadata?: unknown,
+    validationEvidence?: DefaultSenderValidationEvidence
+  ) {
+    const metadata: Record<string, unknown> = {
+      ...this.metadataRecord(existingMetadata),
+      signalmashNumberId: number.signalmashNumberId,
+      campaignId: number.campaignId,
+      linkedExisting: true,
+    };
+
+    if (validationEvidence) {
+      if (validationEvidence.validatedAt !== undefined) {
+        metadata['validatedAt'] = validationEvidence.validatedAt;
+      }
+      if (validationEvidence.validatedTo !== undefined) {
+        metadata['validatedTo'] = validationEvidence.validatedTo;
+      }
+      if (validationEvidence.validationMessageId !== undefined) {
+        metadata['validationMessageId'] = validationEvidence.validationMessageId;
+      }
+      if (validationEvidence.lastValidationError !== undefined) {
+        metadata['lastValidationError'] = validationEvidence.lastValidationError;
+      }
+    }
+
+    return metadata as any;
+  }
+
+  private async recordDefaultSenderValidationFailure(input: {
+    organizationId: string;
+    installationId: string;
+    number: PhoneNumber;
+    validationTo: string;
+    errorMessage: string;
+  }) {
+    const evidence: DefaultSenderValidationEvidence = {
+      validatedTo: input.validationTo,
+      lastValidationError: input.errorMessage,
+    };
+
+    const existing = await prisma.senderProfile.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        platform: 'leadconnector',
+        installationId: input.installationId,
+        phoneNumberId: input.number.id,
+      },
+    });
+
+    if (existing) {
+      await prisma.senderProfile.update({
+        where: { id: existing.id },
+        data: {
+          senderKey: input.number.phoneNumber,
+          senderLabel: input.number.friendlyName ?? input.number.formattedNumber,
+          metadata: this.buildSenderProfileMetadata(input.number, existing.metadata, evidence),
+        },
+      });
+      return;
+    }
+
+    await prisma.senderProfile.create({
+      data: {
+        organizationId: input.organizationId,
+        installationId: input.installationId,
+        phoneNumberId: input.number.id,
+        platform: 'leadconnector',
+        senderKey: input.number.phoneNumber,
+        senderLabel: input.number.friendlyName ?? input.number.formattedNumber,
+        isDefault: false,
+        metadata: this.buildSenderProfileMetadata(input.number, undefined, evidence),
+      },
+    });
+  }
+
+  private async logDefaultSenderValidation(input: {
+    organizationId: string;
+    installationId: string;
+    phoneNumberId: string;
+    signalmashNumberId?: string | null;
+    from: string;
+    to: string;
+    campaignId: string;
+    smsEnablementCampaignId: string;
+    status: 'success' | 'failed';
+    responsePayload?: Record<string, unknown>;
+    errorMessage?: string;
+  }) {
+    await prisma.providerOperationLog.create({
+      data: {
+        organizationId: input.organizationId,
+        installationId: input.installationId,
+        provider: 'signalmash',
+        operation: 'default_sender_validation',
+        localResourceType: 'phone_number',
+        localResourceId: input.phoneNumberId,
+        externalId: input.signalmashNumberId ?? input.from,
+        status: input.status,
+        requestPayload: {
+          from: input.from,
+          to: input.to,
+          campaignId: input.campaignId,
+          smsEnablementCampaignId: input.smsEnablementCampaignId,
+        } as any,
+        responsePayload: input.responsePayload as any,
+        errorMessage: input.errorMessage,
+      },
+    });
+  }
+
+  private async validateDefaultSenderCandidate(input: {
+    organizationId: string;
+    installationId?: string | null;
+    phoneNumberId: string;
+    campaignId?: string | null;
+    validationTo?: string | null;
+  }): Promise<DefaultSenderValidationEvidence> {
+    this.assertLocationContext(input.installationId);
+    const validationTo = this.normalizeValidationRecipient(input.validationTo);
+
+    const [number, installation] = await Promise.all([
+      prisma.phoneNumber.findFirst({
+        where: {
+          id: input.phoneNumberId,
+          organizationId: input.organizationId,
+        },
+        include: {
+          campaign: true,
+        },
+      }),
+      prisma.platformInstallation.findFirst({
+        where: {
+          id: input.installationId,
+          organizationId: input.organizationId,
+        },
+        select: {
+          id: true,
+        },
+      }),
+    ]);
+
+    if (!installation) {
+      throw new AppError(
+        'The selected CRM location is not linked to this organization.',
+        'LOCATION_CONTEXT_INVALID',
+        400
+      );
+    }
+
+    if (!number) {
+      throw new AppError('Phone number not found', 'NUMBER_NOT_FOUND', 404);
+    }
+
+    if (number.status !== 'active') {
+      throw new AppError(
+        'Only active phone numbers can be selected as the default sender.',
+        'DEFAULT_SENDER_NUMBER_NOT_ACTIVE',
+        400
+      );
+    }
+
+    if (!number.signalmashNumberId) {
+      throw new AppError(
+        'The selected number is missing its Signalmash DID.',
+        'DEFAULT_SENDER_DID_MISSING',
+        400
+      );
+    }
+
+    const campaign = input.campaignId
+      ? await prisma.campaign.findFirst({
+          where: {
+            id: input.campaignId,
+            organizationId: input.organizationId,
+          },
+        })
+      : number.campaign;
+
+    if (!campaign) {
+      throw new AppError(
+        'The selected sender must be linked to an approved campaign before it can become the default.',
+        'DEFAULT_SENDER_CAMPAIGN_REQUIRED',
+        400
+      );
+    }
+
+    if (campaign.status !== 'approved') {
+      throw new AppError(
+        'The selected sender campaign must be approved before it can become the default.',
+        'DEFAULT_SENDER_CAMPAIGN_NOT_APPROVED',
+        400
+      );
+    }
+
+    if (!campaign.signalmashCampaignId) {
+      throw new AppError(
+        'The selected sender campaign is missing its Signalmash campaign ID.',
+        'DEFAULT_SENDER_CAMPAIGN_PROVIDER_ID_MISSING',
+        400
+      );
+    }
+
+    const smsEnablementCampaignId = await this.resolveSmsEnablementCampaignId(campaign);
+
+    try {
+      const validationResult = await sendDefaultSenderValidationSms({
+        signalmashNumberId: number.signalmashNumberId,
+        smsEnablementCampaignId,
+        from: number.phoneNumber,
+        to: validationTo,
+        body: DEFAULT_SENDER_VALIDATION_BODY,
+        webhookUrl: this.getSignalmashWebhookUrl(),
+      }, signalmashService, logger);
+
+      const evidence: DefaultSenderValidationEvidence = {
+        validatedAt: new Date().toISOString(),
+        validatedTo: validationTo,
+        validationMessageId: validationResult.messageId ?? null,
+        lastValidationError: null,
+      };
+
+      await this.logDefaultSenderValidation({
+        organizationId: input.organizationId,
+        installationId: input.installationId,
+        phoneNumberId: number.id,
+        signalmashNumberId: number.signalmashNumberId,
+        from: number.phoneNumber,
+        to: validationTo,
+        campaignId: campaign.id,
+        smsEnablementCampaignId,
+        status: 'success',
+        responsePayload: {
+          messageId: validationResult.messageId ?? null,
+          status: validationResult.status,
+        },
+      });
+
+      return evidence;
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Default sender validation failed');
+
+      await this.logDefaultSenderValidation({
+        organizationId: input.organizationId,
+        installationId: input.installationId,
+        phoneNumberId: number.id,
+        signalmashNumberId: number.signalmashNumberId,
+        from: number.phoneNumber,
+        to: validationTo,
+        campaignId: campaign.id,
+        smsEnablementCampaignId,
+        status: 'failed',
+        errorMessage,
+      });
+
+      await this.recordDefaultSenderValidationFailure({
+        organizationId: input.organizationId,
+        installationId: input.installationId,
+        number,
+        validationTo,
+        errorMessage,
+      });
+
+      if (isNumberNotApprovedForMnoError(error)) {
+        throw new AppError(
+          'The selected sender number is not approved by Signalmash for the validation recipient carrier/MNO. The current default sender was not changed.',
+          'DEFAULT_SENDER_MNO_NOT_APPROVED',
+          409,
+          true,
+          {
+            provider: 'signalmash',
+            from: number.phoneNumber,
+            to: validationTo,
+            upstreamMessage: errorMessage,
+          }
+        );
+      }
+
+      throw new AppError(
+        'Default sender validation failed. The current default sender was not changed.',
+        'DEFAULT_SENDER_VALIDATION_FAILED',
+        502,
+        true,
+        {
+          provider: 'signalmash',
+          from: number.phoneNumber,
+          to: validationTo,
+          upstreamMessage: errorMessage,
+        }
+      );
+    }
+  }
+
   private async ensureDefaultSenderProfiles(
     number: PhoneNumber,
     makeDefault: boolean,
-    installationId?: string | null
+    installationId?: string | null,
+    validationEvidence?: DefaultSenderValidationEvidence
   ) {
     this.assertLocationContext(installationId);
 
@@ -1438,11 +1805,7 @@ export class PhoneNumberService {
           senderKey: number.phoneNumber,
           senderLabel: number.friendlyName ?? number.formattedNumber,
           isDefault: makeDefault ? true : existing.isDefault,
-          metadata: {
-            signalmashNumberId: number.signalmashNumberId,
-            campaignId: number.campaignId,
-            linkedExisting: true,
-          },
+          metadata: this.buildSenderProfileMetadata(number, existing.metadata, validationEvidence),
         },
       });
       return;
@@ -1461,11 +1824,7 @@ export class PhoneNumberService {
         senderKey: number.phoneNumber,
         senderLabel: number.friendlyName ?? number.formattedNumber,
         isDefault: true,
-        metadata: {
-          signalmashNumberId: number.signalmashNumberId,
-          campaignId: number.campaignId,
-          linkedExisting: true,
-        },
+        metadata: this.buildSenderProfileMetadata(number, undefined, validationEvidence),
       },
     });
   }

@@ -140,6 +140,8 @@ export function AdminOrganizationsPage() {
     friendlyName: '',
     configureWebhook: true,
     makeDefaultSender: false,
+    validationTo: '',
+    installationId: '',
   });
 
   const loadOrganizations = async () => {
@@ -175,6 +177,8 @@ export function AdminOrganizationsPage() {
       friendlyName: `${organization.name} Sender`,
       configureWebhook: true,
       makeDefaultSender: false,
+      validationTo: '',
+      installationId: '',
     });
     setShowLinkDialog(true);
   };
@@ -375,6 +379,20 @@ export function AdminOrganizationsPage() {
       );
       return;
     }
+    if (linkForm.makeDefaultSender && !linkForm.validationTo.trim()) {
+      notify.error(
+        'Validation recipient required',
+        'Enter a recipient number for the validation SMS before making this number the default sender.'
+      );
+      return;
+    }
+    if (linkForm.makeDefaultSender && !linkForm.installationId.trim()) {
+      notify.error(
+        'CRM installation required',
+        'Enter the CRM location installation ID before making this number the default sender.'
+      );
+      return;
+    }
 
     setIsLinking(true);
     try {
@@ -391,6 +409,8 @@ export function AdminOrganizationsPage() {
         friendlyName: linkForm.friendlyName || undefined,
         configureWebhook: linkForm.configureWebhook,
         makeDefaultSender: linkForm.makeDefaultSender,
+        validationTo: linkForm.validationTo || undefined,
+        installationId: linkForm.installationId || undefined,
       });
 
       if (response.success) {
@@ -809,6 +829,35 @@ export function AdminOrganizationsPage() {
               />
               Configure number webhook
             </label>
+            <label className="flex items-center gap-3 text-sm font-medium text-slate-700 dark:text-slate-300">
+              <input
+                type="checkbox"
+                checked={linkForm.makeDefaultSender}
+                onChange={(e) => setLinkForm({ ...linkForm, makeDefaultSender: e.target.checked })}
+                className="h-4 w-4 rounded border-slate-300"
+              />
+              Make default sender after validation
+            </label>
+            {linkForm.makeDefaultSender && (
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">CRM Installation ID</label>
+                  <Input
+                    value={linkForm.installationId}
+                    onChange={(e) => setLinkForm({ ...linkForm, installationId: e.target.value })}
+                    placeholder="Location installation UUID"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Validation Recipient</label>
+                  <Input
+                    value={linkForm.validationTo}
+                    onChange={(e) => setLinkForm({ ...linkForm, validationTo: e.target.value })}
+                    placeholder="+15551234567"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           <DialogFooter>
