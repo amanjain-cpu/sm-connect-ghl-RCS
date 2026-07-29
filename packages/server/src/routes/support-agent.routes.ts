@@ -30,11 +30,8 @@ router.get(
 
     const file = req.params.file;
     if (!allowedAssetFiles.has(file)) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 'NOT_FOUND', message: 'Asset not found' },
-      });
-    }
+
+      return res.status(404).json({ success: false, error: { message: 'Asset not found' } });
 
     const response = await fetch(`${trimSlash(config.supportAgentWidgetUrl)}/${file}`);
     if (!response.ok) {
@@ -46,7 +43,8 @@ router.get(
       res.type(contentType);
     }
 
-    res.send(Buffer.from(await response.arrayBuffer()));
+    const body = Buffer.from(await response.arrayBuffer());
+    res.send(body);
   })
 );
 
@@ -59,10 +57,7 @@ router.all(
 
     const authorization = req.headers.authorization;
     if (!authorization) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 'UNAUTHORIZED', message: 'Missing support-agent token' },
-      });
+      return res.status(401).json({ error: 'Missing support-agent token' });
     }
 
     const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';

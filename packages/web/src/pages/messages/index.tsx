@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   MessageSquare,
@@ -28,6 +28,13 @@ import {
 import { api, ApiError } from '@/lib/api';
 import { sanitizePlatformBranding } from '@/lib/platform-branding';
 import { formatPhoneNumber, formatDateTime, normalizePhoneNumber } from '@/lib/utils';
+import {
+  formatProvisioningCountdown,
+  formatProvisioningWait,
+  getPhoneNumberProvisioningLock,
+  getRemainingProvisioningMs,
+  useProvisioningLocks,
+} from '@/lib/phone-number-provisioning';
 import { notify } from '@/stores/notification.store';
 
 interface Message {
@@ -79,7 +86,7 @@ const statusConfig = {
 
 const getSendErrorMessage = (error: unknown) => {
   if (!(error instanceof ApiError)) {
-    return 'The test message could not be sent.';
+    return 'The SMS could not be sent.';
   }
 
   const validationErrors = error.details?.errors;
@@ -95,7 +102,7 @@ const getSendErrorMessage = (error: unknown) => {
     if (firstError) return firstError;
   }
 
-  return sanitizePlatformBranding(error.message || 'The test message could not be sent.');
+  return sanitizePlatformBranding(error.message || 'The SMS could not be sent.');
 };
 
 export function MessagesPage() {
@@ -110,6 +117,7 @@ export function MessagesPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [directionFilter, setDirectionFilter] = useState('all');
+  const provisioningLocks = useProvisioningLocks();
   const [composeForm, setComposeForm] = useState({
     phoneNumberId: '',
     from: '',
@@ -160,6 +168,43 @@ export function MessagesPage() {
     loadData();
   }, []);
 
+  const senderProvisioningState = useMemo(() => {
+    return new Map(
+      senderNumbers.map((number) => {
+        const lock = getPhoneNumberProvisioningLock({
+          phoneNumberId: number.id,
+          phoneNumber: number.phoneNumber,
+        }, provisioningLocks);
+        const remainingMs = lock ? getRemainingProvisioningMs(lock) : 0;
+
+        return [number.id, { lock, remainingMs }];
+      })
+    );
+  }, [provisioningLocks, senderNumbers]);
+
+  const unlockedSenderNumbers = senderNumbers.filter(
+    (number) => (senderProvisioningState.get(number.id)?.remainingMs ?? 0) <= 0
+  );
+  const lockedSenderRemainingMs = senderNumbers
+    .map((number) => senderProvisioningState.get(number.id)?.remainingMs ?? 0)
+    .filter((remainingMs) => remainingMs > 0);
+  const soonestLockedSenderRemainingMs = lockedSenderRemainingMs.length > 0
+    ? Math.min(...lockedSenderRemainingMs)
+    : 0;
+  const selectedSenderProvisioning = senderProvisioningState.get(composeForm.phoneNumberId);
+  const selectedSenderLocked = (selectedSenderProvisioning?.remainingMs ?? 0) > 0;
+  const hasActiveSenders = senderNumbers.length > 0;
+  const hasUnlockedSenders = unlockedSenderNumbers.length > 0;
+  const everySenderLocked = hasActiveSenders && !hasUnlockedSenders;
+  const hasApprovedCampaigns = campaignOptions.length > 0;
+  const hasCampaignAssignedSender = unlockedSenderNumbers.some((number) => number.campaign?.status === 'approved');
+  const canRunSmsSend = hasUnlockedSenders && (hasApprovedCampaigns || hasCampaignAssignedSender);
+  const sendSmsDisabledReason = everySenderLocked
+    ? `Available in ${formatProvisioningWait(soonestLockedSenderRemainingMs)} while newly purchased numbers finish provisioning.`
+    : !hasActiveSenders
+      ? 'There are no active sender numbers yet.'
+      : 'There is no approved campaign available for SMS yet.';
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     await loadMessages();
@@ -167,7 +212,15 @@ export function MessagesPage() {
   };
 
   const openComposeDialog = () => {
-    const defaultNumber = senderNumbers[0];
+    if (!canRunSmsSend) {
+      notify.error(
+        'Send SMS unavailable',
+        sendSmsDisabledReason ?? 'Complete sender and campaign setup before sending SMS.'
+      );
+      return;
+    }
+
+    const defaultNumber = unlockedSenderNumbers[0];
 
     setComposeForm({
       phoneNumberId: defaultNumber?.id || '',
@@ -180,6 +233,16 @@ export function MessagesPage() {
   };
 
   const handleSendMessage = async () => {
+    const selectedSender = senderNumbers.find((number) => number.id === composeForm.phoneNumberId);
+    const senderState = selectedSender ? senderProvisioningState.get(selectedSender.id) : null;
+    if ((senderState?.remainingMs ?? 0) > 0) {
+      notify.error(
+        'Number provisioning',
+        `Please wait ${formatProvisioningWait(senderState?.remainingMs ?? 0)} before sending SMS from this number.`
+      );
+      return;
+    }
+
     setIsSending(true);
 
     try {
@@ -226,19 +289,19 @@ export function MessagesPage() {
     inbound: messages.filter((message) => message.direction === 'inbound').length,
   };
 
-  const hasActiveSenders = senderNumbers.length > 0;
-  const hasApprovedCampaigns = campaignOptions.length > 0;
-  const hasCampaignAssignedSender = senderNumbers.some((number) => number.campaign?.status === 'approved');
-  const canRunTestSend = hasActiveSenders && (hasApprovedCampaigns || hasCampaignAssignedSender);
-
   return (
     <div>
       <Header
         title="Messages"
         subtitle="Track message flow, delivery state, and webhook-driven status updates."
         action={{
-          label: 'Send Test Message',
+          label: 'Send SMS',
           onClick: openComposeDialog,
+          disabled: !canRunSmsSend,
+          disabledReason: sendSmsDisabledReason,
+          disabledText: everySenderLocked
+            ? formatProvisioningCountdown(soonestLockedSenderRemainingMs)
+            : undefined,
         }}
       />
 
@@ -279,18 +342,22 @@ export function MessagesPage() {
           </div>
         </PageSection>
 
-        {!canRunTestSend && (
+        {!canRunSmsSend && (
           <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
-                <Badge variant="warning" className="w-fit">Embedded Test Send Blocked</Badge>
+                <Badge variant="warning" className="w-fit">Send SMS Blocked</Badge>
                 <h3 className="text-lg font-semibold text-foreground">
-                  Complete sender and campaign setup before sending test traffic
+                  {everySenderLocked
+                    ? 'New sender numbers are still provisioning'
+                    : 'Complete sender and campaign setup before sending SMS'}
                 </h3>
                 <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                  {!hasActiveSenders
+                  {everySenderLocked
+                    ? `Send SMS will be available in ${formatProvisioningWait(soonestLockedSenderRemainingMs)}.`
+                    : !hasActiveSenders
                     ? 'There are no active sender numbers yet. Finish number purchase or assignment first.'
-                    : 'There is no approved campaign available for the embedded test-send flow yet. Finish campaign approval or assign a number to an approved campaign first.'}
+                    : 'There is no approved campaign available for SMS yet. Finish campaign approval or assign a number to an approved campaign first.'}
                 </p>
               </div>
               <div className="flex gap-3">
@@ -324,9 +391,9 @@ export function MessagesPage() {
                 variant="outline"
                 onClick={openComposeDialog}
                 leftIcon={<Send className="h-4 w-4" />}
-                disabled={!canRunTestSend}
+                disabled={!canRunSmsSend}
               >
-                Send Test Message
+                Send SMS
               </Button>
 
               <select
@@ -387,9 +454,9 @@ export function MessagesPage() {
               <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                 {searchQuery || statusFilter !== 'all' || directionFilter !== 'all'
                   ? 'Adjust your filters to review a broader set of messages.'
-                  : canRunTestSend
+                  : canRunSmsSend
                     ? 'Messages will appear here once your organization starts sending or receiving traffic.'
-                    : 'Finish sender and campaign readiness first, then use the embedded test-send flow to generate initial traffic.'}
+                    : 'Finish sender and campaign readiness first, then use Send SMS to generate initial traffic.'}
               </p>
             </CardContent>
           </Card>
@@ -476,7 +543,7 @@ export function MessagesPage() {
       <Dialog open={showComposeDialog} onOpenChange={setShowComposeDialog}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Send Test Message</DialogTitle>
+            <DialogTitle>Send SMS</DialogTitle>
             <DialogDescription>
               Send an outbound SMS using an active owned number and, if needed, an approved campaign.
             </DialogDescription>
@@ -484,7 +551,7 @@ export function MessagesPage() {
 
           {senderNumbers.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-              No active phone numbers are available yet. Purchase and activate a number before sending test traffic.
+              No active phone numbers are available yet. Purchase and activate a number before sending SMS.
             </div>
           ) : (
             <div className="grid gap-5">
@@ -508,16 +575,28 @@ export function MessagesPage() {
                     }}
                     className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
                   >
-                    {senderNumbers.map((number) => (
-                      <option key={number.id} value={number.id}>
-                        {number.isDefaultSender ? '[Default] ' : ''}
-                        {number.friendlyName ? `${number.friendlyName} • ` : ''}{number.formattedNumber}
-                      </option>
-                    ))}
+                    {senderNumbers.map((number) => {
+                      const provisioningState = senderProvisioningState.get(number.id);
+                      const remainingMs = provisioningState?.remainingMs ?? 0;
+                      const isLocked = remainingMs > 0;
+
+                      return (
+                        <option key={number.id} value={number.id} disabled={isLocked}>
+                          {number.isDefaultSender ? '[Default] ' : ''}
+                          {number.friendlyName ? `${number.friendlyName} - ` : ''}{number.formattedNumber}
+                          {isLocked ? ` - provisioning ${formatProvisioningCountdown(remainingMs)}` : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                   <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
                     The default sender for outbound traffic in the embedded app is managed from the Phone Numbers screen.
                   </p>
+                  {selectedSenderLocked ? (
+                    <p className="text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      This number is still provisioning. Try again in {formatProvisioningWait(selectedSenderProvisioning?.remainingMs ?? 0)}.
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="space-y-2">
@@ -552,7 +631,7 @@ export function MessagesPage() {
 
               {!hasApprovedCampaigns && (
                 <div className="rounded-2xl border border-border bg-accent px-4 py-4 text-sm text-foreground">
-                  No approved campaigns are available yet. Return to the campaign flow, complete approval, and then retry the embedded test send.
+                  No approved campaigns are available yet. Return to the campaign flow, complete approval, and then retry Send SMS.
                 </div>
               )}
 
@@ -562,7 +641,7 @@ export function MessagesPage() {
                   value={composeForm.body}
                   onChange={(e) => setComposeForm((current) => ({ ...current, body: e.target.value }))}
                   className="min-h-[140px] w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
-                  placeholder="Write the outbound SMS content you want to test."
+                  placeholder="Write the outbound SMS content."
                 />
               </div>
             </div>
@@ -575,9 +654,9 @@ export function MessagesPage() {
             <Button
               onClick={handleSendMessage}
               isLoading={isSending}
-              disabled={!canRunTestSend || !composeForm.from || !composeForm.to || !composeForm.body.trim()}
+              disabled={!canRunSmsSend || selectedSenderLocked || !composeForm.from || !composeForm.to || !composeForm.body.trim()}
             >
-              Send Message
+              Send SMS
             </Button>
           </DialogFooter>
         </DialogContent>

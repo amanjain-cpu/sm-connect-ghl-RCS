@@ -17,6 +17,25 @@ interface ErrorResponse {
   };
 }
 
+function getRequestBodyForLogging(req: Request): unknown {
+  if (
+    !req.path.endsWith('/sso/exchange') ||
+    !req.body ||
+    typeof req.body !== 'object' ||
+    Array.isArray(req.body)
+  ) {
+    return req.body;
+  }
+
+  const body = req.body as Record<string, unknown>;
+
+  return {
+    ...body,
+    ...(typeof body['encryptedData'] === 'string' ? { encryptedData: '[redacted]' } : {}),
+    ...(typeof body['ssoData'] === 'string' ? { ssoData: '[redacted]' } : {}),
+  };
+}
+
 /**
  * Global error handler
  */
@@ -32,7 +51,7 @@ export function errorHandler(
       err,
       path: req.path,
       method: req.method,
-      body: req.body,
+      body: getRequestBodyForLogging(req),
       query: req.query,
       userId: req.user?.id,
       organizationId: req.user?.organizationId,

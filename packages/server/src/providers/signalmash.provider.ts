@@ -48,10 +48,9 @@ export class SignalmashProviderAdapter implements MessagingProviderAdapter {
     campaignId?: string;
     metadata?: Record<string, unknown>;
   }) {
-    const result = await signalmashService.purchaseNumber(
-      input.phoneNumber,
-      input.campaignId ?? ''
-    );
+    const result = input.campaignId
+      ? await signalmashService.purchaseNumber(input.phoneNumber, input.campaignId)
+      : await signalmashService.purchaseNumberWithoutSmsEnablement(input.phoneNumber);
 
     return {
       externalNumberId: result.numberId,

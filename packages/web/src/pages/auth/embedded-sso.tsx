@@ -1,9 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { AlertCircle, CheckCircle, Loader2 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { AlertCircle, CheckCircle, ExternalLink, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { ApiError, api, type EmbeddedSsoExchangeData } from '@/lib/api';
 import { useAuthStore } from '@/stores/auth.store';
+
+type EmbeddedSsoStatus = 'loading' | 'reconnect_required' | 'waiting' | 'success' | 'error';
+
+interface ReconnectInfo {
+  authUrl: string;
+  locationId?: string;
+  installationId?: string;
+  message: string;
+}
 
 function getEmbeddedDataFromQuery(
   searchParams: URLSearchParams,
@@ -17,22 +27,92 @@ function getEmbeddedDataFromQuery(
   );
 }
 
+function getReconnectInfoFromData(data: EmbeddedSsoExchangeData | undefined): ReconnectInfo | null {
+  if (data?.action !== 'reconnect_required') {
+    return null;
+  }
+
+  return {
+    authUrl: data.authUrl,
+    locationId: data.locationId,
+    installationId: data.installationId,
+    message: data.message,
+  };
+}
+
+function getReconnectInfoFromError(err: unknown): ReconnectInfo | null {
+  const details = err instanceof ApiError
+    ? err.details
+    : (err as { details?: Record<string, unknown> } | null | undefined)?.details;
+  const authUrl = details?.authUrl;
+
+  if (typeof authUrl !== 'string' || !authUrl) {
+    return null;
+  }
+
+  return {
+    authUrl,
+    locationId: typeof details?.locationId === 'string' ? details.locationId : undefined,
+    installationId: typeof details?.installationId === 'string' ? details.installationId : undefined,
+    message: err instanceof Error
+      ? err.message
+      : 'Authorize this CRM workspace to continue.',
+  };
+}
+
 export function EmbeddedSsoPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { loginViaOAuth, checkAuth } = useAuthStore();
-  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
+  const { loginViaOAuth, clearLocalAuth } = useAuthStore();
+  const [status, setStatus] = useState<EmbeddedSsoStatus>('loading');
   const [error, setError] = useState<string | null>(null);
+  const [encryptedData, setEncryptedData] = useState<string | null>(null);
+  const [reconnectInfo, setReconnectInfo] = useState<ReconnectInfo | null>(null);
+
+  const exchangePayload = useCallback(async (payload: string): Promise<'authenticated' | 'reconnect_required'> => {
+    const response = await api.exchangeEmbeddedSso(payload);
+
+    if (!response.success || !response.data) {
+      throw new Error('Failed to complete embedded sign-in');
+    }
+
+    if (response.data.action === 'reconnect_required') {
+      const reconnect = getReconnectInfoFromData(response.data);
+      if (!reconnect) {
+        throw new Error('Failed to prepare workspace authorization');
+      }
+
+      setReconnectInfo(reconnect);
+      setError(null);
+      return 'reconnect_required';
+    }
+
+    const expectedOrganizationId =
+      typeof response.data.organization?.id === 'string'
+        ? response.data.organization.id
+        : typeof response.data.user?.organizationId === 'string'
+          ? response.data.user.organizationId
+          : undefined;
+
+    await loginViaOAuth(
+      response.data.tokens.accessToken,
+      response.data.tokens.refreshToken,
+      expectedOrganizationId
+    );
+
+    setStatus('success');
+    window.setTimeout(() => {
+      navigate('/onboarding', { replace: true });
+    }, 800);
+
+    return 'authenticated';
+  }, [loginViaOAuth, navigate]);
 
   useEffect(() => {
     const requestEncryptedData = async (): Promise<string | null> => {
       if (window.parent !== window) {
         const parentPayload = await new Promise<string | null>((resolve) => {
-          const timeout = window.setTimeout(() => {
-            window.removeEventListener('message', handleMessage);
-            resolve(null);
-          }, 5000);
-
+          let timeout: number;
           const handleMessage = (event: MessageEvent) => {
             const payload = event.data as
               | { message?: string; payload?: string }
@@ -46,6 +126,11 @@ export function EmbeddedSsoPage() {
             window.removeEventListener('message', handleMessage);
             resolve(payload.payload);
           };
+
+          timeout = window.setTimeout(() => {
+            window.removeEventListener('message', handleMessage);
+            resolve(null);
+          }, 5000);
 
           window.addEventListener('message', handleMessage);
           window.parent.postMessage({ message: 'REQUEST_USER_DATA' }, '*');
@@ -67,54 +152,109 @@ export function EmbeddedSsoPage() {
     };
 
     const bootstrap = async () => {
-      const hasExistingSession = await checkAuth();
-      if (hasExistingSession) {
-        setStatus('success');
-        setTimeout(() => {
-          navigate('/onboarding', { replace: true });
-        }, 250);
-        return;
-      }
+      const payload = await requestEncryptedData();
 
-      const encryptedData = await requestEncryptedData();
+      if (!payload) {
+        if (window.parent !== window) {
+          clearLocalAuth();
+        }
 
-      if (!encryptedData) {
         setStatus('error');
         setError('Missing embedded user context. Open this page from the embedded app entry inside your CRM.');
         return;
       }
 
+      setEncryptedData(payload);
+
       try {
-        let response;
+        const outcome = await exchangePayload(payload);
+        if (outcome === 'reconnect_required') {
+          setStatus('reconnect_required');
+        }
+      } catch (firstError) {
+        const reconnect = getReconnectInfoFromError(firstError);
+        if (reconnect) {
+          setReconnectInfo(reconnect);
+          setError(null);
+          setStatus('reconnect_required');
+          return;
+        }
+
         try {
-          response = await api.exchangeEmbeddedSso(encryptedData);
-        } catch (firstError) {
           await new Promise((resolve) => window.setTimeout(resolve, 750));
-          response = await api.exchangeEmbeddedSso(encryptedData);
+          const outcome = await exchangePayload(payload);
+          if (outcome === 'reconnect_required') {
+            setStatus('reconnect_required');
+          }
+        } catch (err) {
+          const retryReconnect = getReconnectInfoFromError(err);
+          if (retryReconnect) {
+            setReconnectInfo(retryReconnect);
+            setError(null);
+            setStatus('reconnect_required');
+            return;
+          }
+
+          setStatus('error');
+          setError(err instanceof Error ? err.message : 'Failed to complete embedded sign-in');
         }
-
-        if (!response.success || !response.data) {
-          throw new Error('Failed to complete embedded sign-in');
-        }
-
-        await loginViaOAuth(
-          response.data.tokens.accessToken,
-          response.data.tokens.refreshToken
-        );
-
-        setStatus('success');
-
-        setTimeout(() => {
-          navigate('/onboarding', { replace: true });
-        }, 800);
-      } catch (err: any) {
-        setStatus('error');
-        setError(err?.message || 'Failed to complete embedded sign-in');
       }
     };
 
     bootstrap();
-  }, [loginViaOAuth, navigate, searchParams]);
+  }, [clearLocalAuth, exchangePayload, searchParams]);
+
+  useEffect(() => {
+    if (status !== 'waiting' || !encryptedData) {
+      return;
+    }
+
+    let stopped = false;
+
+    const poll = async () => {
+      try {
+        const outcome = await exchangePayload(encryptedData);
+        if (!stopped && outcome === 'reconnect_required') {
+          setStatus('waiting');
+        }
+      } catch (err) {
+        const reconnect = getReconnectInfoFromError(err);
+        if (reconnect) {
+          setReconnectInfo(reconnect);
+          setError(null);
+          return;
+        }
+
+        if (!stopped) {
+          setStatus('error');
+          setError(err instanceof Error ? err.message : 'Failed to complete embedded sign-in');
+        }
+      }
+    };
+
+    const firstPoll = window.setTimeout(poll, 1500);
+    const pollInterval = window.setInterval(poll, 3000);
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(firstPoll);
+      window.clearInterval(pollInterval);
+    };
+  }, [encryptedData, exchangePayload, status]);
+
+  const openReconnectAuthorization = () => {
+    if (!reconnectInfo) {
+      return;
+    }
+
+    setError(null);
+    setStatus('waiting');
+    const opened = window.open(reconnectInfo.authUrl, '_blank');
+    if (!opened) {
+      setStatus('reconnect_required');
+      setError('Your browser blocked the authorization tab. Use the button again or allow popups for this page.');
+    }
+  };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -138,6 +278,47 @@ export function EmbeddedSsoPage() {
           </>
         )}
 
+        {status === 'reconnect_required' && reconnectInfo && (
+          <>
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/12 text-primary">
+              <ExternalLink className="h-9 w-9" />
+            </div>
+            <h2 className="text-xl font-semibold">Authorize workspace</h2>
+            <p className="max-w-md text-muted-foreground">{reconnectInfo.message}</p>
+            {error && <p className="max-w-md text-sm text-destructive">{error}</p>}
+            <Button
+              onClick={openReconnectAuthorization}
+              leftIcon={<ExternalLink />}
+              className="mt-2"
+            >
+              Authorize workspace
+            </Button>
+            <p className="max-w-md text-xs text-muted-foreground">
+              Authorization opens in a new tab. Keep this embedded page open.
+            </p>
+          </>
+        )}
+
+        {status === 'waiting' && (
+          <>
+            <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto" />
+            <h2 className="text-xl font-semibold">Waiting for authorization</h2>
+            <p className="max-w-md text-muted-foreground">
+              Complete authorization in the tab that opened. This page will continue automatically.
+            </p>
+            {reconnectInfo && (
+              <Button
+                variant="outline"
+                onClick={openReconnectAuthorization}
+                leftIcon={<ExternalLink />}
+                className="mt-2"
+              >
+                Reopen authorization
+              </Button>
+            )}
+          </>
+        )}
+
         {status === 'success' && (
           <>
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/12 text-primary">
@@ -155,7 +336,7 @@ export function EmbeddedSsoPage() {
             </div>
             <h2 className="text-xl font-semibold">Embedded sign-in failed</h2>
             <p className="max-w-md text-muted-foreground">{error}</p>
-            <button
+            <Button
               onClick={() => {
                 if (window.history.length > 1) {
                   window.history.back();
@@ -164,12 +345,10 @@ export function EmbeddedSsoPage() {
 
                 navigate('/connect');
               }}
-              className="mt-4 rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:opacity-90"
+              className="mt-4"
             >
-              {error?.toLowerCase().includes('workspace')
-                ? 'Return to CRM'
-                : 'Open standard connect flow'}
-            </button>
+              Open standard connect flow
+            </Button>
           </>
         )}
       </motion.div>

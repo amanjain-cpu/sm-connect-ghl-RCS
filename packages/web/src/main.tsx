@@ -11,6 +11,7 @@ if (!rootElement) {
 }
 
 const root = ReactDOM.createRoot(rootElement);
+let bootstrapComplete = false;
 
 function FatalStartupError({ message }: { message: string }) {
   return (
@@ -44,12 +45,21 @@ function renderFatalError(error: unknown) {
   );
 }
 
+function handleGlobalError(error: unknown) {
+  if (!bootstrapComplete) {
+    renderFatalError(error);
+    return;
+  }
+
+  console.error('Unhandled runtime error after app bootstrap', error);
+}
+
 window.addEventListener('error', (event) => {
-  renderFatalError(event.error ?? event.message);
+  handleGlobalError(event.error ?? event.message);
 });
 
 window.addEventListener('unhandledrejection', (event) => {
-  renderFatalError(event.reason);
+  handleGlobalError(event.reason);
 });
 
 async function bootstrap() {
@@ -67,6 +77,7 @@ async function bootstrap() {
         </BrowserRouter>
       </React.StrictMode>
     );
+    bootstrapComplete = true;
   } catch (error) {
     renderFatalError(error);
   }

@@ -253,7 +253,13 @@ export interface PlatformAdapter {
   updateMessageStatus?(
     connection: PlatformAdapterConnection,
     externalMessageId: string,
-    status: string
+    status: string,
+    options?: {
+      error?: {
+        message: string;
+        code?: string;
+      };
+    }
   ): Promise<void>;
 
   getContactByPhone?(

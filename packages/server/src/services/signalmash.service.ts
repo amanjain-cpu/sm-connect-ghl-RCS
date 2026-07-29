@@ -8,6 +8,7 @@ import { prisma } from '../config/database.js';
 import { decrypt } from '../utils/crypto.js';
 import { ExternalServiceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { isSmsAlreadyEnabledMessage } from './signalmash-sms-enablement.service.js';
 import {
   CAMPAIGN_SUB_USE_CASE_VALUES,
   CAMPAIGN_USE_CASES_REQUIRING_SUB_USE_CASES,
@@ -151,6 +152,8 @@ interface CampaignRegistrationResult {
 
 interface RawCampaignRegistrationResult {
   campaignId?: string;
+  campaign_id?: string;
+  signalmashCampaignId?: string;
   campaign_key?: string;
   sm_reference_no?: string;
   tcrCampaignId?: string;
@@ -183,6 +186,10 @@ interface RawCampaignStatusResult {
   status?: string | number;
   message?: string;
   campaignId?: string;
+  campaign_id?: string;
+  signalmashCampaignId?: string;
+  campaign_key?: string;
+  sm_reference_no?: string;
   tcrCampaignId?: string;
   tcr_campaign_id?: string;
   rejectionReason?: string;
@@ -314,6 +321,24 @@ interface LegacySetConnectionResult {
     message?: string;
     description?: string;
   };
+}
+
+interface RawNumberInventoryResponse {
+  status?: number | string;
+  statusCode?: number | string;
+  code?: number | string;
+  message?: string;
+  error?: unknown;
+  data?: unknown;
+  result?: unknown;
+  results?: unknown;
+  numbers?: unknown;
+  phone_numbers?: unknown;
+  phoneNumbers?: unknown;
+  dids?: unknown;
+  DIDs?: unknown;
+  availableNumbers?: unknown;
+  available_numbers?: unknown;
 }
 
 export interface SignalmashConnectionDiagnostic {
@@ -463,6 +488,37 @@ export class SignalmashService {
     return undefined;
   }
 
+  private isSmsEnablementCampaignId(value?: string): boolean {
+    return /^C[A-Za-z0-9]{6}$/.test(value ?? '');
+  }
+
+  private pickSmsEnablementCampaignId(...values: unknown[]): string | undefined {
+    for (const value of values) {
+      const candidate = this.pickString(value);
+      if (candidate && this.isSmsEnablementCampaignId(candidate)) {
+        return candidate;
+      }
+    }
+
+    return undefined;
+  }
+
+  private assertSmsEnablementCampaignId(campaignId: string) {
+    if (!this.isSmsEnablementCampaignId(campaignId)) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        'SMS enablement requires the provider campaign ID that is exactly 7 characters and starts with C.'
+      );
+    }
+  }
+
+  private getLegacyResultMessage(result: {
+    message?: string;
+    error?: { message?: string; description?: string };
+  }): string | undefined {
+    return result.error?.message || result.error?.description || result.message;
+  }
+
   private pickNumber(...values: unknown[]): number | undefined {
     for (const value of values) {
       if (typeof value === 'number' && Number.isFinite(value)) {
@@ -478,6 +534,164 @@ export class SignalmashService {
     }
 
     return undefined;
+  }
+
+  private extractInventoryPhoneNumber(record: Record<string, unknown>): string | undefined {
+    return this.pickString(
+      record.phone_number,
+      record.phoneNumber,
+      record.phone,
+      record.number,
+      record.did,
+      record.DID
+    );
+  }
+
+  private collectNumberInventoryRecords(value: unknown): Record<string, unknown>[] {
+    const records = this.asRecordArray(value);
+    const inventoryRecords: Record<string, unknown>[] = [];
+
+    for (const record of records) {
+      if (this.extractInventoryPhoneNumber(record)) {
+        inventoryRecords.push(record);
+        continue;
+      }
+
+      for (const nested of [
+        record.data,
+        record.result,
+        record.results,
+        record.numbers,
+        record.phone_numbers,
+        record.phoneNumbers,
+        record.dids,
+        record.DIDs,
+        record.availableNumbers,
+        record.available_numbers,
+      ]) {
+        inventoryRecords.push(...this.collectNumberInventoryRecords(nested));
+      }
+    }
+
+    return inventoryRecords;
+  }
+
+  private normalizeInventoryPhoneDigits(phoneNumber: string): string {
+    const digits = phoneNumber.replace(/\D/g, '');
+    return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  }
+
+  private isEmptyNumberInventoryMessage(message?: string): boolean {
+    if (!message?.trim()) {
+      return false;
+    }
+
+    return /no\s+(?:did'?s?|phone\s+numbers?|numbers?|result|results)\s+found/i.test(message);
+  }
+
+  private assertNumberInventoryResponseSucceeded(response: RawNumberInventoryResponse): void {
+    const error = this.asRecord(response.error);
+    const providerStatus = this.pickNumber(response.status, response.statusCode, response.code);
+    const providerMessage = this.pickString(
+      response.message,
+      response.error,
+      error?.message,
+      error?.description
+    );
+
+    if (
+      providerStatus !== undefined &&
+      providerStatus >= 400 &&
+      !this.isEmptyNumberInventoryMessage(providerMessage)
+    ) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        providerMessage
+          ? `Number inventory search failed: ${providerMessage}`
+          : `Number inventory search failed with provider status ${providerStatus}`
+      );
+    }
+  }
+
+  private mapNumberInventoryResponse(
+    response: RawNumberInventoryResponse,
+    options?: {
+      areaCode?: string;
+      contains?: string;
+    }
+  ): Array<{
+    phoneNumber: string;
+    formattedNumber: string;
+    capabilities: { sms: boolean; mms: boolean; voice: boolean };
+    monthlyPrice: number;
+  }> {
+    this.assertNumberInventoryResponseSucceeded(response);
+
+    const records = this.collectNumberInventoryRecords(response);
+    const areaCode = options?.areaCode?.replace(/\D/g, '');
+    const contains = options?.contains?.replace(/\D/g, '');
+    const hasNonEmptyPayload = [
+      response.data,
+      response.result,
+      response.results,
+      response.numbers,
+      response.phone_numbers,
+      response.phoneNumbers,
+      response.dids,
+      response.DIDs,
+      response.availableNumbers,
+      response.available_numbers,
+    ].some((value) => {
+      if (Array.isArray(value)) {
+        return value.length > 0;
+      }
+
+      return !!this.asRecord(value);
+    });
+
+    if (records.length === 0 && hasNonEmptyPayload) {
+      logger.warn(
+        {
+          status: response.status,
+          message: response.message,
+          responseKeys: Object.keys(response),
+        },
+        'Signalmash number inventory response did not contain parseable DID records'
+      );
+    }
+
+    return records.flatMap((record) => {
+      const rawPhoneNumber = this.extractInventoryPhoneNumber(record);
+      if (!rawPhoneNumber) {
+        return [];
+      }
+
+      const nationalDigits = this.normalizeInventoryPhoneDigits(rawPhoneNumber);
+      if (areaCode && !nationalDigits.startsWith(areaCode)) {
+        return [];
+      }
+
+      if (contains && !nationalDigits.includes(contains)) {
+        return [];
+      }
+
+      const phoneNumber = nationalDigits.length === 10 ? nationalDigits : rawPhoneNumber;
+
+      return [{
+        phoneNumber,
+        formattedNumber: this.formatPhoneNumber(phoneNumber),
+        capabilities: { sms: true, mms: true, voice: false },
+        monthlyPrice: this.pickNumber(
+          record.rates,
+          record.rate,
+          record.monthlyPrice,
+          record.monthly_price,
+          record.monthlyRate,
+          record.monthly_rate,
+          record.price
+        ) ?? 0,
+      }];
+    });
   }
 
   private normalizeProviderCode(value: unknown): string | undefined {
@@ -1080,12 +1294,14 @@ export class SignalmashService {
     );
     const detail = this.asRecord(result.data);
     const campaignId = this.pickString(
-      result.campaignId,
-      result.campaign_key,
       result.sm_reference_no,
-      detail?.campaignId,
+      result.campaign_key,
+      detail?.sm_reference_no,
       detail?.campaign_key,
-      detail?.sm_reference_no
+      result.campaignId,
+      result.campaign_id,
+      detail?.campaignId,
+      detail?.campaign_id
     );
 
     if ((typeof result.status === 'number' && result.status >= 400) || !campaignId) {
@@ -1105,11 +1321,17 @@ export class SignalmashService {
 
     return {
       campaignId,
-      tcrCampaignId: this.pickString(
+      tcrCampaignId: this.pickSmsEnablementCampaignId(
         result.tcrCampaignId,
         result.tcr_campaign_id,
         detail?.tcrCampaignId,
-        detail?.tcr_campaign_id
+        detail?.tcr_campaign_id,
+        result.signalmashCampaignId,
+        result.campaign_id,
+        result.campaignId,
+        detail?.signalmashCampaignId,
+        detail?.campaign_id,
+        detail?.campaignId
       ),
       status: lifecycleStatus,
       providerCode,
@@ -1141,13 +1363,15 @@ export class SignalmashService {
     );
     const detail = this.asRecord(result.data);
     const campaignId = this.pickString(
-      result.campaignId,
-      result.campaign_key,
       result.sm_reference_no,
-      detail?.campaignId,
-      detail?.campaign_key,
+      result.campaign_key,
       detail?.sm_reference_no,
-      input.campaignId
+      detail?.campaign_key,
+      input.campaignId,
+      result.campaignId,
+      result.campaign_id,
+      detail?.campaignId,
+      detail?.campaign_id
     );
 
     if ((typeof result.status === 'number' && result.status >= 400) || !campaignId) {
@@ -1167,11 +1391,17 @@ export class SignalmashService {
 
     return {
       campaignId,
-      tcrCampaignId: this.pickString(
+      tcrCampaignId: this.pickSmsEnablementCampaignId(
         result.tcrCampaignId,
         result.tcr_campaign_id,
         detail?.tcrCampaignId,
-        detail?.tcr_campaign_id
+        detail?.tcr_campaign_id,
+        result.signalmashCampaignId,
+        result.campaign_id,
+        result.campaignId,
+        detail?.signalmashCampaignId,
+        detail?.campaign_id,
+        detail?.campaignId
       ),
       status: lifecycleStatus,
       providerCode,
@@ -1212,6 +1442,10 @@ export class SignalmashService {
     return {
       status: this.resolveCampaignLifecycleStatus(data, result, 'UNKNOWN'),
       signalmashCampaignId: this.pickString(
+        data?.sm_reference_no,
+        data?.campaign_key,
+        result.sm_reference_no,
+        result.campaign_key,
         data?.campaignId,
         data?.campaign_id,
         result.campaignId,
@@ -1223,11 +1457,17 @@ export class SignalmashService {
         data?.campaign_name,
         data?.name,
       ),
-      tcrCampaignId: this.pickString(
+      tcrCampaignId: this.pickSmsEnablementCampaignId(
         data?.tcrCampaignId,
         data?.tcr_campaign_id,
         result.tcrCampaignId,
-        result.tcr_campaign_id
+        result.tcr_campaign_id,
+        data?.signalmashCampaignId,
+        data?.campaign_id,
+        data?.campaignId,
+        result.signalmashCampaignId,
+        result.campaign_id,
+        result.campaignId
       ),
       rejectionReason: this.pickString(
         data?.rejectionReason,
@@ -1374,10 +1614,10 @@ export class SignalmashService {
 
     for (const campaign of this.asRecordArray(result.data)) {
       const campaignId = this.pickString(
-        campaign.campaignId,
-        campaign.campaign_id,
+        campaign.sm_reference_no,
         campaign.campaign_key,
-        campaign.sm_reference_no
+        campaign.campaignId,
+        campaign.campaign_id
       );
       if (!campaignId) {
         continue;
@@ -1511,37 +1751,12 @@ export class SignalmashService {
         Qty: String(options?.limit ?? 20),
       });
 
-      const response = await this.request<{
-        status: number;
-        message: string;
-        data?: Array<{
-          phone_number: string;
-          rate_center?: string;
-          state?: string;
-          supplier_tier?: number;
-          provider?: string;
-          rates?: number;
-        }>;
-      }>('GET', `/searchbystate?${params.toString()}`);
+      const response = await this.request<RawNumberInventoryResponse>(
+        'GET',
+        `/searchbystate?${params.toString()}`
+      );
 
-      return (response.data ?? [])
-        .filter((number) => {
-          if (options?.areaCode && !number.phone_number.startsWith(options.areaCode)) {
-            return false;
-          }
-
-          if (options?.contains && !number.phone_number.includes(options.contains)) {
-            return false;
-          }
-
-          return true;
-        })
-        .map((number) => ({
-        phoneNumber: number.phone_number,
-        formattedNumber: this.formatPhoneNumber(number.phone_number),
-        capabilities: { sms: true, mms: true, voice: false },
-        monthlyPrice: number.rates ?? 0,
-        }));
+      return this.mapNumberInventoryResponse(response, options);
     }
 
     if (options?.areaCode) {
@@ -1550,37 +1765,12 @@ export class SignalmashService {
         Qty: String(options.limit ?? 20),
       });
 
-      const response = await this.request<{
-        status: number;
-        message: string;
-        data?: Array<{
-          phone_number: string;
-          rate_center?: string;
-          state?: string;
-          supplier_tier?: number;
-          provider?: string;
-          rates?: number;
-        }>;
-      }>('GET', `/searchbynpa?${params.toString()}`);
+      const response = await this.request<RawNumberInventoryResponse>(
+        'GET',
+        `/searchbynpa?${params.toString()}`
+      );
 
-      return (response.data ?? [])
-        .filter((number) => {
-          if (!number.phone_number.startsWith(options.areaCode!)) {
-            return false;
-          }
-
-          if (options?.contains && !number.phone_number.includes(options.contains)) {
-            return false;
-          }
-
-          return true;
-        })
-        .map((number) => ({
-          phoneNumber: number.phone_number,
-          formattedNumber: this.formatPhoneNumber(number.phone_number),
-          capabilities: { sms: true, mms: true, voice: false },
-          monthlyPrice: number.rates ?? 0,
-        }));
+      return this.mapNumberInventoryResponse(response, options);
     }
 
     throw new ExternalServiceError(
@@ -1592,14 +1782,7 @@ export class SignalmashService {
   /**
    * Purchase a phone number
    */
-  async purchaseNumber(
-    phoneNumber: string,
-    campaignId: string
-  ): Promise<{
-    numberId: string;
-    phoneNumber: string;
-    status: string;
-  }> {
+  private async buyDid(phoneNumber: string) {
     const did = this.formatSmsEndpointPhone(phoneNumber);
     const purchaseResult = await this.requestForm<LegacyNumberPurchaseResult>(
       'POST',
@@ -1620,42 +1803,127 @@ export class SignalmashService {
       );
     }
 
+    return purchasedDid;
+  }
+
+  private async setPurchasedNumberConnection(purchasedDid: string) {
+    const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
+      'PUT',
+      '/setConnection',
+      new URLSearchParams({
+        DID: purchasedDid,
+        ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
+      })
+    );
+
+    if ((setConnectionResult.status ?? 200) >= 400) {
+      throw new ExternalServiceError(
+        'Signalmash',
+        setConnectionResult.error?.message ||
+          setConnectionResult.message ||
+          `Connection assignment failed for DID ${purchasedDid}`
+      );
+    }
+  }
+
+  async enableSmsForNumber(
+    phoneNumber: string,
+    campaignId: string
+  ): Promise<void> {
+    this.assertSmsEnablementCampaignId(campaignId);
+
+    const did = this.formatSmsEndpointPhone(phoneNumber);
+    let enableSmsResult: LegacyEnableSmsResult | null = null;
+
     try {
-      const enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
+      enableSmsResult = await this.requestForm<LegacyEnableSmsResult>(
         'POST',
         '/enablesms',
         new URLSearchParams({
-          DID: purchasedDid,
+          DID: did,
           CampaignId: campaignId,
         })
       );
-
-      if ((enableSmsResult.status ?? 500) >= 400) {
-        throw new ExternalServiceError(
-          'Signalmash',
-          enableSmsResult.error?.message ||
-            enableSmsResult.message ||
-            `SMS enablement failed for DID ${purchasedDid}`
-        );
+    } catch (error) {
+      if (!isSmsAlreadyEnabledMessage(error instanceof Error ? error.message : error)) {
+        throw error;
       }
 
-      const setConnectionResult = await this.requestForm<LegacySetConnectionResult>(
-        'PUT',
-        '/setConnection',
-        new URLSearchParams({
-          DID: purchasedDid,
-          ConnectionKey: SignalmashService.PURCHASE_CONNECTION_KEY,
-        })
+      logger.info(
+        { did, campaignId },
+        'Signalmash reported SMS was already enabled for DID; continuing idempotently'
       );
+    }
 
-      if ((setConnectionResult.status ?? 200) >= 400) {
+    const enableSmsMessage = enableSmsResult
+      ? this.getLegacyResultMessage(enableSmsResult)
+      : undefined;
+
+    if (enableSmsResult && (enableSmsResult.status ?? 500) >= 400) {
+      if (isSmsAlreadyEnabledMessage(enableSmsMessage)) {
+        logger.info(
+          { did, campaignId },
+          'Signalmash reported SMS was already enabled for DID; continuing idempotently'
+        );
+      } else {
         throw new ExternalServiceError(
           'Signalmash',
-          setConnectionResult.error?.message ||
-            setConnectionResult.message ||
-            `Connection assignment failed for DID ${purchasedDid}`
+          enableSmsMessage ||
+            `SMS enablement failed for DID ${did}`
         );
       }
+    }
+
+    await this.setPurchasedNumberConnection(did);
+  }
+
+  async purchaseNumberWithoutSmsEnablement(
+    phoneNumber: string
+  ): Promise<{
+    numberId: string;
+    phoneNumber: string;
+    status: string;
+  }> {
+    const purchasedDid = await this.buyDid(phoneNumber);
+
+    try {
+      await this.setPurchasedNumberConnection(purchasedDid);
+    } catch (error) {
+      try {
+        await this.releaseNumber(purchasedDid);
+      } catch (releaseError) {
+        logger.warn(
+          {
+            numberId: purchasedDid,
+            error: releaseError instanceof Error ? releaseError.message : releaseError,
+          },
+          'Failed to release purchased DID after connection assignment error'
+        );
+      }
+
+      throw error;
+    }
+
+    return {
+      numberId: purchasedDid,
+      phoneNumber: purchasedDid,
+      status: 'active',
+    };
+  }
+
+  async purchaseNumber(
+    phoneNumber: string,
+    campaignId: string
+  ): Promise<{
+    numberId: string;
+    phoneNumber: string;
+    status: string;
+  }> {
+    this.assertSmsEnablementCampaignId(campaignId);
+    const purchasedDid = await this.buyDid(phoneNumber);
+
+    try {
+      await this.enableSmsForNumber(purchasedDid, campaignId);
     } catch (error) {
       try {
         await this.releaseNumber(purchasedDid);

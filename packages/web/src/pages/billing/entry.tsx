@@ -111,12 +111,12 @@ export function BillingEntryPage() {
         }
       }
 
-      if (isAuthenticated) {
+      const encryptedData = await requestEncryptedData();
+
+      if (!encryptedData && isAuthenticated) {
         navigate('/subscriptions', { replace: true });
         return;
       }
-
-      const encryptedData = await requestEncryptedData();
 
       if (!encryptedData) {
         setStatus('error');
@@ -131,6 +131,10 @@ export function BillingEntryPage() {
 
         if (!response.success || !response.data) {
           throw new Error('Failed to complete embedded sign-in');
+        }
+
+        if (response.data.action === 'reconnect_required') {
+          throw new Error(response.data.message);
         }
 
         await loginViaOAuth(
@@ -192,7 +196,7 @@ export function BillingEntryPage() {
             <p className="max-w-md text-muted-foreground">
               {isMarketplaceInstall
                 ? 'Your CRM platform has accepted the external billing authorization. HighLevel should continue the install inside the target workspace.'
-                : 'Redirecting to subscription management...'}
+                : 'Redirecting to wallet billing...'}
             </p>
             {isMarketplaceInstall && showCloseHint && (
               <div className="space-y-3">

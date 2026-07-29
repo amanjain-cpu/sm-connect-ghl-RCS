@@ -61,11 +61,13 @@ const numberLinkIntentSchema = z.discriminatedUnion('mode', [
     phoneNumberId: z.string().uuid('Invalid phone number ID'),
     friendlyName: z.string().max(100).optional(),
     confirmReassignment: z.boolean().optional(),
+    makeDefaultSender: z.boolean().optional(),
   }),
   z.object({
     mode: z.literal('buy_new'),
     phoneNumber: z.string().min(10).max(20),
     friendlyName: z.string().max(100).optional(),
+    makeDefaultSender: z.boolean().optional(),
   }),
 ]);
 const submitCampaignSchema = z.object({
@@ -191,7 +193,10 @@ router.post(
     const campaign = await campaignService.submitForApproval(
       req.params.id,
       req.user!.organizationId,
-      req.body
+      {
+        ...req.body,
+        installationId: req.user!.embeddedInstallationId ?? null,
+      }
     );
 
     res.json({
@@ -214,7 +219,8 @@ router.post(
     const campaign = await campaignService.linkPhoneNumber(
       req.params.id,
       req.user!.organizationId,
-      req.body
+      req.body,
+      { installationId: req.user!.embeddedInstallationId ?? null }
     );
 
     res.json({
@@ -240,7 +246,8 @@ router.post(
     );
     const campaign = await campaignService.refreshApprovalStatus(
       req.params.id,
-      req.user!.organizationId
+      req.user!.organizationId,
+      { installationId: req.user!.embeddedInstallationId ?? null }
     );
 
     res.json({

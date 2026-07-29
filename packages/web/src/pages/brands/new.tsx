@@ -98,7 +98,6 @@ const formSchema = z.object({
   businessIdentifierType: z.enum(identifierTypes.map((item) => item.value) as [string, ...string[]]).optional(),
   businessIdentifierValue: z.string().optional(),
   streetAddress1: z.string().min(1, 'Address/Street is required'),
-  streetAddress2: z.string().optional(),
   city: z.string().min(1, 'City is required'),
   state: z.string().min(2, 'State is required').max(100),
   postalCode: z.string().min(1, 'Zip Code is required'),
@@ -278,7 +277,7 @@ export function NewBrandPage() {
         ein: data.taxNumber.replace(/\D/g, '') || undefined,
         einIssuingCountry: data.taxIssuingCountry || data.registrationCountry,
         phone: data.supportPhone.replace(/\D/g, ''),
-        street: [data.streetAddress1, data.streetAddress2].filter(Boolean).join(', '),
+        street: data.streetAddress1.trim(),
         city: data.city,
         state: data.state.trim().toUpperCase(),
         postalCode: data.postalCode,
@@ -484,15 +483,6 @@ export function NewBrandPage() {
                           leftIcon={<MapPin className="h-4 w-4" />}
                         />
                       </div>
-                      <div className="space-y-2 md:col-span-2">
-                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Address/Street</label>
-                        <Input
-                          {...register('streetAddress2')}
-                          error={errors.streetAddress2?.message}
-                          placeholder="Suite 400"
-                          leftIcon={<MapPin className="h-4 w-4" />}
-                        />
-                      </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">{requiredLabel('City')}</label>
                         <Input {...register('city')} error={errors.city?.message} placeholder="San Francisco" />
@@ -639,16 +629,6 @@ export function NewBrandPage() {
                   </div>
                 </div>
               )}
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-900">
-                <h4 className="text-sm font-semibold text-slate-950 dark:text-slate-50">Before you continue</h4>
-                <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-600 dark:text-slate-400">
-                  <li>The wizard prefills from your connected CRM workspace when that data is available.</li>
-                  <li>Brand relationship, business contact email, and provider mappings are all persisted to the backend.</li>
-                  <li>You can save a draft now, then submit the brand to Signalmash from the detail page when the record is complete.</li>
-                  <li>Country of registration, tax issuing country, and operating country all support the full ISO region list.</li>
-                </ul>
-              </div>
 
               {currentStep === steps.length && (
                 <div className="rounded-2xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-500/30 dark:bg-sky-500/10">

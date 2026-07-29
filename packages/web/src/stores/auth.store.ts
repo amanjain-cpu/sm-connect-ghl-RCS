@@ -35,7 +35,7 @@ interface AuthState {
 
   // Actions
   login: (email: string, password: string) => Promise<void>;
-  loginViaOAuth: (accessToken: string, refreshToken: string) => Promise<void>;
+  loginViaOAuth: (accessToken: string, refreshToken: string, expectedOrganizationId?: string) => Promise<void>;
   initiatePlatformOAuth: () => Promise<void>;
   register: (data: {
     email: string;
@@ -46,6 +46,7 @@ interface AuthState {
   }) => Promise<void>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<boolean>;
+  clearLocalAuth: () => void;
   clearError: () => void;
 }
 
@@ -84,8 +85,15 @@ export const useAuthStore = create<AuthState>()(
       /**
        * Login via OAuth - tokens come from URL callback
        */
-      loginViaOAuth: async (accessToken: string, refreshToken: string) => {
-        set({ isLoading: true, error: null });
+      loginViaOAuth: async (accessToken: string, refreshToken: string, expectedOrganizationId?: string) => {
+        api.clearAuthTokens();
+        set({
+          user: null,
+          organization: null,
+          isAuthenticated: false,
+          isLoading: true,
+          error: null,
+        });
 
         try {
           // Set tokens in API client
@@ -95,6 +103,20 @@ export const useAuthStore = create<AuthState>()(
           const response = await api.getMe();
 
           if (response.success && response.data) {
+            if (
+              expectedOrganizationId &&
+              response.data.user?.organizationId !== expectedOrganizationId
+            ) {
+              await api.logout();
+              set({
+                user: null,
+                organization: null,
+                isAuthenticated: false,
+                isLoading: false,
+              });
+              throw new Error('Embedded session organization changed. Reopening the CRM sign-in flow.');
+            }
+
             set({
               user: response.data.user,
               isAuthenticated: true,
@@ -112,6 +134,7 @@ export const useAuthStore = create<AuthState>()(
             }
           }
         } catch (error: any) {
+          api.clearAuthTokens();
           set({
             error: error.message || 'OAuth login failed',
             isLoading: false,
@@ -215,6 +238,18 @@ export const useAuthStore = create<AuthState>()(
         }
 
         return false;
+      },
+
+      clearLocalAuth: () => {
+        void api.logout();
+        api.clearAuthTokens();
+        set({
+          user: null,
+          organization: null,
+          isAuthenticated: false,
+          isLoading: false,
+          error: null,
+        });
       },
 
       clearError: () => set({ error: null }),

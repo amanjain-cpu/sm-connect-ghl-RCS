@@ -589,15 +589,6 @@ export function NewCampaignPage() {
                 </div>
               </section>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-900">
-                <h4 className="text-sm font-semibold text-slate-950 dark:text-slate-50">Before you submit</h4>
-                <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-600 dark:text-slate-400">
-                  <li>Only verified brands can be attached to new campaigns.</li>
-                  <li>Use cases must match approved 10DLC categories exposed by the backend.</li>
-                  <li>Sample messages should be real and consistent with subscriber consent.</li>
-                </ul>
-              </div>
-
               <div className="flex items-center justify-between border-t border-slate-200 pt-6 dark:border-slate-800">
                 <Button type="button" variant="ghost" onClick={() => navigate('/campaigns')} leftIcon={<ArrowLeft className="h-4 w-4" />}>
                   Cancel

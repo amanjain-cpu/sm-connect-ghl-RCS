@@ -215,7 +215,7 @@ export function OnboardingPage() {
 
     if (lifecycle === 'provider_not_activated' || lifecycle === 'ready') {
       return {
-        title: 'Send embedded test traffic',
+        title: 'Send SMS',
         description: 'Use the embedded messaging flow to validate outbound traffic, compliance state, and number readiness.',
         href: '/messages',
         cta: 'Open messages',

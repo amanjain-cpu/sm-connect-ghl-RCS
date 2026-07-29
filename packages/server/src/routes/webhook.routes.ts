@@ -2,8 +2,10 @@
 // Webhook Routes
 // ===========================================
 
+import crypto from 'node:crypto';
 import { Router } from 'express';
 import type { Router as RouterType, Request, Response } from 'express';
+import { config } from '../config/index.js';
 import { prisma } from '../config/database.js';
 import { messageService } from '../services/message.service.js';
 import { brandService } from '../services/brand.service.js';
@@ -15,12 +17,33 @@ import { logger } from '../utils/logger.js';
 import type { CrmPlatformAdapter } from '../adapters/crm-platform.adapter.js';
 import { enqueueGhlOutboundMessage } from '../queues/outbound-message.queue.js';
 import { enqueueIncomingInboundEvent, enqueueIncomingStatusEvent } from '../queues/incoming-events.queue.js';
+import { enqueueCrmOutboundWebhookForExactLocation } from '../services/ghl-outbound-webhook-routing.service.js';
 
 const router: RouterType = Router();
 const crmPlatformId = `${'lead'}connector` as const;
 const crmBaseWebhookPath = `/${crmPlatformId}`;
 const crmInboundWebhookPath = `${crmBaseWebhookPath}/inbound`;
 const crmPlatformAdapter = platformAdapterRegistry.get(crmPlatformId) as CrmPlatformAdapter;
+const crmSharedSecretHeaderNames = [
+  'x-ghl-webhook-secret',
+  'x-crm-webhook-secret',
+  'x-signalmash-webhook-secret',
+  'x-webhook-secret',
+] as const;
+const unsignedCrmAppWebhookEventTypes = new Set(['INSTALL']);
+
+interface CrmWebhookSignatures {
+  xPlatformSignature?: string;
+  xWhSignature?: string;
+}
+
+interface CrmWebhookAuthResult {
+  authenticated: boolean;
+  rejectResponse?: {
+    status: number;
+    body: { error: string };
+  };
+}
 
 type NormalizedSignalmashEvent =
   | {
@@ -91,6 +114,17 @@ function pickString(...values: unknown[]) {
   return undefined;
 }
 
+function pickSmsEnablementCampaignId(...values: unknown[]) {
+  for (const value of values) {
+    const candidate = pickString(value);
+    if (candidate && /^C[A-Za-z0-9]{6}$/.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 function pickNumber(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -106,6 +140,89 @@ function pickNumber(...values: unknown[]) {
   }
 
   return undefined;
+}
+
+function pickHeader(headers: Request['headers'], name: string): string | undefined {
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value.find((entry) => entry.trim().length > 0)?.trim();
+  }
+
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function safeCompareSecret(candidate: string, expected: string): boolean {
+  const candidateBuffer = Buffer.from(candidate, 'utf8');
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+
+  return candidateBuffer.length === expectedBuffer.length &&
+    crypto.timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function verifyCrmSharedSecret(req: Request): boolean {
+  if (!config.ghlWebhookSecret) {
+    return false;
+  }
+
+  const providedSecret = crmSharedSecretHeaderNames
+    .map((headerName) => pickHeader(req.headers, headerName))
+    .find(Boolean);
+
+  return providedSecret ? safeCompareSecret(providedSecret, config.ghlWebhookSecret) : false;
+}
+
+function hasCrmWebhookSignature(signatures: CrmWebhookSignatures): boolean {
+  return Boolean(signatures.xPlatformSignature || signatures.xWhSignature);
+}
+
+function authenticateCrmWebhook(
+  req: Request,
+  rawBody: string,
+  signatures: CrmWebhookSignatures,
+  requireSignature: boolean
+): CrmWebhookAuthResult {
+  const hasSignature = hasCrmWebhookSignature(signatures);
+  const hasValidSignature = hasSignature &&
+    Boolean(crmPlatformAdapter.verifyWebhookSignature?.(rawBody, signatures));
+
+  if (requireSignature && !hasValidSignature) {
+    logger.warn('Invalid CRM webhook signature');
+    return {
+      authenticated: false,
+      rejectResponse: { status: 401, body: { error: 'Invalid signature' } },
+    };
+  }
+
+  if (!requireSignature && hasSignature && !hasValidSignature) {
+    logger.warn('Invalid optional CRM webhook signature');
+    return {
+      authenticated: false,
+      rejectResponse: { status: 401, body: { error: 'Invalid signature' } },
+    };
+  }
+
+  return {
+    authenticated: hasValidSignature || verifyCrmSharedSecret(req),
+  };
+}
+
+function redactWebhookHeaders(headers: Request['headers']) {
+  const sensitiveHeaders = new Set<string>([
+    'authorization',
+    'cookie',
+    'x-api-key',
+    ...crmSharedSecretHeaderNames,
+  ]);
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key,
+      sensitiveHeaders.has(key.toLowerCase()) ? '[redacted]' : value,
+    ])
+  );
+}
+
+function isUnsignedCrmAppWebhookEventAllowed(type: unknown): boolean {
+  return typeof type === 'string' && unsignedCrmAppWebhookEventTypes.has(type);
 }
 
 function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalmashEvent {
@@ -201,6 +318,12 @@ function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalma
     data?.brandId
   );
   const campaignId = pickString(
+    body.sm_reference_no,
+    body.campaign_key,
+    nestedCampaign?.sm_reference_no,
+    nestedCampaign?.campaign_key,
+    data?.sm_reference_no,
+    data?.campaign_key,
     body.campaign_id,
     body.campaignId,
     nestedCampaign?.campaign_id,
@@ -306,13 +429,22 @@ function normalizeSignalmashWebhookPayload(payload: unknown): NormalizedSignalma
             data?.messages_per_second,
             data?.messagesPerSecond
           ),
-          tcr_campaign_id: pickString(
+          tcr_campaign_id: pickSmsEnablementCampaignId(
             body.tcr_campaign_id,
             body.tcrCampaignId,
             nestedCampaign?.tcr_campaign_id,
             nestedCampaign?.tcrCampaignId,
             data?.tcr_campaign_id,
-            data?.tcrCampaignId
+            data?.tcrCampaignId,
+            body.signalmashCampaignId,
+            nestedCampaign?.signalmashCampaignId,
+            data?.signalmashCampaignId,
+            body.campaign_id,
+            body.campaignId,
+            nestedCampaign?.campaign_id,
+            nestedCampaign?.campaignId,
+            data?.campaign_id,
+            data?.campaignId
           ),
         },
       };
@@ -332,19 +464,15 @@ async function handleCrmOutboundWebhook(req: Request, res: Response, options?: {
     xWhSignature: req.headers['x-wh-signature'] as string | undefined,
   };
   const requireSignature = options?.requireSignature ?? true;
+  const authResult = authenticateCrmWebhook(req, rawBody, signatures, requireSignature);
 
-  if (requireSignature && !crmPlatformAdapter.verifyWebhookSignature?.(rawBody, signatures)) {
-    logger.warn('Invalid CRM webhook signature');
-    return res.status(401).json({ error: 'Invalid signature' });
+  if (authResult.rejectResponse) {
+    return res.status(authResult.rejectResponse.status).json(authResult.rejectResponse.body);
   }
 
-  if (
-    !requireSignature &&
-    (signatures.xPlatformSignature || signatures.xWhSignature) &&
-    !crmPlatformAdapter.verifyWebhookSignature?.(rawBody, signatures)
-  ) {
-    logger.warn('Invalid optional CRM webhook signature');
-    return res.status(401).json({ error: 'Invalid signature' });
+  if (!authResult.authenticated) {
+    logger.warn('Rejected unsigned CRM outbound webhook');
+    return res.status(401).json({ error: 'Webhook authentication required' });
   }
 
   const parsed = crmPlatformAdapter.parseOutboundWebhook?.(req.body);
@@ -353,27 +481,33 @@ async function handleCrmOutboundWebhook(req: Request, res: Response, options?: {
     return res.status(202).json({ success: false, message: 'Unsupported webhook payload' });
   }
 
-  const connection = await platformService.getByPlatformAccount(crmPlatformId, parsed.accountId);
-  if (!connection) {
-    logger.warn({ accountId: parsed.accountId }, 'CRM webhook for an unknown location');
+  const enqueueResult = await enqueueCrmOutboundWebhookForExactLocation(
+    {
+      parsed,
+      contactPhone: req.body.contactPhone as string | undefined,
+    },
+    {
+      getConnectionByLocation: (locationId) =>
+        platformService.getByPlatformAccount(crmPlatformId, locationId),
+      enqueueOutboundMessage: enqueueGhlOutboundMessage,
+    }
+  );
+
+  if (!enqueueResult.queued) {
+    logger.warn(
+      {
+        locationId: enqueueResult.locationId,
+        providerMessageId: enqueueResult.providerMessageId,
+      },
+      'CRM outbound webhook for an unknown location; reconnect this CRM workspace before sending native SMS'
+    );
     return res.status(200).json({ success: true, warning: 'Location not configured' });
   }
-
-  await enqueueGhlOutboundMessage({
-    connectionId: connection.id,
-    providerMessageId: parsed.providerMessageId,
-    conversationId: parsed.conversationId,
-    contactId: parsed.contactId,
-    to: (req.body.contactPhone as string | undefined) || parsed.to,
-    from: parsed.from,
-    body: parsed.body,
-    mediaUrls: parsed.mediaUrls,
-  });
 
   res.status(200).json({
     success: true,
     queued: true,
-    providerMessageId: parsed.providerMessageId,
+    providerMessageId: enqueueResult.providerMessageId,
   });
 }
 
@@ -395,19 +529,10 @@ export async function handleCrmAppWebhook(
     xWhSignature: req.headers['x-wh-signature'] as string | undefined,
   };
   const requireSignature = options?.requireSignature ?? true;
+  const authResult = authenticateCrmWebhook(req, rawBody, signatures, requireSignature);
 
-  if (requireSignature && !crmPlatformAdapter.verifyWebhookSignature?.(rawBody, signatures)) {
-    logger.warn('Invalid CRM webhook signature');
-    return res.status(401).json({ error: 'Invalid signature' });
-  }
-
-  if (
-    !requireSignature &&
-    (signatures.xPlatformSignature || signatures.xWhSignature) &&
-    !crmPlatformAdapter.verifyWebhookSignature?.(rawBody, signatures)
-  ) {
-    logger.warn('Invalid optional CRM webhook signature');
-    return res.status(401).json({ error: 'Invalid signature' });
+  if (authResult.rejectResponse) {
+    return res.status(authResult.rejectResponse.status).json(authResult.rejectResponse.body);
   }
 
   const { type, locationId, companyId, appId } = req.body || {};
@@ -417,12 +542,30 @@ export async function handleCrmAppWebhook(
     return res.status(200).json({ success: true });
   }
 
+  if (isCrmOutboundPayload(req.body) && !authResult.authenticated) {
+    logger.warn({ type, locationId }, 'Rejected unsigned CRM outbound webhook');
+    return res.status(401).json({ error: 'Webhook authentication required' });
+  }
+
+  if (type === 'UNINSTALL' && !authResult.authenticated) {
+    logger.warn({ locationId, companyId, appId }, 'Rejected unsigned CRM uninstall webhook');
+    return res.status(401).json({ error: 'Webhook authentication required' });
+  }
+
+  if (!authResult.authenticated && !isUnsignedCrmAppWebhookEventAllowed(type)) {
+    logger.warn({ type, locationId, companyId }, 'Ignored unsigned CRM app webhook type');
+    return res.status(202).json({
+      success: false,
+      message: 'Unsigned webhook type ignored',
+    });
+  }
+
   await prisma.webhookEvent.create({
     data: {
       platform: crmPlatformId,
       eventType: typeof type === 'string' ? type : 'unknown',
       payload: req.body,
-      headers: req.headers as any,
+      headers: redactWebhookHeaders(req.headers) as any,
     },
   });
 
@@ -433,6 +576,20 @@ export async function handleCrmAppWebhook(
   }
 
   switch (type) {
+    case 'INSTALL': {
+      const result = await platformService.handleLeadconnectorInstall({
+        locationId: typeof locationId === 'string' ? locationId : undefined,
+        companyId: typeof companyId === 'string' ? companyId : undefined,
+        appId: typeof appId === 'string' ? appId : undefined,
+        payload: req.body,
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: result,
+      });
+    }
+
     case 'UNINSTALL': {
       const result = await platformService.handleLeadconnectorUninstall({
         locationId: typeof locationId === 'string' ? locationId : undefined,
@@ -468,7 +625,7 @@ router.post(
         platform: crmPlatformId, // Reuse the CRM platform enum slot for billing and messaging events
         eventType: type,
         payload: req.body,
-        headers: req.headers as any,
+        headers: redactWebhookHeaders(req.headers) as any,
       },
     });
 

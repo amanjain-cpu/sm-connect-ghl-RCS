@@ -11,12 +11,13 @@ import { formatPhoneE164 } from '@signalmash-connect/shared';
 import type { Message, MessageStatus, MessageDirection, MessageType } from '@prisma/client';
 import { integrationService } from './integration.service.js';
 import { complianceService } from './compliance.service.js';
-import { billingService } from './billing.service.js';
-import { subscriptionBillingService } from './subscription-billing.service.js';
+import { walletBillingService } from './wallet-billing.service.js';
+import { evaluateInstallationSenderPolicy } from './message-installation-routing.service.js';
 
 interface SendMessageInput {
   organizationId: string;
   platformConnectionId?: string;
+  installationId?: string | null;
   campaignId?: string;
   phoneNumberId?: string;
   platformMessageId?: string;
@@ -46,11 +47,191 @@ export class MessageService {
     return `${config.apiUrl}/api/webhooks/signalmash`;
   }
 
+  private async resolveMessagePlatformContext(input: {
+    organizationId: string;
+    platformConnectionId?: string | null;
+    installationId?: string | null;
+  }): Promise<{
+    platformConnectionId?: string;
+    installationId?: string | null;
+  }> {
+    if (input.installationId) {
+      const installation = await prisma.platformInstallation.findFirst({
+        where: {
+          id: input.installationId,
+          organizationId: input.organizationId,
+          platform: 'leadconnector',
+        },
+        select: {
+          id: true,
+          externalAccountId: true,
+          status: true,
+        },
+      });
+
+      if (!installation || installation.status !== 'connected') {
+        throw new BadRequestError(
+          'This connected CRM workspace is not active. Reconnect this workspace before sending.'
+        );
+      }
+
+      if (input.platformConnectionId) {
+        const requestedConnection = await prisma.platformConnection.findFirst({
+          where: {
+            id: input.platformConnectionId,
+            organizationId: input.organizationId,
+            platform: 'leadconnector',
+            status: 'connected',
+          },
+          select: {
+            id: true,
+            installationId: true,
+            platformAccountId: true,
+          },
+        });
+
+        if (
+          !requestedConnection ||
+          (
+            requestedConnection.installationId !== installation.id &&
+            requestedConnection.platformAccountId !== installation.externalAccountId
+          )
+        ) {
+          throw new BadRequestError(
+            'The selected CRM connection does not match the active embedded workspace.'
+          );
+        }
+
+        if (requestedConnection.installationId !== installation.id) {
+          await prisma.platformConnection.update({
+            where: { id: requestedConnection.id },
+            data: { installationId: installation.id },
+          });
+        }
+
+        return {
+          platformConnectionId: requestedConnection.id,
+          installationId: installation.id,
+        };
+      }
+
+      const connection = await prisma.platformConnection.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          platform: 'leadconnector',
+          status: 'connected',
+          OR: [
+            { installationId: installation.id },
+            { platformAccountId: installation.externalAccountId },
+          ],
+        },
+        orderBy: [
+          { updatedAt: 'desc' },
+          { createdAt: 'desc' },
+        ],
+        select: {
+          id: true,
+          installationId: true,
+        },
+      });
+
+      if (!connection) {
+        throw new BadRequestError(
+          'This CRM workspace does not have a connected sender connection. Reconnect this workspace before sending.'
+        );
+      }
+
+      if (connection.installationId !== installation.id) {
+        await prisma.platformConnection.update({
+          where: { id: connection.id },
+          data: { installationId: installation.id },
+        });
+      }
+
+      return {
+        platformConnectionId: connection.id,
+        installationId: installation.id,
+      };
+    }
+
+    if (!input.platformConnectionId) {
+      return {};
+    }
+
+    const connection = await prisma.platformConnection.findFirst({
+      where: {
+        id: input.platformConnectionId,
+        organizationId: input.organizationId,
+      },
+    });
+
+    if (!connection) {
+      throw new BadRequestError('Platform connection not found for this organization');
+    }
+
+    if (connection.platform !== 'leadconnector') {
+      return {
+        platformConnectionId: connection.id,
+        installationId: null,
+      };
+    }
+
+    if (connection.status !== 'connected') {
+      throw new BadRequestError(
+        'The CRM connection for this message is not active. Reconnect this workspace before sending.'
+      );
+    }
+
+    if (connection.installationId) {
+      return {
+        platformConnectionId: connection.id,
+        installationId: connection.installationId,
+      };
+    }
+
+    let installation = await prisma.platformInstallation.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        platform: 'leadconnector',
+        externalAccountId: connection.platformAccountId,
+      },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!installation || installation.status !== 'connected') {
+      const syncedInstallation = await integrationService.syncInstallationFromConnection(connection);
+      installation = {
+        id: syncedInstallation.id,
+        status: syncedInstallation.status,
+      };
+    }
+
+    if (installation.status !== 'connected') {
+      throw new BadRequestError(
+        'The CRM installation for this message is not active. Reconnect this workspace before sending.'
+      );
+    }
+
+    await prisma.platformConnection.update({
+      where: { id: connection.id },
+      data: { installationId: installation.id },
+    });
+
+    return {
+      platformConnectionId: connection.id,
+      installationId: installation.id,
+    };
+  }
+
   private async resolveApprovedSenderContext(input: {
     organizationId: string;
     from: string;
     phoneNumberId?: string;
     campaignId?: string;
+    installationId?: string | null;
   }) {
     const formattedFrom = formatPhoneE164(input.from);
     const senderNumber = await prisma.phoneNumber.findFirst({
@@ -97,6 +278,44 @@ export class MessageService {
       throw new BadRequestError('Selected sender number is not linked to the specified campaign');
     }
 
+    if (input.installationId) {
+      const senderProfiles = await prisma.senderProfile.findMany({
+        where: {
+          organizationId: input.organizationId,
+          platform: 'leadconnector',
+          installationId: input.installationId,
+        },
+        select: {
+          id: true,
+          phoneNumberId: true,
+          senderKey: true,
+          phoneNumber: {
+            select: {
+              status: true,
+            },
+          },
+        },
+      });
+
+      const senderPolicy = evaluateInstallationSenderPolicy({
+        installationId: input.installationId,
+        selectedPhoneNumberId: senderNumber.id,
+        selectedSenderKey: senderNumber.phoneNumber,
+        senderProfiles: senderProfiles.map((profile) => ({
+          id: profile.id,
+          phoneNumberId: profile.phoneNumberId,
+          senderKey: profile.senderKey,
+          phoneNumberActive: profile.phoneNumber
+            ? profile.phoneNumber.status === 'active'
+            : undefined,
+        })),
+      });
+
+      if (!senderPolicy.allowed) {
+        throw new BadRequestError(senderPolicy.message);
+      }
+    }
+
     return {
       formattedFrom,
       phoneNumberId: senderNumber.id,
@@ -111,6 +330,7 @@ export class MessageService {
     const {
       organizationId,
       platformConnectionId,
+      installationId,
       campaignId,
       phoneNumberId,
       platformMessageId,
@@ -128,23 +348,31 @@ export class MessageService {
       throw new BadRequestError('Recipient has opted out from messaging');
     }
 
+    const platformContext = await this.resolveMessagePlatformContext({
+      organizationId,
+      platformConnectionId,
+      installationId,
+    });
+
     const senderContext = await this.resolveApprovedSenderContext({
       organizationId,
       from,
       phoneNumberId,
       campaignId,
+      installationId: platformContext.installationId,
     });
 
-    await subscriptionBillingService.assertCanSendMessage(
+    const billingEstimate = await walletBillingService.assertCanSendMessage({
       organizationId,
-      mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms'
-    );
+      body,
+      mediaUrls,
+    });
 
     // Create message record (queued status)
     const message = await prisma.message.create({
       data: {
         organizationId,
-        platformConnectionId,
+        platformConnectionId: platformContext.platformConnectionId,
         campaignId: senderContext.campaignId,
         phoneNumberId: senderContext.phoneNumberId,
         direction: 'outbound',
@@ -153,6 +381,7 @@ export class MessageService {
         to: formattedTo,
         body,
         mediaUrls,
+        billingEstimate: billingEstimate as any,
         platformMessageId,
         platformConversationId,
         status: 'queued',
@@ -190,14 +419,7 @@ export class MessageService {
         'Message sent successfully'
       );
 
-      await billingService.recordMessageAcceptance({
-        organizationId,
-        messageId: updatedMessage.id,
-        direction: 'outbound',
-        unit: mediaUrls && mediaUrls.length > 0 ? 'mms' : 'sms',
-        source: 'signalmash_acceptance',
-        billingKey: `msg:${updatedMessage.id}:outbound`,
-      });
+      await walletBillingService.recordOutboundMessageDebit(updatedMessage);
 
       await integrationService.syncMessageMapping(updatedMessage);
 
@@ -252,17 +474,24 @@ export class MessageService {
       throw new BadRequestError('Recipient has opted out from messaging');
     }
 
+    const platformContext = await this.resolveMessagePlatformContext({
+      organizationId: input.organizationId,
+      platformConnectionId: input.platformConnectionId,
+      installationId: input.installationId,
+    });
+
     const senderContext = await this.resolveApprovedSenderContext({
       organizationId: input.organizationId,
       from: input.from,
       phoneNumberId: input.phoneNumberId,
       campaignId: input.campaignId,
+      installationId: platformContext.installationId,
     });
 
     return prisma.message.create({
       data: {
         organizationId: input.organizationId,
-        platformConnectionId: input.platformConnectionId,
+        platformConnectionId: platformContext.platformConnectionId,
         campaignId: senderContext.campaignId,
         phoneNumberId: senderContext.phoneNumberId,
         platformMessageId: input.platformMessageId,
@@ -296,11 +525,23 @@ export class MessageService {
         throw new BadRequestError('Recipient has opted out from messaging');
       }
 
+      const platformContext = await this.resolveMessagePlatformContext({
+        organizationId: message.organizationId,
+        platformConnectionId: message.platformConnectionId,
+      });
+
       const senderContext = await this.resolveApprovedSenderContext({
         organizationId: message.organizationId,
         from: message.from,
         phoneNumberId: message.phoneNumberId ?? undefined,
         campaignId: message.campaignId ?? undefined,
+        installationId: platformContext.installationId,
+      });
+
+      const billingEstimate = await walletBillingService.assertCanSendMessage({
+        organizationId: message.organizationId,
+        body: message.body,
+        mediaUrls: Array.isArray(message.mediaUrls) ? message.mediaUrls as string[] : undefined,
       });
 
       await prisma.message.update({
@@ -310,13 +551,9 @@ export class MessageService {
           campaignId: senderContext.campaignId,
           phoneNumberId: senderContext.phoneNumberId,
           from: senderContext.formattedFrom,
+          billingEstimate: billingEstimate as any,
         },
       });
-
-      await subscriptionBillingService.assertCanSendMessage(
-        message.organizationId,
-        message.type === 'mms' ? 'mms' : 'sms'
-      );
 
       const result = await signalmashService.sendMessage({
         from: senderContext.formattedFrom,
@@ -335,14 +572,7 @@ export class MessageService {
         },
       });
 
-      await billingService.recordMessageAcceptance({
-        organizationId: updatedMessage.organizationId,
-        messageId: updatedMessage.id,
-        direction: 'outbound',
-        unit: updatedMessage.type === 'mms' ? 'mms' : 'sms',
-        source: 'signalmash_acceptance',
-        billingKey: `msg:${updatedMessage.id}:outbound`,
-      });
+      await walletBillingService.recordOutboundMessageDebit(updatedMessage);
 
       await integrationService.syncMessageMapping(updatedMessage);
 
@@ -426,18 +656,11 @@ export class MessageService {
       'Inbound message received'
     );
 
-    await billingService.recordMessageAcceptance({
-      organizationId: message.organizationId,
-      messageId: message.id,
-      direction: 'inbound',
-      unit: data.mediaUrls && data.mediaUrls.length > 0 ? 'mms' : 'sms',
-      source: 'signalmash_inbound',
-      billingKey: `msg:${message.id}:inbound`,
+    await walletBillingService.recordInboundMessageBilling(message);
+
+    return prisma.message.findUniqueOrThrow({
+      where: { id: message.id },
     });
-
-    await integrationService.syncMessageMapping(message);
-
-    return message;
   }
 
   /**
@@ -538,6 +761,7 @@ export class MessageService {
       where: {
         id,
         organizationId,
+        visible: true,
       },
     });
 
@@ -574,6 +798,7 @@ export class MessageService {
 
     const where: any = {
       organizationId,
+      visible: true,
       ...(platformConnectionId && { platformConnectionId }),
       ...(campaignId && { campaignId }),
       ...(direction && { direction }),
@@ -629,6 +854,7 @@ export class MessageService {
   }> {
     const where: any = {
       organizationId,
+      visible: true,
       ...(options?.campaignId && { campaignId: options.campaignId }),
       ...(options?.startDate || options?.endDate
         ? {

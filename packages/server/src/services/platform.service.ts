@@ -4,10 +4,21 @@
 
 import { prisma } from '../config/database.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
-import { NotFoundError, ConflictError, BadRequestError } from '../utils/errors.js';
+import { NotFoundError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import type { PlatformConnection, Platform, PlatformStatus } from '@prisma/client';
 import { integrationService } from './integration.service.js';
+import {
+  leadconnectorConnectionMatchesCompany,
+  reconcileLeadconnectorInstallWebhook,
+} from './ghl-install-reconciliation.service.js';
+import {
+  filterLeadconnectorInstallationsByCompanyId,
+  resolveLeadconnectorOrganizationIdentity,
+  scoreLeadconnectorOrganizationResources,
+  type LeadconnectorIdentityResolutionResult,
+  type LeadconnectorOrganizationResourceSummary,
+} from './crm-identity-resolution.service.js';
 
 interface CreateConnectionInput {
   organizationId: string;
@@ -32,7 +43,361 @@ interface UpdateConnectionInput {
   lastSyncAt?: Date;
 }
 
+interface LeadconnectorIdentityInput {
+  locationId?: string | null;
+  companyId?: string | null;
+  storedOrganizationId?: string | null;
+  requestedOrganizationId?: string | null;
+  allowUnanchoredStoredOrganization?: boolean;
+  allowUnanchoredRequestedOrganization?: boolean;
+  logContext?: string;
+}
+
 export class PlatformService {
+  private getConnectionMetadata(connection: Pick<PlatformConnection, 'metadata'>): Record<string, unknown> {
+    if (!connection.metadata || typeof connection.metadata !== 'object' || Array.isArray(connection.metadata)) {
+      return {};
+    }
+
+    return connection.metadata as Record<string, unknown>;
+  }
+
+  private getStringMetadataValue(
+    metadata: Record<string, unknown>,
+    key: string
+  ): string | null {
+    const value = metadata[key];
+    return typeof value === 'string' && value.trim().length > 0 ? value : null;
+  }
+
+  private getLeadconnectorCompanyIdFromConnectionInput(data: {
+    platformAccountId: string;
+    metadata?: Record<string, unknown>;
+  }): string | null {
+    const metadata = data.metadata ?? {};
+    return (
+      this.getStringMetadataValue(metadata, 'companyId') ??
+      this.getStringMetadataValue(metadata, 'ghlTokenCompanyId') ??
+      null
+    );
+  }
+
+  private getLeadconnectorLocationIdFromConnectionInput(data: {
+    platformAccountId: string;
+    metadata?: Record<string, unknown>;
+  }): string | null {
+    const metadata = data.metadata ?? {};
+    const tokenLocationId = this.getStringMetadataValue(metadata, 'ghlTokenLocationId');
+    if (tokenLocationId) {
+      return tokenLocationId;
+    }
+
+    const companyId = this.getLeadconnectorCompanyIdFromConnectionInput(data);
+    const authClass = this.getStringMetadataValue(metadata, 'ghlAuthClass')?.toLowerCase();
+    if (authClass === 'company' && companyId === data.platformAccountId) {
+      return null;
+    }
+
+    return data.platformAccountId;
+  }
+
+  private async getLeadconnectorInstallationsByCompanyId(companyId: string) {
+    const installations = await prisma.platformInstallation.findMany({
+      where: {
+        platform: 'leadconnector',
+      },
+      orderBy: [
+        { status: 'asc' },
+        { updatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
+    });
+
+    return filterLeadconnectorInstallationsByCompanyId(installations, companyId);
+  }
+
+  private async getLeadconnectorOrganizationResourceSummaries(
+    organizationIds: string[]
+  ): Promise<LeadconnectorOrganizationResourceSummary[]> {
+    const uniqueOrganizationIds = Array.from(new Set(organizationIds));
+
+    return Promise.all(
+      uniqueOrganizationIds.map(async (organizationId) => {
+        const [
+          brands,
+          campaigns,
+          phoneNumbers,
+          messages,
+          billingLedgerEntries,
+          billingAccount,
+        ] = await Promise.all([
+          prisma.brand.count({ where: { organizationId } }),
+          prisma.campaign.count({ where: { organizationId } }),
+          prisma.phoneNumber.count({ where: { organizationId } }),
+          prisma.message.count({ where: { organizationId } }),
+          prisma.billingLedgerEntry.count({ where: { organizationId } }),
+          prisma.billingAccount.findUnique({
+            where: { organizationId },
+            select: { walletBalance: true },
+          }),
+        ]);
+
+        return {
+          organizationId,
+          brands,
+          campaigns,
+          phoneNumbers,
+          messages,
+          billingLedgerEntries,
+          walletBalance: billingAccount?.walletBalance?.toString() ?? '0',
+        };
+      })
+    );
+  }
+
+  private logLeadconnectorIdentityResolution(
+    input: LeadconnectorIdentityInput,
+    result: LeadconnectorIdentityResolutionResult
+  ) {
+    logger.info(
+      {
+        context: input.logContext,
+        locationId: input.locationId ?? null,
+        companyId: input.companyId ?? null,
+        storedOrganizationId: input.storedOrganizationId ?? null,
+        requestedOrganizationId: input.requestedOrganizationId ?? null,
+        resolvedOrganizationId: result.organizationId,
+        resolutionSource: result.resolutionSource,
+        duplicateCandidateCounts: result.duplicateCandidateCounts,
+        staleStoredOrganizationId: result.staleStoredOrganizationId ?? null,
+        businessResourceScore: result.businessResourceScore,
+      },
+      'Resolved canonical CRM organization identity'
+    );
+  }
+
+  async resolveLeadconnectorOrganizationIdentity(
+    input: LeadconnectorIdentityInput
+  ): Promise<LeadconnectorIdentityResolutionResult> {
+    const result = await resolveLeadconnectorOrganizationIdentity(input, {
+      findConnectionsByLocation: async (locationId) =>
+        prisma.platformConnection.findMany({
+          where: {
+            platform: 'leadconnector',
+            platformAccountId: locationId,
+          },
+          orderBy: [
+            { status: 'asc' },
+            { updatedAt: 'desc' },
+            { createdAt: 'desc' },
+          ],
+        }),
+      findInstallationsByLocation: async (locationId) =>
+        prisma.platformInstallation.findMany({
+          where: {
+            platform: 'leadconnector',
+            externalAccountId: locationId,
+          },
+          orderBy: [
+            { status: 'asc' },
+            { updatedAt: 'desc' },
+            { createdAt: 'desc' },
+          ],
+        }),
+      findConnectionsByCompanyId: async (companyId) =>
+        this.findLeadconnectorConnectionsByCompanyId(companyId),
+      findInstallationsByCompanyId: async (companyId) =>
+        this.getLeadconnectorInstallationsByCompanyId(companyId),
+      getOrganizationResourceSummaries: async (organizationIds) =>
+        this.getLeadconnectorOrganizationResourceSummaries(organizationIds),
+    });
+
+    this.logLeadconnectorIdentityResolution(input, result);
+    return result;
+  }
+
+  async getLeadconnectorConnectionByLocationForOrganization(
+    organizationId: string,
+    locationId: string
+  ): Promise<PlatformConnection | null> {
+    return prisma.platformConnection.findFirst({
+      where: {
+        organizationId,
+        platform: 'leadconnector',
+        platformAccountId: locationId,
+      },
+      orderBy: [
+        { status: 'asc' },
+        { updatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
+    });
+  }
+
+  async getLeadconnectorInstallationByLocationForOrganization(
+    organizationId: string,
+    locationId: string
+  ) {
+    return prisma.platformInstallation.findFirst({
+      where: {
+        organizationId,
+        platform: 'leadconnector',
+        externalAccountId: locationId,
+      },
+      orderBy: [
+        { status: 'asc' },
+        { updatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
+    });
+  }
+
+  private async maybeReassignBlankLeadconnectorLocationAnchors(input: {
+    canonicalOrganizationId: string;
+    locationId: string;
+  }) {
+    const [connections, installations] = await Promise.all([
+      prisma.platformConnection.findMany({
+        where: {
+          platform: 'leadconnector',
+          platformAccountId: input.locationId,
+          organizationId: { not: input.canonicalOrganizationId },
+        },
+      }),
+      prisma.platformInstallation.findMany({
+        where: {
+          platform: 'leadconnector',
+          externalAccountId: input.locationId,
+          organizationId: { not: input.canonicalOrganizationId },
+        },
+      }),
+    ]);
+
+    const duplicateOrganizationIds = Array.from(new Set([
+      ...connections.map((connection) => connection.organizationId),
+      ...installations.map((installation) => installation.organizationId),
+    ]));
+
+    if (duplicateOrganizationIds.length === 0) {
+      return;
+    }
+
+    const summaries = await this.getLeadconnectorOrganizationResourceSummaries(duplicateOrganizationIds);
+    const blankDuplicateOrganizationIds = new Set(
+      summaries
+        .filter((summary) => scoreLeadconnectorOrganizationResources(summary) === 0)
+        .map((summary) => summary.organizationId)
+    );
+
+    if (blankDuplicateOrganizationIds.size === 0) {
+      logger.warn(
+        {
+          locationId: input.locationId,
+          canonicalOrganizationId: input.canonicalOrganizationId,
+          duplicateOrganizationIds,
+        },
+        'Detected non-blank duplicate CRM location anchors; leaving rows in place for reviewed repair'
+      );
+      return;
+    }
+
+    const canonicalConnection = await this.getLeadconnectorConnectionByLocationForOrganization(
+      input.canonicalOrganizationId,
+      input.locationId
+    );
+    const canonicalInstallation = await this.getLeadconnectorInstallationByLocationForOrganization(
+      input.canonicalOrganizationId,
+      input.locationId
+    );
+
+    const movableConnections = connections.filter((connection) =>
+      blankDuplicateOrganizationIds.has(connection.organizationId)
+    );
+    const movableInstallations = installations.filter((installation) =>
+      blankDuplicateOrganizationIds.has(installation.organizationId)
+    );
+
+    if (!canonicalConnection && movableConnections.length > 0) {
+      const [connectionToMove, ...connectionsToDisconnect] = movableConnections;
+      await prisma.platformConnection.update({
+        where: { id: connectionToMove.id },
+        data: { organizationId: input.canonicalOrganizationId },
+      });
+
+      if (connectionsToDisconnect.length > 0) {
+        await prisma.platformConnection.updateMany({
+          where: { id: { in: connectionsToDisconnect.map((connection) => connection.id) } },
+          data: { status: 'disconnected' },
+        });
+      }
+    } else if (movableConnections.length > 0) {
+      await prisma.platformConnection.updateMany({
+        where: { id: { in: movableConnections.map((connection) => connection.id) } },
+        data: { status: 'disconnected' },
+      });
+    }
+
+    if (!canonicalInstallation && movableInstallations.length > 0) {
+      const [installationToMove, ...installationsToDisconnect] = movableInstallations;
+      await prisma.platformInstallation.update({
+        where: { id: installationToMove.id },
+        data: { organizationId: input.canonicalOrganizationId },
+      });
+
+      if (installationsToDisconnect.length > 0) {
+        await prisma.platformInstallation.updateMany({
+          where: { id: { in: installationsToDisconnect.map((installation) => installation.id) } },
+          data: { status: 'disconnected' },
+        });
+      }
+    } else if (movableInstallations.length > 0) {
+      await prisma.platformInstallation.updateMany({
+        where: { id: { in: movableInstallations.map((installation) => installation.id) } },
+        data: { status: 'disconnected' },
+      });
+    }
+
+    await prisma.refreshToken.deleteMany({
+      where: {
+        user: {
+          organizationId: {
+            in: Array.from(blankDuplicateOrganizationIds),
+          },
+        },
+      },
+    });
+
+    logger.warn(
+      {
+        locationId: input.locationId,
+        canonicalOrganizationId: input.canonicalOrganizationId,
+        reassignedBlankDuplicateOrganizationIds: Array.from(blankDuplicateOrganizationIds),
+        movedConnection: !canonicalConnection && movableConnections.length > 0,
+        movedInstallation: !canonicalInstallation && movableInstallations.length > 0,
+      },
+      'Reassigned or disconnected blank duplicate CRM location anchors'
+    );
+  }
+
+  private async findLeadconnectorConnectionsByCompanyId(
+    companyId: string
+  ) {
+    const connections = await prisma.platformConnection.findMany({
+      where: {
+        platform: 'leadconnector',
+      },
+      orderBy: [
+        { status: 'asc' },
+        { updatedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
+    });
+
+    return connections.filter((connection) =>
+      leadconnectorConnectionMatchesCompany(connection, companyId)
+    );
+  }
+
   private async findLeadconnectorConnectionsForUninstall(input: {
     locationId?: string;
     companyId?: string;
@@ -57,36 +422,61 @@ export class PlatformService {
       return [];
     }
 
-    const connections = await prisma.platformConnection.findMany({
-      where: {
-        platform: 'leadconnector',
-      },
-      select: {
-        id: true,
-        organizationId: true,
-        installationId: true,
-        platformAccountId: true,
-        metadata: true,
-      },
-    });
+    const connections = await this.findLeadconnectorConnectionsByCompanyId(input.companyId);
 
-    return connections.filter((connection) => {
-      if (!connection.metadata || typeof connection.metadata !== 'object' || Array.isArray(connection.metadata)) {
-        return false;
-      }
-
-      return (connection.metadata as Record<string, unknown>).companyId === input.companyId;
-    });
+    return connections.map((connection) => ({
+      id: connection.id,
+      organizationId: connection.organizationId,
+      installationId: connection.installationId,
+      platformAccountId: connection.platformAccountId,
+      metadata: connection.metadata,
+    }));
   }
 
   /**
    * Create a new platform connection
    */
   async createConnection(data: CreateConnectionInput): Promise<PlatformConnection> {
+    let organizationId = data.organizationId;
+    const metadata = data.metadata ?? {};
+    const leadconnectorLocationId = data.platform === 'leadconnector'
+      ? this.getLeadconnectorLocationIdFromConnectionInput({
+          platformAccountId: data.platformAccountId,
+          metadata,
+        })
+      : null;
+    const leadconnectorCompanyId = data.platform === 'leadconnector'
+      ? this.getLeadconnectorCompanyIdFromConnectionInput({
+          platformAccountId: data.platformAccountId,
+          metadata,
+        })
+      : null;
+
+    if (data.platform === 'leadconnector') {
+      const identity = await this.resolveLeadconnectorOrganizationIdentity({
+        locationId: leadconnectorLocationId,
+        companyId: leadconnectorCompanyId,
+        requestedOrganizationId: data.organizationId,
+        allowUnanchoredRequestedOrganization: true,
+        logContext: 'create_connection',
+      });
+
+      if (identity.organizationId) {
+        organizationId = identity.organizationId;
+      }
+
+      if (leadconnectorLocationId && organizationId) {
+        await this.maybeReassignBlankLeadconnectorLocationAnchors({
+          canonicalOrganizationId: organizationId,
+          locationId: leadconnectorLocationId,
+        });
+      }
+    }
+
     // Check if connection already exists
     const existing = await prisma.platformConnection.findFirst({
       where: {
-        organizationId: data.organizationId,
+        organizationId,
         platform: data.platform,
         platformAccountId: data.platformAccountId,
       },
@@ -110,7 +500,7 @@ export class PlatformService {
 
     const connection = await prisma.platformConnection.create({
       data: {
-        organizationId: data.organizationId,
+        organizationId,
         platform: data.platform,
         platformAccountId: data.platformAccountId,
         platformAccountName: data.platformAccountName,
@@ -124,13 +514,22 @@ export class PlatformService {
     });
 
     logger.info(
-      { connectionId: connection.id, platform: data.platform },
+      {
+        connectionId: connection.id,
+        platform: data.platform,
+        organizationId,
+        requestedOrganizationId: data.organizationId,
+        locationId: leadconnectorLocationId,
+        companyId: leadconnectorCompanyId,
+      },
       'Platform connection created'
     );
 
     await integrationService.syncInstallationFromConnection(connection);
 
-    return connection;
+    return prisma.platformConnection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
   }
 
   /**
@@ -195,12 +594,14 @@ export class PlatformService {
   }
 
   async getLeadconnectorAgencyConnectionByCompanyId(
-    companyId: string
+    companyId: string,
+    organizationId?: string
   ): Promise<PlatformConnection | null> {
-    const exactMatch = await prisma.platformConnection.findFirst({
+    const exactMatches = await prisma.platformConnection.findMany({
       where: {
         platform: 'leadconnector',
         platformAccountId: companyId,
+        ...(organizationId ? { organizationId } : {}),
       },
       orderBy: [
         { updatedAt: 'desc' },
@@ -208,25 +609,103 @@ export class PlatformService {
       ],
     });
 
-    if (!exactMatch) {
+    if (exactMatches.length === 0) {
       return null;
     }
 
-    if (!exactMatch.metadata || typeof exactMatch.metadata !== 'object' || Array.isArray(exactMatch.metadata)) {
-      return null;
+    return exactMatches.find((exactMatch) => {
+      const metadata = this.getConnectionMetadata(exactMatch);
+      const metadataCompanyId =
+        typeof metadata.companyId === 'string' ? metadata.companyId : null;
+      const authClass =
+        typeof metadata.ghlAuthClass === 'string' ? metadata.ghlAuthClass.toLowerCase() : null;
+      const tokenLocationId =
+        typeof metadata.ghlTokenLocationId === 'string' ? metadata.ghlTokenLocationId : null;
+
+      return metadataCompanyId === companyId && authClass === 'company' && !tokenLocationId;
+    }) ?? null;
+  }
+
+  async handleLeadconnectorInstall(input: {
+    locationId?: string;
+    companyId?: string;
+    appId?: string;
+    payload?: unknown;
+  }) {
+    const result = await reconcileLeadconnectorInstallWebhook(input, {
+      resolveCanonicalOrganization: async ({ locationId, companyId }) =>
+        this.resolveLeadconnectorOrganizationIdentity({
+          locationId,
+          companyId,
+          logContext: 'install_webhook',
+          allowUnanchoredStoredOrganization: false,
+          allowUnanchoredRequestedOrganization: false,
+        }),
+      findConnectionByLocation: async (locationId, organizationId) =>
+        organizationId
+          ? this.getLeadconnectorConnectionByLocationForOrganization(organizationId, locationId)
+          : prisma.platformConnection.findFirst({
+              where: {
+                platform: 'leadconnector',
+                platformAccountId: locationId,
+              },
+            }),
+      findConnectionsByCompanyId: async (companyId) =>
+        this.findLeadconnectorConnectionsByCompanyId(companyId),
+      syncInstallationFromConnection: async (connection) =>
+        integrationService.syncInstallationFromConnection(connection as PlatformConnection),
+      updateInstallationMetadata: async (installationId, metadata) =>
+        prisma.platformInstallation.update({
+          where: { id: installationId },
+          data: { metadata: metadata as any },
+        }),
+      upsertPendingLocationInstallation: async ({ organizationId, locationId, metadata }) =>
+        prisma.platformInstallation.upsert({
+          where: {
+            organizationId_platform_externalAccountId: {
+              organizationId,
+              platform: 'leadconnector',
+              externalAccountId: locationId,
+            },
+          },
+          create: {
+            organizationId,
+            platform: 'leadconnector',
+            externalAccountId: locationId,
+            status: 'pending',
+            metadata: metadata as any,
+          },
+          update: {
+            status: 'pending',
+            metadata: metadata as any,
+          },
+        }),
+    });
+
+    if (result.status === 'deferred') {
+      logger.info(
+        {
+          locationId: result.locationId,
+          companyId: result.companyId,
+          appId: result.appId,
+        },
+        'Received CRM install webhook before the organization was known; OAuth callback will reconcile it'
+      );
+    } else if (result.status === 'reconciled') {
+      logger.info(
+        {
+          locationId: result.locationId,
+          companyId: result.companyId,
+          appId: result.appId,
+          organizationId: result.organizationId,
+          installationId: result.installationId,
+          action: result.action,
+        },
+        'Reconciled CRM install webhook into platform installation state'
+      );
     }
 
-    const metadata = exactMatch.metadata as Record<string, unknown>;
-    const metadataCompanyId =
-      typeof metadata.companyId === 'string' ? metadata.companyId : null;
-    const authClass =
-      typeof metadata.ghlAuthClass === 'string' ? metadata.ghlAuthClass.toLowerCase() : null;
-    const tokenLocationId =
-      typeof metadata.ghlTokenLocationId === 'string' ? metadata.ghlTokenLocationId : null;
-
-    return metadataCompanyId === companyId && authClass === 'company' && !tokenLocationId
-      ? exactMatch
-      : null;
+    return result;
   }
 
   async getConnectionSummaries(
@@ -298,7 +777,9 @@ export class PlatformService {
 
     await integrationService.syncInstallationFromConnection(connection);
 
-    return connection;
+    return prisma.platformConnection.findUniqueOrThrow({
+      where: { id },
+    });
   }
 
   /**
@@ -532,8 +1013,29 @@ export class PlatformService {
       email: string;
       phone?: string;
       website?: string;
+    },
+    options?: {
+      companyId?: string;
     }
   ): Promise<{ organizationId: string; isNew: boolean }> {
+    if (platform === 'leadconnector') {
+      const companyId = options?.companyId;
+      const identity = await this.resolveLeadconnectorOrganizationIdentity({
+        locationId: companyId === platformAccountId ? null : platformAccountId,
+        companyId,
+        logContext: 'find_or_create_organization',
+        allowUnanchoredStoredOrganization: false,
+        allowUnanchoredRequestedOrganization: false,
+      });
+
+      if (identity.organizationId) {
+        return {
+          organizationId: identity.organizationId,
+          isNew: false,
+        };
+      }
+    }
+
     // Check if this platform account is already connected
     const existingConnection = await this.getByPlatformAccount(platform, platformAccountId);
 
@@ -542,6 +1044,29 @@ export class PlatformService {
         organizationId: existingConnection.organizationId,
         isNew: false,
       };
+    }
+
+    if (platform === 'leadconnector' && options?.companyId) {
+      const companyConnections = await this.findLeadconnectorConnectionsByCompanyId(options.companyId);
+      const organizationAnchor = companyConnections[0];
+
+      if (organizationAnchor) {
+        logger.info(
+          {
+            platform,
+            platformAccountId,
+            companyId: options.companyId,
+            organizationId: organizationAnchor.organizationId,
+            anchorConnectionId: organizationAnchor.id,
+          },
+          'Resolved organization for CRM location connection from company-level install history'
+        );
+
+        return {
+          organizationId: organizationAnchor.organizationId,
+          isNew: false,
+        };
+      }
     }
 
     // Check if organization exists by email

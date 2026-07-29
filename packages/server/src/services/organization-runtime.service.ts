@@ -10,6 +10,13 @@ export class OrganizationRuntimeService {
         status: true,
         suspendedAt: true,
         suspensionReason: true,
+        billingAccount: {
+          select: {
+            status: true,
+            suspendedAt: true,
+            suspensionReason: true,
+          },
+        },
       },
     });
 
@@ -35,6 +42,20 @@ export class OrganizationRuntimeService {
         {
           action,
           suspendedAt: organization.suspendedAt?.toISOString() ?? null,
+        }
+      );
+    }
+
+    if (organization.billingAccount?.status === 'suspended') {
+      throw new AppError(
+        organization.billingAccount.suspensionReason ||
+          `Billing is suspended and this organization cannot ${action} right now.`,
+        'BILLING_SUSPENDED',
+        402,
+        true,
+        {
+          action,
+          suspendedAt: organization.billingAccount.suspendedAt?.toISOString() ?? null,
         }
       );
     }

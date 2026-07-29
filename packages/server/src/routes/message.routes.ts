@@ -94,6 +94,7 @@ router.post(
     const message = await messageService.send({
       organizationId: req.user!.organizationId,
       ...req.body,
+      installationId: req.user!.embeddedInstallationId ?? null,
     });
 
     res.status(201).json({

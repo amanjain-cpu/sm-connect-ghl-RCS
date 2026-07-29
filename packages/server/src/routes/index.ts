@@ -36,8 +36,19 @@ router.get('/webhook', (req, res) => {
   res.status(200).json({ success: true });
 });
 
+router.get('/webhook/ghl', (req, res) => {
+  res.status(200).json({ success: true });
+});
+
 router.post(
   '/webhook',
+  asyncHandler(async (req, res) => {
+    return handleCrmAppWebhook(req, res, { requireSignature: false });
+  })
+);
+
+router.post(
+  '/webhook/ghl',
   asyncHandler(async (req, res) => {
     return handleCrmAppWebhook(req, res, { requireSignature: false });
   })

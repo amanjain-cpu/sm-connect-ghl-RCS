@@ -9,10 +9,9 @@ import { phoneNumberService } from '../services/phoneNumber.service.js';
 import { validate, paginationSchema, idParamSchema } from '../middleware/validation.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { prisma } from '../config/database.js';
 import { AppError } from '../utils/errors.js';
-import { subscriptionBillingService } from '../services/subscription-billing.service.js';
 import { organizationRuntimeService } from '../services/organization-runtime.service.js';
+import { walletBillingService } from '../services/wallet-billing.service.js';
 
 const router: RouterType = Router();
 
@@ -131,9 +130,9 @@ router.get(
 
 const purchaseBodySchema = z.object({
   phoneNumber: z.string().min(10).max(15),
-  campaignId: z.string().uuid(),
+  campaignId: z.string().uuid().optional(),
   friendlyName: z.string().max(100).optional(),
-  monthlyPrice: z.coerce.number().positive().max(1000).optional(),
+  validationTo: z.string().min(10).max(20).optional(),
 });
 
 router.post(
@@ -144,38 +143,20 @@ router.post(
       req.user!.organizationId,
       'start number checkout'
     );
-    const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
+    const { phoneNumber, campaignId, friendlyName, validationTo } = req.body as z.infer<typeof purchaseBodySchema>;
 
-    const campaign = await prisma.campaign.findFirst({
-      where: {
-        id: campaignId,
-        organizationId: req.user!.organizationId,
-      },
-      select: {
-        id: true,
-        status: true,
-        signalmashCampaignId: true,
-      },
-    });
-
-    if (!campaign) {
-      throw new AppError('Campaign not found', 'CAMPAIGN_NOT_FOUND', 404);
-    }
-
-    if (!['pending_approval', 'approved'].includes(campaign.status) || !campaign.signalmashCampaignId) {
-      throw new AppError('Select a submitted provider-linked campaign before checkout', 'CAMPAIGN_NOT_READY', 400);
-    }
-
-    const result = await subscriptionBillingService.preparePhoneNumberCheckout({
-      organizationId: req.user!.organizationId,
-      phoneNumber,
-      campaignId,
-      friendlyName,
-    });
+    const result = await walletBillingService.preparePhoneNumberProvisioning(
+      req.user!.organizationId
+    );
 
     res.status(200).json({
       success: true,
-      data: result,
+      data: {
+        ...result,
+        phoneNumber,
+        campaignId,
+        friendlyName,
+      },
     });
   })
 );
@@ -188,98 +169,11 @@ router.post(
   '/checkout/complete',
   validate({ body: completeCheckoutBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
-    await organizationRuntimeService.assertActionAllowed(
-      req.user!.organizationId,
-      'complete number checkout'
+    throw new AppError(
+      'Phone number checkout has been replaced by wallet-based provisioning.',
+      'PHONE_NUMBER_CHECKOUT_DISABLED',
+      410
     );
-    const { sessionId } = req.body as z.infer<typeof completeCheckoutBodySchema>;
-    const metadata = await subscriptionBillingService.completePhoneNumberCheckout(
-      req.user!.organizationId,
-      sessionId
-    );
-
-    try {
-      const number = await phoneNumberService.purchaseNumber(
-        req.user!.organizationId,
-        metadata.phoneNumber,
-        {
-          campaignId: metadata.campaignId,
-          friendlyName: metadata.friendlyName || undefined,
-        }
-      );
-
-      res.status(201).json({
-        success: true,
-        data: number,
-      });
-    } catch (error) {
-      if (error instanceof AppError && error.code === 'NUMBER_ALREADY_OWNED') {
-        const existing = await prisma.phoneNumber.findUnique({
-          where: { phoneNumber: metadata.phoneNumber },
-          include: {
-            campaign: {
-              select: {
-                id: true,
-                name: true,
-                status: true,
-              },
-            },
-          },
-        });
-
-        if (existing?.organizationId === req.user!.organizationId) {
-          res.status(200).json({
-            success: true,
-            data: existing,
-          });
-          return;
-        }
-      }
-
-      if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
-        const campaign = await prisma.campaign.findFirst({
-          where: {
-            id: metadata.campaignId,
-            organizationId: req.user!.organizationId,
-          },
-          select: {
-            id: true,
-            status: true,
-            signalmashCampaignId: true,
-          },
-        });
-
-        if (campaign?.status === 'pending_approval' && campaign.signalmashCampaignId) {
-          await prisma.campaign.update({
-            where: { id: campaign.id },
-            data: {
-              numberLinkIntent: {
-                mode: 'buy_new',
-                phoneNumber: metadata.phoneNumber,
-                ...(metadata.friendlyName ? { friendlyName: metadata.friendlyName } : {}),
-              } as any,
-              numberLinkStatus: 'requested',
-              numberLinkError: error.message,
-              numberLinkAttemptedAt: new Date(),
-              numberLinkCompletedAt: null,
-            },
-          });
-
-          res.status(202).json({
-            success: true,
-            data: {
-              pending: true,
-              campaignId: campaign.id,
-              phoneNumber: metadata.phoneNumber,
-              message: 'Payment completed. Signalmash did not provision the DID yet, so the app will retry after campaign approval.',
-            },
-          });
-          return;
-        }
-      }
-
-      throw error;
-    }
   })
 );
 
@@ -291,41 +185,50 @@ router.post(
       req.user!.organizationId,
       'purchase numbers'
     );
-    const { phoneNumber, campaignId, friendlyName } = req.body as z.infer<typeof purchaseBodySchema>;
+    const { phoneNumber, campaignId, friendlyName, validationTo } = req.body as z.infer<typeof purchaseBodySchema>;
+    const installationId = req.user!.embeddedInstallationId ?? null;
 
-    const subscription = await subscriptionBillingService.assertCanProvisionPhoneNumber(
-      req.user!.organizationId
-    );
-    const activePhoneNumbers = await prisma.phoneNumber.count({
-      where: {
-        organizationId: req.user!.organizationId,
-        status: 'active',
-      },
-    });
-
-    if (activePhoneNumbers >= subscription.phoneNumbersIncluded) {
-      throw new AppError(
-        'This purchase requires the extra phone-number checkout flow first.',
-        'PHONE_NUMBER_OVERAGE_PAYMENT_REQUIRED',
-        402,
-        true,
+    try {
+      const number = await phoneNumberService.purchaseNumber(
+        req.user!.organizationId,
+        phoneNumber,
         {
-          activePhoneNumbers,
-          includedPhoneNumbers: subscription.phoneNumbersIncluded,
+          campaignId,
+          friendlyName,
+          makeDefaultSender: Boolean(installationId && validationTo),
+          validationTo,
+          installationId,
         }
       );
+
+      res.status(201).json({
+        success: true,
+        data: number,
+      });
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'PROVIDER_NUMBER_PROVISIONING_UNAVAILABLE') {
+        const pendingIntent = await phoneNumberService.savePendingNumberPurchaseIntent({
+          organizationId: req.user!.organizationId,
+          campaignId,
+          phoneNumber,
+          friendlyName,
+          makeDefaultSender: Boolean(installationId && validationTo),
+          validationTo,
+          installationId,
+          error,
+        });
+
+        if (pendingIntent) {
+          res.status(202).json({
+            success: true,
+            data: pendingIntent,
+          });
+          return;
+        }
+      }
+
+      throw error;
     }
-
-    const number = await phoneNumberService.purchaseNumber(
-      req.user!.organizationId,
-      phoneNumber,
-      { campaignId, friendlyName }
-    );
-
-    res.status(201).json({
-      success: true,
-      data: number,
-    });
   })
 );
 
@@ -338,28 +241,37 @@ const updateBodySchema = z.object({
   campaignId: z.string().uuid().nullable().optional(),
   makeDefault: z.boolean().optional(),
   confirmReassignment: z.boolean().optional(),
+  validationTo: z.string().min(10).max(20).optional(),
+});
+
+const updatePhoneNumberHandler = asyncHandler(async (req: Request, res: Response) => {
+  await organizationRuntimeService.assertActionAllowed(
+    req.user!.organizationId,
+    'update number assignments'
+  );
+  const number = await phoneNumberService.updateNumber(
+    req.user!.organizationId,
+    req.params.id,
+    req.body,
+    { installationId: req.user!.embeddedInstallationId ?? null }
+  );
+
+  res.json({
+    success: true,
+    data: number,
+  });
 });
 
 router.patch(
   '/:id',
   validate({ params: idParamSchema, body: updateBodySchema }),
-  asyncHandler(async (req: Request, res: Response) => {
-    await organizationRuntimeService.assertActionAllowed(
-      req.user!.organizationId,
-      'update number assignments'
-    );
-    const number = await phoneNumberService.updateNumber(
-      req.user!.organizationId,
-      req.params.id,
-      req.body,
-      { installationId: req.user!.embeddedInstallationId ?? null }
-    );
+  updatePhoneNumberHandler
+);
 
-    res.json({
-      success: true,
-      data: number,
-    });
-  })
+router.put(
+  '/:id',
+  validate({ params: idParamSchema, body: updateBodySchema }),
+  updatePhoneNumberHandler
 );
 
 // ===========================================

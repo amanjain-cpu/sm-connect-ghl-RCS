@@ -31,7 +31,10 @@ import {
 import { api } from '@/lib/api';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { recordProvisioningLock } from '@/lib/phone-number-provisioning';
+import { ProvisioningNoteDialog } from '@/components/phone-numbers/provisioning-note-dialog';
 import { notify } from '@/stores/notification.store';
+import { useAuthStore } from '@/stores/auth.store';
 
 interface AvailableNumber {
   phoneNumber: string;
@@ -42,7 +45,7 @@ interface AvailableNumber {
     mms: boolean;
     voice: boolean;
   };
-  monthlyPrice: number;
+  monthlyPrice?: number | null;
 }
 
 interface Campaign {
@@ -75,7 +78,23 @@ const STATE_OPTIONS = [
   { label: 'New Jersey', value: 'NJ' },
 ];
 
+const campaignStatusLabel = (status: string) =>
+  status === 'pending_approval'
+    ? 'Pending approval'
+    : status === 'approved'
+      ? 'Approved'
+      : status.replace(/_/g, ' ');
+
+const isPurchasableCampaign = (campaign: Campaign) =>
+  ['pending_approval', 'approved'].includes(campaign.status);
+
+const formatNumberPricing = (monthlyPrice?: number | null) =>
+  typeof monthlyPrice === 'number' && monthlyPrice > 0
+    ? `$${monthlyPrice.toFixed(2)}`
+    : 'Wallet pricing applies';
+
 export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumbersDialogProps) {
+  const { user } = useAuthStore();
   const [step, setStep] = useState<'search' | 'select' | 'purchase'>('search');
   const [isSearching, setIsSearching] = useState(false);
   const [isPurchasing, setIsPurchasing] = useState(false);
@@ -86,9 +105,12 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
   const [selectedNumber, setSelectedNumber] = useState<AvailableNumber | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
+  const [phoneNumberMonthlyRate, setPhoneNumberMonthlyRate] = useState<number | null>(null);
   const [friendlyName, setFriendlyName] = useState('');
   const [error, setError] = useState('');
   const [providerBlocked, setProviderBlocked] = useState<string | null>(null);
+  const [provisioningNoticeNumber, setProvisioningNoticeNumber] = useState<string | null>(null);
+  const hasEmbeddedLocationContext = Boolean(user?.embeddedInstallationId);
 
   useEffect(() => {
     if (open) {
@@ -98,12 +120,19 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
 
   const loadCampaigns = async () => {
     try {
-      const response = await api.getCampaigns({ status: 'approved' });
-      if (response.success && response.data) {
-        setCampaigns(response.data);
+      const [campaignsResponse, billingResponse] = await Promise.all([
+        api.getCampaigns(),
+        api.getWalletBillingSummary(),
+      ]);
+      if (campaignsResponse.success && campaignsResponse.data) {
+        setCampaigns(campaignsResponse.data.filter(isPurchasableCampaign));
+      }
+
+      if (billingResponse.success && billingResponse.data?.rates) {
+        setPhoneNumberMonthlyRate(billingResponse.data.rates.phoneNumberMonthly);
       }
     } catch (error) {
-      console.error('Failed to load campaigns:', error);
+      console.error('Failed to load number purchase setup:', error);
     }
   };
 
@@ -153,31 +182,65 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
   const handlePurchase = async () => {
     if (!selectedNumber) return;
 
+    const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedCampaignId);
+    let validationTo: string | undefined;
+    if (hasEmbeddedLocationContext && selectedCampaign?.status === 'approved') {
+      const entered = window.prompt('Send a validation SMS to which recipient number before making this the default sender?');
+      if (!entered?.trim()) {
+        notify.error('Validation recipient required', 'Enter a recipient number to validate the default sender before purchase.');
+        return;
+      }
+      validationTo = entered.trim();
+    }
+
     setIsPurchasing(true);
     setError('');
 
     try {
       const response = await api.createPhoneNumberCheckout({
         phoneNumber: selectedNumber.phoneNumber,
-        campaignId: selectedCampaignId,
+        campaignId: selectedCampaignId || undefined,
         friendlyName: friendlyName || undefined,
-        monthlyPrice: selectedNumber.monthlyPrice,
       });
 
-      if (response.success && response.data?.mode === 'checkout' && response.data.checkoutUrl) {
-        window.location.href = response.data.checkoutUrl;
-        return;
-      }
-
-      if (response.success && response.data?.mode === 'included') {
-        await api.purchasePhoneNumber({
+      if (response.success && response.data?.mode === 'wallet_ready') {
+        const purchaseResponse = await api.purchasePhoneNumber({
           phoneNumber: selectedNumber.phoneNumber,
-          campaignId: selectedCampaignId,
+          campaignId: selectedCampaignId || undefined,
           friendlyName: friendlyName || undefined,
+          validationTo,
         });
+
+        const purchaseData = purchaseResponse.data;
+        let purchasedPhoneNumber: string | null = null;
+        if (purchaseData && !('pending' in purchaseData)) {
+          recordProvisioningLock({
+            phoneNumberId: purchaseData.id,
+            phoneNumber: purchaseData.phoneNumber,
+            purchasedAt: new Date(),
+          });
+          purchasedPhoneNumber = purchaseData.phoneNumber;
+        }
+
         await onPurchased();
-        notify.success('Number purchased', 'The selected phone number was added to your inventory.');
+        if (purchaseData && 'pending' in purchaseData && purchaseData.pending) {
+          notify.success('Number selection saved', purchaseData.message);
+        } else {
+          notify.success(
+            'Number purchased',
+            !selectedCampaign
+              ? 'The selected phone number was purchased. SMS/MMS starts after an approved campaign is linked.'
+              : selectedCampaign.status === 'pending_approval'
+                ? 'The selected phone number was purchased and queued for campaign assignment. SMS/MMS starts after campaign approval.'
+                : hasEmbeddedLocationContext
+                  ? 'The selected phone number was linked and saved as the default sender.'
+                  : 'The selected phone number was linked.'
+          );
+        }
         handleClose();
+        if (purchasedPhoneNumber) {
+          setProvisioningNoticeNumber(purchasedPhoneNumber);
+        }
         return;
       }
     } catch (error: unknown) {
@@ -207,14 +270,16 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
     setAvailableNumbers([]);
     setSelectedNumber(null);
     setSelectedCampaignId('');
+    setPhoneNumberMonthlyRate(null);
     setFriendlyName('');
     setError('');
     onClose();
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+    <>
+      <Dialog open={open} onOpenChange={handleClose}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Phone className="h-5 w-5" />
@@ -225,7 +290,7 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
           <DialogDescription>
             {step === 'search' && 'Find available phone numbers by area code or containing specific digits'}
             {step === 'select' && `Found ${availableNumbers.length} available numbers`}
-            {step === 'purchase' && 'Configure and purchase your selected number against an approved campaign'}
+            {step === 'purchase' && 'Purchase the selected number now; campaign assignment can happen after approval'}
           </DialogDescription>
         </DialogHeader>
 
@@ -243,7 +308,13 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                 <div className="grid gap-4">
                   <div className="space-y-2">
                     <Label>State</Label>
-                    <Select value={state} onValueChange={setState}>
+                    <Select
+                      value={state}
+                      onValueChange={(value) => {
+                        setState(value);
+                        setAreaCode('');
+                      }}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Select a state for provider-backed search" />
                       </SelectTrigger>
@@ -265,7 +336,10 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                     <Input
                       placeholder="e.g., 415, 212, 310"
                       value={areaCode}
-                      onChange={(e) => setAreaCode(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                      onChange={(e) => {
+                        setAreaCode(e.target.value.replace(/\D/g, '').slice(0, 3));
+                        setState('');
+                      }}
                       leftIcon={<MapPin className="h-4 w-4" />}
                     />
                     <p className="text-xs text-muted-foreground">
@@ -301,7 +375,10 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                               variant={areaCode === code ? 'default' : 'outline'}
                               size="sm"
                               className="h-7 text-xs"
-                              onClick={() => setAreaCode(code)}
+                              onClick={() => {
+                                setAreaCode(code);
+                                setState('');
+                              }}
                             >
                               {code}
                             </Button>
@@ -396,9 +473,9 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                               </div>
                             </div>
                             <div className="text-right">
-                              <p className="text-sm text-muted-foreground">Monthly</p>
+                              <p className="text-sm text-muted-foreground">Pricing</p>
                               <p className="font-semibold text-lg">
-                                ${number.monthlyPrice.toFixed(2)}
+                                {formatNumberPricing(phoneNumberMonthlyRate)}
                               </p>
                             </div>
                           </div>
@@ -438,9 +515,9 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                         </p>
                       </div>
                       <div className="text-right">
-                        <p className="text-sm text-muted-foreground">Monthly Cost</p>
+                        <p className="text-sm text-muted-foreground">Pricing</p>
                         <p className="font-bold text-2xl text-primary">
-                          ${selectedNumber.monthlyPrice.toFixed(2)}
+                          {formatNumberPricing(phoneNumberMonthlyRate)}
                         </p>
                       </div>
                     </div>
@@ -459,31 +536,41 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                   </div>
 
                   <div className="space-y-2">
-                    <Label>Assign to Approved Campaign</Label>
+                    <Label>Assign to Campaign (optional)</Label>
                     <Select
                       value={selectedCampaignId}
                       onValueChange={setSelectedCampaignId}
                     >
                       <SelectTrigger>
-                        <SelectValue placeholder="Select an approved campaign" />
+                        <SelectValue placeholder="Leave unassigned until approval" />
                       </SelectTrigger>
                       <SelectContent>
                         {campaigns.map((campaign) => (
                           <SelectItem key={campaign.id} value={campaign.id}>
-                            {campaign.name}
+                            {campaign.name} - {campaignStatusLabel(campaign.status)}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                    {selectedCampaignId ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedCampaignId('')}
+                      >
+                        Leave unassigned
+                      </Button>
+                    ) : null}
                     <p className="text-xs text-muted-foreground">
-                      Number purchase now requires an approved campaign so provisioning stays aligned with the embedded onboarding flow.
+                      Buying is available now. SMS/MMS starts only after an approved campaign is linked.
                     </p>
                   </div>
                 </div>
 
                 {campaigns.length === 0 && (
-                  <p className="text-sm text-destructive">
-                    No approved campaigns are available yet. Finish campaign approval before purchasing a number.
+                  <p className="text-sm text-muted-foreground">
+                    No submitted campaigns are available yet. The number will be kept unassigned after purchase.
                   </p>
                 )}
 
@@ -494,17 +581,27 @@ export function SearchNumbersDialog({ open, onClose, onPurchased }: SearchNumber
                 <Button
                   onClick={handlePurchase}
                   isLoading={isPurchasing}
-                  disabled={!selectedCampaignId || campaigns.length === 0}
                   className="w-full"
                   leftIcon={<Check className="h-4 w-4" />}
                 >
-                  Purchase for ${selectedNumber.monthlyPrice.toFixed(2)}/month
+                  Continue to purchase
                 </Button>
               </motion.div>
             )}
           </AnimatePresence>
         </div>
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
+
+      <ProvisioningNoteDialog
+        open={Boolean(provisioningNoticeNumber)}
+        phoneNumber={provisioningNoticeNumber}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setProvisioningNoticeNumber(null);
+          }
+        }}
+      />
+    </>
   );
 }

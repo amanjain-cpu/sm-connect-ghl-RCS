@@ -29,6 +29,30 @@ interface ApiResponse<T> {
   };
 }
 
+export type EmbeddedSsoAuthenticatedData = {
+  action: 'authenticated';
+  user: any;
+  organization: any;
+  tokens: { accessToken: string; refreshToken: string; expiresIn: number };
+  locationId: string;
+  installationId: string;
+  connectionId: string;
+};
+
+export type EmbeddedSsoReconnectRequiredData = {
+  action: 'reconnect_required';
+  authUrl: string;
+  locationId: string;
+  installationId: string;
+  message: string;
+  companyId?: string | null;
+  organizationId?: string | null;
+};
+
+export type EmbeddedSsoExchangeData =
+  | EmbeddedSsoAuthenticatedData
+  | EmbeddedSsoReconnectRequiredData;
+
 class ApiClient {
   private baseUrl: string;
   private accessToken: string | null = null;
@@ -51,10 +75,16 @@ class ApiClient {
     return this.accessToken;
   }
 
+  clearAuthTokens() {
+    this.setAccessToken(null);
+    safeRemoveItem('refreshToken');
+  }
+
   /**
    * Set tokens from OAuth callback (SSO flow)
    */
   setTokensFromOAuth(accessToken: string, refreshToken: string) {
+    this.clearAuthTokens();
     this.setAccessToken(accessToken);
     safeSetItem('refreshToken', refreshToken);
   }
@@ -67,12 +97,10 @@ class ApiClient {
   }
 
   async exchangeEmbeddedSso(encryptedData: string) {
-    return this.post<{
-      user: any;
-      organization: any;
-      tokens: { accessToken: string; refreshToken: string; expiresIn: number };
-      locationId: string;
-    }>(`/platforms/${crmPublicPlatformId}/sso/exchange`, { encryptedData });
+    return this.post<EmbeddedSsoExchangeData>(
+      `/platforms/${crmPublicPlatformId}/sso/exchange`,
+      { encryptedData }
+    );
   }
 
   private async request<T>(
@@ -239,8 +267,7 @@ class ApiClient {
     } catch {
       // Ignore errors during logout
     }
-    this.setAccessToken(null);
-    safeRemoveItem('refreshToken');
+    this.clearAuthTokens();
   }
 
   async getMe() {
@@ -320,6 +347,7 @@ class ApiClient {
       mode: 'buy_new';
       phoneNumber: string;
       friendlyName?: string;
+      makeDefaultSender?: boolean;
     };
   }) {
     return this.post<any>(`/campaigns/${id}/submit`, data);
@@ -330,10 +358,12 @@ class ApiClient {
     phoneNumberId: string;
     friendlyName?: string;
     confirmReassignment?: boolean;
+    makeDefaultSender?: boolean;
   } | {
     mode: 'buy_new';
     phoneNumber: string;
     friendlyName?: string;
+    makeDefaultSender?: boolean;
   }) {
     return this.post<any>(`/campaigns/${id}/link-number`, data);
   }
@@ -404,6 +434,10 @@ class ApiClient {
     return this.get<any>('/billing/subscription');
   }
 
+  async getWalletBillingSummary() {
+    return this.get<any>('/billing/wallet');
+  }
+
   async createSubscriptionCheckout(plan: 'starter' | 'growth' | 'scale') {
     return this.post<any>('/billing/subscription/checkout', { plan });
   }
@@ -413,18 +447,48 @@ class ApiClient {
   }
 
   async createBillingPortalSession() {
-    return this.post<{ url: string }>('/billing/subscription/portal');
+    return this.post<{ url: string }>('/billing/wallet/portal');
+  }
+
+  async createPaymentMethodSetupSession() {
+    return this.post<{ checkoutUrl: string; sessionId: string }>('/billing/wallet/payment-method/setup');
+  }
+
+  async completePaymentMethodSetup(data: { sessionId: string }) {
+    return this.post<any>('/billing/wallet/payment-method/setup/complete', data);
   }
 
   async createMessageCreditTopupCheckout(amountDollars: number) {
     return this.post<{ checkoutUrl: string; sessionId: string; amountDollars: number }>(
-      '/billing/message-credits/checkout',
+      '/billing/wallet/top-ups/checkout',
       { amountDollars }
     );
   }
 
   async completeMessageCreditTopupCheckout(data: { sessionId: string }) {
-    return this.post<any>('/billing/message-credits/checkout/complete', data);
+    return this.post<any>('/billing/wallet/top-ups/checkout/complete', data);
+  }
+
+  async createOnboardingCheckout(data: {
+    topUpAmount: number;
+    includeEnhancedVetting?: boolean;
+    includeCampaignExpedite?: boolean;
+    phoneNumber?: string;
+    friendlyName?: string;
+    campaignId?: string;
+  }) {
+    return this.post<{ checkoutUrl: string; sessionId: string; onboardingCart: any }>(
+      '/billing/wallet/onboarding/checkout',
+      data
+    );
+  }
+
+  async completeOnboardingCheckout(data: { sessionId: string }) {
+    return this.post<any>('/billing/wallet/onboarding/checkout/complete', data);
+  }
+
+  async releaseHeldInboundMessages() {
+    return this.post<any>('/billing/wallet/release-held');
   }
 
   async authorizeMarketplaceBillingInstall(data: {
@@ -549,21 +613,35 @@ class ApiClient {
     return this.get<any>(`/phone-numbers/${id}`);
   }
 
-  async purchasePhoneNumber(data: { phoneNumber: string; campaignId?: string; friendlyName?: string }) {
-    return this.post<any>('/phone-numbers/purchase', data);
+  async purchasePhoneNumber(data: { phoneNumber: string; campaignId?: string; friendlyName?: string; validationTo?: string }) {
+    return this.post<
+      | {
+          id: string;
+          phoneNumber: string;
+          status: string;
+          campaignId?: string | null;
+        }
+      | {
+          pending: true;
+          campaignId: string;
+          phoneNumber: string;
+          message: string;
+        }
+    >('/phone-numbers/purchase', data);
   }
 
-  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId: string; friendlyName?: string; monthlyPrice?: number }) {
+  async createPhoneNumberCheckout(data: { phoneNumber: string; campaignId?: string; friendlyName?: string }) {
     return this.post<
-      | { mode: 'included'; activePhoneNumbers: number; includedPhoneNumbers: number }
-      | {
-          mode: 'checkout';
-          checkoutUrl: string;
-          sessionId: string;
-          activePhoneNumbers: number;
-          includedPhoneNumbers: number;
-          immediateChargeAmount: number;
-        }
+      {
+        mode: 'wallet_ready';
+        activePhoneNumbers: number;
+        phoneNumberMonthlyRate: number;
+        pricingTier: string;
+        fundingSource: 'onboarding_package' | 'wallet';
+        phoneNumber: string;
+        campaignId?: string;
+        friendlyName?: string;
+      }
     >('/phone-numbers/checkout', data);
   }
 
@@ -584,7 +662,7 @@ class ApiClient {
     >('/phone-numbers/checkout/complete', data);
   }
 
-  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean; confirmReassignment?: boolean }) {
+  async updatePhoneNumber(id: string, data: { friendlyName?: string; campaignId?: string | null; makeDefault?: boolean; confirmReassignment?: boolean; validationTo?: string }) {
     return this.patch<any>(`/phone-numbers/${id}`, data);
   }
 

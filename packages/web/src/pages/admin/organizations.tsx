@@ -14,10 +14,29 @@ import {
   Eye,
   CheckCircle2,
   XCircle,
+  CreditCard,
+  Wallet,
+  DollarSign,
+  Receipt,
+  ListChecks,
+  Activity,
+  Settings,
+  PlayCircle,
+  Unlock,
+  ExternalLink,
+  Ban,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -28,7 +47,7 @@ import {
 } from '@/components/ui/dialog';
 import { AdminHeader } from '@/components/layout/admin-header';
 import { adminApi } from '@/stores/admin.store';
-import { formatNumber, formatDate } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import { notify } from '@/stores/notification.store';
 
 interface Organization {
@@ -37,9 +56,11 @@ interface Organization {
   email: string;
   status: 'active' | 'suspended';
   suspensionReason?: string | null;
-  subscription?: {
-    plan?: string | null;
+  billingAccount?: {
     status?: string | null;
+    pricingTier?: string | null;
+    walletBalance?: number | string | null;
+    suspensionReason?: string | null;
   } | null;
   createdAt: string;
   _count: {
@@ -58,6 +79,25 @@ interface PaginationMeta {
   totalPages: number;
 }
 
+type BillingTab = 'overview' | 'ledger' | 'charges' | 'actions';
+type BillingPricingTier = 'tier_250' | 'tier_500' | 'tier_1400';
+type BillingAccountStatus = 'active' | 'suspended';
+
+const formatCurrency = (value: unknown, precise = false) =>
+  new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: precise ? 4 : 2,
+    maximumFractionDigits: precise ? 4 : 2,
+  }).format(Number(value ?? 0));
+
+const labelize = (value?: string | null) => value ? value.replace(/_/g, ' ') : 'n/a';
+
+const formatNullableDate = (value?: string | null) => value ? formatDateTime(value) : 'Not set';
+
+const billingStatusVariant = (status?: string | null): 'success' | 'warning' | 'destructive' | 'secondary' =>
+  status === 'active' ? 'success' : status === 'suspended' ? 'destructive' : status ? 'warning' : 'secondary';
+
 export function AdminOrganizationsPage() {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [meta, setMeta] = useState<PaginationMeta | null>(null);
@@ -69,7 +109,25 @@ export function AdminOrganizationsPage() {
   const [showInspectDialog, setShowInspectDialog] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
   const [onboardingDetail, setOnboardingDetail] = useState<any | null>(null);
+  const [showBillingDialog, setShowBillingDialog] = useState(false);
+  const [isBillingLoading, setIsBillingLoading] = useState(false);
+  const [billingDetail, setBillingDetail] = useState<any | null>(null);
+  const [billingTab, setBillingTab] = useState<BillingTab>('overview');
+  const [billingAction, setBillingAction] = useState<string | null>(null);
   const [activeOrgAction, setActiveOrgAction] = useState<string | null>(null);
+  const [walletAdjustmentForm, setWalletAdjustmentForm] = useState({
+    amount: '',
+    reason: '',
+  });
+  const [billingAccountForm, setBillingAccountForm] = useState<{
+    status: BillingAccountStatus;
+    pricingTier: BillingPricingTier;
+    suspensionReason: string;
+  }>({
+    status: 'active',
+    pricingTier: 'tier_250',
+    suspensionReason: '',
+  });
   const [linkForm, setLinkForm] = useState({
     brandName: '',
     signalmashBrandId: '',
@@ -81,7 +139,9 @@ export function AdminOrganizationsPage() {
     signalmashNumberId: '',
     friendlyName: '',
     configureWebhook: true,
-    makeDefaultSender: true,
+    makeDefaultSender: false,
+    validationTo: '',
+    installationId: '',
   });
 
   const loadOrganizations = async () => {
@@ -114,9 +174,11 @@ export function AdminOrganizationsPage() {
       tcrCampaignId: '',
       phoneNumber: '',
       signalmashNumberId: '',
-      friendlyName: `${organization.name} Default Sender`,
+      friendlyName: `${organization.name} Sender`,
       configureWebhook: true,
-      makeDefaultSender: true,
+      makeDefaultSender: false,
+      validationTo: '',
+      installationId: '',
     });
     setShowLinkDialog(true);
   };
@@ -143,12 +205,191 @@ export function AdminOrganizationsPage() {
     await loadOrganizationOnboarding(organization.id);
   };
 
+  const applyBillingDetail = (detail: any) => {
+    setBillingDetail(detail);
+    const account = detail?.walletSummary?.account;
+    if (account) {
+      setBillingAccountForm({
+        status: account.status === 'suspended' ? 'suspended' : 'active',
+        pricingTier: (account.pricingTier || 'tier_250') as BillingPricingTier,
+        suspensionReason: account.suspensionReason || '',
+      });
+    }
+  };
+
+  const loadOrganizationBilling = async (organizationId: string) => {
+    setIsBillingLoading(true);
+    try {
+      const response = await adminApi.getOrganizationBilling(organizationId);
+      if (response.success) {
+        applyBillingDetail(response.data);
+      }
+    } catch (error) {
+      console.error('Failed to load organization billing:', error);
+      notify.error('Billing load failed', error instanceof Error ? error.message : 'The billing detail could not be loaded.');
+    } finally {
+      setIsBillingLoading(false);
+    }
+  };
+
+  const openBillingDialog = async (organization: Organization) => {
+    setSelectedOrganization(organization);
+    setBillingTab('overview');
+    setBillingDetail(null);
+    setWalletAdjustmentForm({ amount: '', reason: '' });
+    setShowBillingDialog(true);
+    await loadOrganizationBilling(organization.id);
+  };
+
+  const handleWalletAdjustment = async (type: 'credit' | 'debit') => {
+    if (!selectedOrganization) return;
+
+    const amount = Number(walletAdjustmentForm.amount);
+    const reason = walletAdjustmentForm.reason.trim();
+    if (!Number.isFinite(amount) || amount <= 0) {
+      notify.error('Amount required', 'Enter a positive wallet adjustment amount.');
+      return;
+    }
+    if (!reason) {
+      notify.error('Reason required', 'Enter a reason before changing the wallet balance.');
+      return;
+    }
+
+    const actionKey = `wallet-${type}`;
+    setBillingAction(actionKey);
+    try {
+      const response = await adminApi.createOrganizationWalletAdjustment(selectedOrganization.id, {
+        type,
+        amount,
+        reason,
+      });
+
+      if (response.success) {
+        applyBillingDetail(response.data.billing);
+        setWalletAdjustmentForm({ amount: '', reason: '' });
+        await loadOrganizations();
+        notify.success(type === 'credit' ? 'Wallet credited' : 'Wallet debited', 'The refreshed billing summary is now shown.');
+      }
+    } catch (error) {
+      console.error(`Failed to ${type} wallet:`, error);
+      notify.error(type === 'credit' ? 'Credit failed' : 'Debit failed', error instanceof Error ? error.message : 'The wallet adjustment failed.');
+    } finally {
+      setBillingAction(null);
+    }
+  };
+
+  const handleBillingAccountUpdate = async () => {
+    if (!selectedOrganization) return;
+
+    const suspensionReason = billingAccountForm.suspensionReason.trim();
+    if (billingAccountForm.status === 'suspended' && !suspensionReason) {
+      notify.error('Reason required', 'Enter a reason before suspending billing.');
+      return;
+    }
+
+    setBillingAction('account');
+    try {
+      const response = await adminApi.updateOrganizationBillingAccount(selectedOrganization.id, {
+        status: billingAccountForm.status,
+        pricingTier: billingAccountForm.pricingTier,
+        suspensionReason: billingAccountForm.status === 'suspended' ? suspensionReason : undefined,
+      });
+
+      if (response.success) {
+        applyBillingDetail(response.data.billing);
+        await loadOrganizations();
+        notify.success('Billing account updated', 'The billing status and tier are refreshed.');
+      }
+    } catch (error) {
+      console.error('Failed to update billing account:', error);
+      notify.error('Billing update failed', error instanceof Error ? error.message : 'The billing account update failed.');
+    } finally {
+      setBillingAction(null);
+    }
+  };
+
+  const handleStripePortal = async () => {
+    if (!selectedOrganization) return;
+
+    setBillingAction('portal');
+    try {
+      const response = await adminApi.createOrganizationBillingPortal(selectedOrganization.id);
+      if (response.success) {
+        applyBillingDetail(response.data.billing);
+        if (response.data.url) {
+          window.open(response.data.url, '_blank', 'noopener,noreferrer');
+          notify.success('Stripe portal opened', 'The organization billing portal session was created.');
+        } else {
+          notify.error('Portal unavailable', 'Stripe did not return a portal URL.');
+        }
+        await loadOrganizations();
+      }
+    } catch (error) {
+      console.error('Failed to create billing portal:', error);
+      notify.error('Portal failed', error instanceof Error ? error.message : 'The Stripe portal session could not be created.');
+    } finally {
+      setBillingAction(null);
+    }
+  };
+
+  const handleReleaseHeldInbound = async () => {
+    if (!selectedOrganization) return;
+
+    setBillingAction('release-held');
+    try {
+      const response = await adminApi.releaseOrganizationHeldInbound(selectedOrganization.id);
+      if (response.success) {
+        applyBillingDetail(response.data.billing);
+        await loadOrganizations();
+        notify.success('Held inbound processed', `${response.data.result?.released ?? 0} message(s) released.`);
+      }
+    } catch (error) {
+      console.error('Failed to release held inbound:', error);
+      notify.error('Release failed', error instanceof Error ? error.message : 'Held inbound messages could not be released.');
+    } finally {
+      setBillingAction(null);
+    }
+  };
+
+  const handleProcessMrc = async () => {
+    if (!selectedOrganization) return;
+
+    setBillingAction('mrc');
+    try {
+      const response = await adminApi.processOrganizationMrc(selectedOrganization.id);
+      if (response.success) {
+        applyBillingDetail(response.data.billing);
+        await loadOrganizations();
+        notify.success('MRC processed', `${response.data.result?.processed ?? 0} billing account(s) processed.`);
+      }
+    } catch (error) {
+      console.error('Failed to process MRC:', error);
+      notify.error('MRC failed', error instanceof Error ? error.message : 'Monthly recurring charge processing failed.');
+    } finally {
+      setBillingAction(null);
+    }
+  };
+
   const handleLinkExistingAssets = async () => {
     if (!selectedOrganization) return;
     if (linkForm.configureWebhook && !linkForm.signalmashNumberId.trim()) {
       notify.error(
         'Signalmash Number ID required',
         'Enter the provider number ID before linking when webhook configuration is enabled. Without it, inbound replies cannot sync back into the connected workspace.'
+      );
+      return;
+    }
+    if (linkForm.makeDefaultSender && !linkForm.validationTo.trim()) {
+      notify.error(
+        'Validation recipient required',
+        'Enter a recipient number for the validation SMS before making this number the default sender.'
+      );
+      return;
+    }
+    if (linkForm.makeDefaultSender && !linkForm.installationId.trim()) {
+      notify.error(
+        'CRM installation required',
+        'Enter the CRM location installation ID before making this number the default sender.'
       );
       return;
     }
@@ -168,6 +409,8 @@ export function AdminOrganizationsPage() {
         friendlyName: linkForm.friendlyName || undefined,
         configureWebhook: linkForm.configureWebhook,
         makeDefaultSender: linkForm.makeDefaultSender,
+        validationTo: linkForm.validationTo || undefined,
+        installationId: linkForm.installationId || undefined,
       });
 
       if (response.success) {
@@ -356,6 +599,13 @@ export function AdminOrganizationsPage() {
     }
   };
 
+  const billingTabs = [
+    { id: 'overview', label: 'Overview', icon: <Wallet className="h-4 w-4" /> },
+    { id: 'ledger', label: 'Ledger', icon: <ListChecks className="h-4 w-4" /> },
+    { id: 'charges', label: 'Charges', icon: <Receipt className="h-4 w-4" /> },
+    { id: 'actions', label: 'Actions', icon: <Settings className="h-4 w-4" /> },
+  ] as const;
+
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950">
       <AdminHeader title="Organizations" subtitle="Connected tenants across the platform" showBack />
@@ -371,7 +621,7 @@ export function AdminOrganizationsPage() {
                 Review organization footprint and adoption
               </h2>
               <p className="text-sm leading-6 text-slate-600 dark:text-slate-400">
-                Organizations returned by the admin API with aggregate counts, subscription state, and runtime controls.
+                Organizations returned by the admin API with aggregate counts, wallet state, and runtime controls.
               </p>
             </div>
             <p className="text-sm text-slate-600 dark:text-slate-400">
@@ -423,9 +673,9 @@ export function AdminOrganizationsPage() {
                         }`}>
                           {org.status}
                         </span>
-                        {org.subscription?.plan ? (
+                        {org.billingAccount?.pricingTier ? (
                           <span className="rounded-full border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:text-slate-300">
-                            {org.subscription.plan}
+                            {org.billingAccount.pricingTier.replace(/_/g, ' ')}
                           </span>
                         ) : null}
                       </div>
@@ -490,6 +740,9 @@ export function AdminOrganizationsPage() {
                     )}
                     <Button variant="outline" onClick={() => openInspectDialog(org)} leftIcon={<Eye className="h-4 w-4" />}>
                       Inspect Readiness
+                    </Button>
+                    <Button variant="outline" onClick={() => openBillingDialog(org)} leftIcon={<CreditCard className="h-4 w-4" />}>
+                      Manage Billing
                     </Button>
                     <Button variant="outline" onClick={() => openLinkDialog(org)} leftIcon={<Link2 className="h-4 w-4" />}>
                       Link Existing Assets
@@ -566,7 +819,7 @@ export function AdminOrganizationsPage() {
             </div>
           </div>
 
-          <div className="grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900 md:grid-cols-2">
+          <div className="grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
             <label className="flex items-center gap-3 text-sm font-medium text-slate-700 dark:text-slate-300">
               <input
                 type="checkbox"
@@ -583,8 +836,28 @@ export function AdminOrganizationsPage() {
                 onChange={(e) => setLinkForm({ ...linkForm, makeDefaultSender: e.target.checked })}
                 className="h-4 w-4 rounded border-slate-300"
               />
-              Use as default sender
+              Make default sender after validation
             </label>
+            {linkForm.makeDefaultSender && (
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">CRM Installation ID</label>
+                  <Input
+                    value={linkForm.installationId}
+                    onChange={(e) => setLinkForm({ ...linkForm, installationId: e.target.value })}
+                    placeholder="Location installation UUID"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Validation Recipient</label>
+                  <Input
+                    value={linkForm.validationTo}
+                    onChange={(e) => setLinkForm({ ...linkForm, validationTo: e.target.value })}
+                    placeholder="+15551234567"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           <DialogFooter>
@@ -599,6 +872,369 @@ export function AdminOrganizationsPage() {
               Link Assets
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={showBillingDialog}
+        onOpenChange={(open) => {
+          setShowBillingDialog(open);
+          if (!open) {
+            setBillingDetail(null);
+            setBillingAction(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>Manage Billing</DialogTitle>
+            <DialogDescription>
+              {selectedOrganization?.name} wallet, charges, billing status, and admin-only billing actions.
+            </DialogDescription>
+          </DialogHeader>
+
+          {isBillingLoading || !billingDetail ? (
+            <div className="space-y-4 py-4">
+              <div className="h-20 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-900" />
+              <div className="h-72 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-900" />
+            </div>
+          ) : (
+            <div className="max-h-[75vh] space-y-5 overflow-y-auto pr-1">
+              <div className="flex flex-wrap gap-2">
+                {billingTabs.map((tab) => (
+                  <Button
+                    key={tab.id}
+                    variant={billingTab === tab.id ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setBillingTab(tab.id)}
+                    leftIcon={tab.icon}
+                  >
+                    {tab.label}
+                  </Button>
+                ))}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => selectedOrganization && loadOrganizationBilling(selectedOrganization.id)}
+                  isLoading={isBillingLoading}
+                  leftIcon={<RefreshCw className="h-4 w-4" />}
+                >
+                  Refresh
+                </Button>
+              </div>
+
+              {billingTab === 'overview' && (
+                <div className="space-y-5">
+                  <div className="grid gap-4 md:grid-cols-4">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Wallet Balance</p>
+                      <p className="mt-2 text-2xl font-semibold text-slate-950 dark:text-slate-50">
+                        {formatCurrency(billingDetail.walletSummary?.account?.walletBalance)}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        MRC {formatCurrency(billingDetail.walletSummary?.usage?.estimatedMonthlyRecurring)}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Billing Status</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Badge variant={billingStatusVariant(billingDetail.walletSummary?.account?.status)} dot>
+                          {billingDetail.walletSummary?.account?.status || 'unknown'}
+                        </Badge>
+                        <Badge variant="outline">
+                          {labelize(billingDetail.walletSummary?.account?.pricingTier)}
+                        </Badge>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                        {billingDetail.walletSummary?.account?.suspensionReason || 'No billing hold'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Stripe Linkage</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Badge variant={billingDetail.walletSummary?.account?.hasStripeCustomer ? 'success' : 'warning'} dot>
+                          {billingDetail.walletSummary?.account?.hasStripeCustomer ? 'Customer' : 'No customer'}
+                        </Badge>
+                        <Badge variant={billingDetail.walletSummary?.account?.hasSavedPaymentMethod ? 'success' : 'warning'} dot>
+                          {billingDetail.walletSummary?.account?.hasSavedPaymentMethod ? 'Card saved' : 'No card'}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Setup and MRC</p>
+                      <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
+                        {billingDetail.walletSummary?.account?.setupFeeChargedAt ? 'Setup paid' : 'Setup unpaid'}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        Next {formatNullableDate(billingDetail.walletSummary?.account?.mrcNextRunAt)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Active Footprint</p>
+                      <p className="mt-2 text-sm font-medium text-slate-950 dark:text-slate-50">
+                        Numbers {billingDetail.walletSummary?.usage?.activePhoneNumbers ?? 0} · Campaigns {billingDetail.walletSummary?.usage?.activeCampaigns ?? 0}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        Held inbound {billingDetail.walletSummary?.usage?.heldInboundCount ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Message Usage</p>
+                      <p className="mt-2 text-sm font-medium text-slate-950 dark:text-slate-50">
+                        SMS {billingDetail.walletSummary?.usage?.smsUnits ?? 0} · MMS {billingDetail.walletSummary?.usage?.mmsUnits ?? 0}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        Cycle {billingDetail.walletSummary?.usage?.cycleMonth || 'current'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Onboarding Cart</p>
+                      <p className="mt-2 text-sm font-medium text-slate-950 dark:text-slate-50">
+                        {formatCurrency(billingDetail.walletSummary?.onboardingCart?.totalWithSelectedOptions)}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        Top-up {formatCurrency(billingDetail.walletSummary?.onboardingCart?.topUpAmount)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                    <div className="mb-3 flex items-center gap-2">
+                      <Activity className="h-4 w-4 text-slate-500" />
+                      <h3 className="font-semibold text-slate-950 dark:text-slate-50">Recent Billing Events</h3>
+                    </div>
+                    <div className="space-y-3">
+                      {(billingDetail.recentBillingEvents || []).slice(0, 6).map((event: any) => (
+                        <div key={event.id} className="rounded-xl bg-slate-50 px-4 py-3 text-sm dark:bg-slate-900">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-medium text-slate-950 dark:text-slate-50">
+                              {labelize(event.direction)} {labelize(event.unit)} · {event.status}
+                            </p>
+                            <p className="text-xs text-slate-500 dark:text-slate-400">{formatDateTime(event.createdAt)}</p>
+                          </div>
+                          <p className="mt-1 text-slate-600 dark:text-slate-400">
+                            Quantity {event.quantity} · {event.source}
+                          </p>
+                        </div>
+                      ))}
+                      {!billingDetail.recentBillingEvents?.length && (
+                        <p className="text-sm text-slate-600 dark:text-slate-400">No billing events recorded.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {billingTab === 'ledger' && (
+                <div className="space-y-3">
+                  {(billingDetail.recentLedgerEntries || []).map((entry: any) => (
+                    <div key={entry.id} className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={entry.entryType === 'credit' ? 'success' : entry.entryType === 'debit' ? 'destructive' : 'warning'} dot>
+                              {entry.entryType}
+                            </Badge>
+                            <Badge variant="outline">{labelize(entry.category)}</Badge>
+                          </div>
+                          <p className="mt-2 font-medium text-slate-950 dark:text-slate-50">{entry.description}</p>
+                          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {formatDateTime(entry.createdAt)} · {entry.ledgerKey}
+                          </p>
+                        </div>
+                        <div className="text-left md:text-right">
+                          <p className="font-semibold text-slate-950 dark:text-slate-50">{formatCurrency(entry.amount, true)}</p>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                            Balance {formatCurrency(entry.balanceAfter)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {!billingDetail.recentLedgerEntries?.length && (
+                    <p className="text-sm text-slate-600 dark:text-slate-400">No ledger entries recorded.</p>
+                  )}
+                </div>
+              )}
+
+              {billingTab === 'charges' && (
+                <div className="space-y-3">
+                  {(billingDetail.recentCharges || []).map((charge: any) => (
+                    <div key={charge.id} className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={charge.status === 'succeeded' ? 'success' : charge.status === 'failed' ? 'destructive' : 'warning'} dot>
+                              {charge.status}
+                            </Badge>
+                            <Badge variant="outline">{labelize(charge.kind)}</Badge>
+                            {charge.metadata?.direction && <Badge variant="secondary">{charge.metadata.direction}</Badge>}
+                          </div>
+                          <p className="mt-2 font-medium text-slate-950 dark:text-slate-50">{charge.description}</p>
+                          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {formatDateTime(charge.createdAt)} · {charge.chargeKey}
+                          </p>
+                        </div>
+                        <p className="font-semibold text-slate-950 dark:text-slate-50">{formatCurrency(charge.amount, true)}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {!billingDetail.recentCharges?.length && (
+                    <p className="text-sm text-slate-600 dark:text-slate-400">No billing charges recorded.</p>
+                  )}
+                </div>
+              )}
+
+              {billingTab === 'actions' && (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-950">
+                    <div className="mb-4 flex items-center gap-2">
+                      <DollarSign className="h-4 w-4 text-slate-500" />
+                      <h3 className="font-semibold text-slate-950 dark:text-slate-50">Wallet Adjustment</h3>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Amount</label>
+                        <Input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={walletAdjustmentForm.amount}
+                          onChange={(event) => setWalletAdjustmentForm({ ...walletAdjustmentForm, amount: event.target.value })}
+                          placeholder="0.00"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Reason</label>
+                        <Input
+                          value={walletAdjustmentForm.reason}
+                          onChange={(event) => setWalletAdjustmentForm({ ...walletAdjustmentForm, reason: event.target.value })}
+                          placeholder="Required"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="success"
+                          onClick={() => handleWalletAdjustment('credit')}
+                          isLoading={billingAction === 'wallet-credit'}
+                          disabled={!walletAdjustmentForm.amount || !walletAdjustmentForm.reason.trim() || billingAction !== null}
+                          leftIcon={<DollarSign className="h-4 w-4" />}
+                        >
+                          Credit Wallet
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          onClick={() => handleWalletAdjustment('debit')}
+                          isLoading={billingAction === 'wallet-debit'}
+                          disabled={!walletAdjustmentForm.amount || !walletAdjustmentForm.reason.trim() || billingAction !== null}
+                          leftIcon={<DollarSign className="h-4 w-4" />}
+                        >
+                          Debit Wallet
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-950">
+                    <div className="mb-4 flex items-center gap-2">
+                      <Ban className="h-4 w-4 text-slate-500" />
+                      <h3 className="font-semibold text-slate-950 dark:text-slate-50">Billing Account</h3>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Status</label>
+                          <Select
+                            value={billingAccountForm.status}
+                            onValueChange={(value) => setBillingAccountForm({ ...billingAccountForm, status: value as BillingAccountStatus })}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="active">active</SelectItem>
+                              <SelectItem value="suspended">suspended</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Pricing Tier</label>
+                          <Select
+                            value={billingAccountForm.pricingTier}
+                            onValueChange={(value) => setBillingAccountForm({ ...billingAccountForm, pricingTier: value as BillingPricingTier })}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="tier_250">tier 250</SelectItem>
+                              <SelectItem value="tier_500">tier 500</SelectItem>
+                              <SelectItem value="tier_1400">tier 1400</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Suspension Reason</label>
+                        <Input
+                          value={billingAccountForm.suspensionReason}
+                          onChange={(event) => setBillingAccountForm({ ...billingAccountForm, suspensionReason: event.target.value })}
+                          placeholder={billingAccountForm.status === 'suspended' ? 'Required' : 'Cleared when active'}
+                        />
+                      </div>
+                      <Button
+                        onClick={handleBillingAccountUpdate}
+                        isLoading={billingAction === 'account'}
+                        disabled={billingAction !== null}
+                        leftIcon={<Settings className="h-4 w-4" />}
+                      >
+                        Save Billing Account
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-950 lg:col-span-2">
+                    <div className="mb-4 flex items-center gap-2">
+                      <CreditCard className="h-4 w-4 text-slate-500" />
+                      <h3 className="font-semibold text-slate-950 dark:text-slate-50">Operational Billing Actions</h3>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={handleStripePortal}
+                        isLoading={billingAction === 'portal'}
+                        disabled={billingAction !== null}
+                        leftIcon={<ExternalLink className="h-4 w-4" />}
+                      >
+                        Open Stripe Portal
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleReleaseHeldInbound}
+                        isLoading={billingAction === 'release-held'}
+                        disabled={billingAction !== null}
+                        leftIcon={<Unlock className="h-4 w-4" />}
+                      >
+                        Release Held Inbound
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleProcessMrc}
+                        isLoading={billingAction === 'mrc'}
+                        disabled={billingAction !== null}
+                        leftIcon={<PlayCircle className="h-4 w-4" />}
+                      >
+                        Process MRC
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
@@ -669,36 +1305,39 @@ export function AdminOrganizationsPage() {
                 <CardContent className="space-y-3 p-6">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Plan and Usage</h3>
-                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Subscription entitlements and prepaid message credits for this tenant.</p>
+                      <h3 className="text-lg font-semibold text-slate-950 dark:text-slate-50">Wallet and Usage</h3>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Wallet balance, rate tier, held inbound, and ledger state for this tenant.</p>
                     </div>
                   </div>
                   <div className="grid gap-4 md:grid-cols-4">
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">Plan</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Rate Tier</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        {onboardingDetail.subscriptionSummary?.subscription?.plan || 'none'}
+                        {onboardingDetail.subscriptionSummary?.account?.pricingTierLabel || 'none'}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">Numbers Used</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Active Numbers</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        {onboardingDetail.subscriptionSummary?.usage?.activePhoneNumbers ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.phoneNumbersIncluded ?? 0}
+                        {onboardingDetail.subscriptionSummary?.usage?.activePhoneNumbers ?? 0}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">SMS / MMS Used</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">SMS / MMS Units</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        {onboardingDetail.subscriptionSummary?.usage?.smsUsed ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.smsIncluded ?? 0}
+                        {onboardingDetail.subscriptionSummary?.usage?.smsUnits ?? 0}
                       </p>
                       <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-                        MMS {onboardingDetail.subscriptionSummary?.usage?.mmsUsed ?? 0} / {onboardingDetail.subscriptionSummary?.subscription?.mmsIncluded ?? 0}
+                        MMS {onboardingDetail.subscriptionSummary?.usage?.mmsUnits ?? 0}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <p className="text-sm text-slate-500 dark:text-slate-400">Message Credits</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Wallet Balance</p>
                       <p className="mt-2 font-semibold text-slate-950 dark:text-slate-50">
-                        ${Number(onboardingDetail.subscriptionSummary?.subscription?.messageCreditBalance ?? 0).toFixed(2)}
+                        ${Number(onboardingDetail.subscriptionSummary?.account?.walletBalance ?? 0).toFixed(2)}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+                        Held {onboardingDetail.subscriptionSummary?.usage?.heldInboundCount ?? 0}
                       </p>
                     </div>
                   </div>

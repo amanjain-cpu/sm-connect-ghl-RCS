@@ -11,8 +11,12 @@ import { messageService } from '../services/message.service.js';
 import { senderRoutingService } from '../services/sender-routing.service.js';
 import { platformAdapterRegistry } from '../services/platform-adapter-registry.service.js';
 import { toPlatformAdapterConnection } from '../adapters/base.adapter.js';
-import { BadRequestError, NotFoundError } from '../utils/errors.js';
+import { AppError, BadRequestError, NotFoundError } from '../utils/errors.js';
 import { deadLetterService } from '../services/dead-letter.service.js';
+import {
+  getErrorMessage,
+  isNumberNotApprovedForMnoError,
+} from '../utils/provider-errors.js';
 
 const OUTBOUND_QUEUE_NAME = 'outbound-platform-messages';
 
@@ -57,12 +61,25 @@ function isTerminalOutboundError(error: unknown): boolean {
     return true;
   }
 
+  if (
+    error instanceof AppError &&
+    [
+      'WALLET_FUNDS_REQUIRED',
+      'SAVED_PAYMENT_METHOD_REQUIRED',
+      'BILLING_SUSPENDED',
+      'ORGANIZATION_SUSPENDED',
+    ].includes(error.code)
+  ) {
+    return true;
+  }
+
   if (!(error instanceof Error)) {
     return false;
   }
 
   const normalizedMessage = error.message.toLowerCase();
   return (
+    isNumberNotApprovedForMnoError(error) ||
     normalizedMessage.includes('opted out') ||
     normalizedMessage.includes('missing sender') ||
     normalizedMessage.includes('destination number') ||
@@ -166,7 +183,18 @@ export function startOutboundMessageWorker() {
           mediaUrls: data.mediaUrls,
         });
 
-      const sentMessage = await messageService.dispatchQueuedMessage(queuedMessage.id);
+      let sentMessage;
+      try {
+        sentMessage = await messageService.dispatchQueuedMessage(queuedMessage.id);
+      } catch (error) {
+        if (isTerminalOutboundError(error)) {
+          throw new UnrecoverableError(
+            error instanceof Error ? error.message : 'Outbound send cannot be retried'
+          );
+        }
+
+        throw error;
+      }
 
       try {
         await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
@@ -221,7 +249,7 @@ export function startOutboundMessageWorker() {
         data.providerMessageId
       );
 
-       await deadLetterService.record({
+      await deadLetterService.record({
         queueName: OUTBOUND_QUEUE_NAME,
         jobName: job?.name ?? 'platform-outbound',
         jobKey: String(job?.id ?? data.providerMessageId),
@@ -234,7 +262,11 @@ export function startOutboundMessageWorker() {
         },
       });
 
-      if (existingMessage && isTerminalOutboundError(error)) {
+      if (
+        existingMessage &&
+        existingMessage.status !== 'failed' &&
+        (isTerminalOutboundError(error) || error instanceof UnrecoverableError)
+      ) {
         await messageService.markFailed(existingMessage.id, error instanceof Error ? error.message : 'Outbound send failed');
       }
 
@@ -249,7 +281,12 @@ export function startOutboundMessageWorker() {
       await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(
         toPlatformAdapterConnection(connection),
         data.providerMessageId,
-        'failed'
+        'failed',
+        {
+          error: {
+            message: getErrorMessage(error, 'Outbound send failed'),
+          },
+        }
       );
     } catch (statusError) {
       logger.error({ err: statusError, jobId: job?.id }, 'Failed to push failed status back to the CRM platform');

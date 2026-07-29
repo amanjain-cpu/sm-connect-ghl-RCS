@@ -32,6 +32,8 @@ import { AdminSetupPage } from '@/pages/admin/setup';
 import { AdminDashboardPage } from '@/pages/admin/dashboard';
 import { AdminSettingsPage } from '@/pages/admin/settings';
 import { AdminOrganizationsPage } from '@/pages/admin/organizations';
+import { AdminUsersPage } from '@/pages/admin/users';
+import { AdminInviteAcceptPage } from '@/pages/admin/invite-accept';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, checkAuth } = useAuthStore();
@@ -236,6 +238,14 @@ export default function App() {
           element={<AdminSetupPage />}
         />
         <Route
+          path="/admin/invites/:token"
+          element={
+            <NoAuthCheckRoute>
+              <AdminInviteAcceptPage />
+            </NoAuthCheckRoute>
+          }
+        />
+        <Route
           path="/admin/dashboard"
           element={
             <AdminProtectedRoute>
@@ -256,6 +266,14 @@ export default function App() {
           element={
             <AdminProtectedRoute>
               <AdminOrganizationsPage />
+            </AdminProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminProtectedRoute>
+              <AdminUsersPage />
             </AdminProtectedRoute>
           }
         />

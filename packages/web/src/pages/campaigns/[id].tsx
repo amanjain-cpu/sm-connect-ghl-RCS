@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Megaphone,
   ArrowLeft,
@@ -38,7 +38,10 @@ import {
 } from '@signalmash-connect/shared';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
+import { recordProvisioningLock } from '@/lib/phone-number-provisioning';
+import { ProvisioningNoteDialog } from '@/components/phone-numbers/provisioning-note-dialog';
 import { notify } from '@/stores/notification.store';
+import { useAuthStore } from '@/stores/auth.store';
 
 interface PhoneNumber {
   id: string;
@@ -62,7 +65,7 @@ interface AvailableNumber {
     mms: boolean;
     voice: boolean;
   };
-  monthlyPrice: number;
+  monthlyPrice?: number | null;
 }
 
 interface Campaign {
@@ -123,15 +126,33 @@ interface BrandSummary {
 }
 
 interface SubscriptionSummary {
-  subscription: {
-    plan: string | null;
-    phoneNumbersIncluded: number;
+  account: {
+    pricingTierLabel: string;
+    walletBalance: number;
+  };
+  rates: {
+    phoneNumberMonthly: number;
   };
   usage: {
     activePhoneNumbers: number;
-    phoneNumbersIncluded: number;
+    heldInboundCount: number;
   };
 }
+
+type NumberLinkIntent =
+  | {
+      mode: 'existing';
+      phoneNumberId: string;
+      friendlyName?: string;
+      makeDefaultSender: boolean;
+      confirmReassignment?: boolean;
+    }
+  | {
+      mode: 'buy_new';
+      phoneNumber: string;
+      friendlyName?: string;
+      makeDefaultSender: boolean;
+    };
 
 const statusConfig = {
   draft: { label: 'Draft', icon: FileText, variant: 'secondary' as const },
@@ -160,7 +181,7 @@ function formatUseCaseLabel(value: string): string {
 export function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const { user } = useAuthStore();
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [brand, setBrand] = useState<BrandSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -182,6 +203,7 @@ export function CampaignDetailPage() {
   const [subscriptionSummary, setSubscriptionSummary] = useState<SubscriptionSummary | null>(null);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [provisioningNoticeNumber, setProvisioningNoticeNumber] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({
     name: '',
     description: '',
@@ -215,6 +237,7 @@ export function CampaignDetailPage() {
   const requiresEditSubUsecases = useCasesRequiringSubUsecases.has(editForm.useCase);
   const minimumEditSubUsecases = editForm.useCase === 'mixed' ? 2 : requiresEditSubUsecases ? 1 : 0;
   const selectedExistingNumber = existingNumbers.find((number) => number.id === selectedExistingNumberId) ?? null;
+  const hasEmbeddedLocationContext = Boolean(user?.embeddedInstallationId);
 
   const loadCampaign = async () => {
     if (!id) return;
@@ -250,7 +273,7 @@ export function CampaignDetailPage() {
     try {
       const [numbersResponse, billingResponse] = await Promise.all([
         api.getPhoneNumbers({ status: 'active', limit: 100 }),
-        api.getSubscriptionBillingSummary(),
+        api.getWalletBillingSummary(),
       ]);
 
       if (numbersResponse.success && numbersResponse.data) {
@@ -272,37 +295,6 @@ export function CampaignDetailPage() {
   useEffect(() => {
     loadNumberSetupData();
   }, [id]);
-
-  useEffect(() => {
-    const handlePhoneCheckoutReturn = async () => {
-      if (!id) return;
-
-      const checkoutStatus = searchParams.get('number_checkout');
-      const sessionId = searchParams.get('session_id');
-
-      if (checkoutStatus === 'success' && sessionId) {
-        try {
-          const response = await api.completePhoneNumberCheckout({ sessionId });
-          if (response.success && response.data && 'pending' in response.data && response.data.pending) {
-            notify.success('Checkout completed', response.data.message);
-          } else {
-            notify.success('Number linked', 'The phone number purchase completed for this campaign.');
-          }
-          await Promise.all([loadCampaign(), loadNumberSetupData()]);
-        } catch (error) {
-          console.error('Failed to complete campaign number checkout:', error);
-          notify.error('Number checkout failed', 'The Stripe checkout completed, but the phone number could not be linked automatically.');
-        } finally {
-          window.history.replaceState({}, '', `/campaigns/${id}`);
-        }
-      } else if (checkoutStatus === 'cancelled') {
-        notify.error('Checkout cancelled', 'The campaign number purchase was not completed.');
-        window.history.replaceState({}, '', `/campaigns/${id}`);
-      }
-    };
-
-    handlePhoneCheckoutReturn();
-  }, [id, searchParams]);
 
   const openSubmitDialog = async () => {
     setNumberFlowMode('none');
@@ -340,7 +332,7 @@ export function CampaignDetailPage() {
     }
   };
 
-  const buildNumberLinkIntent = () => {
+  const buildNumberLinkIntent = (): NumberLinkIntent | undefined | null => {
     if (numberFlowMode === 'none') {
       return undefined;
     }
@@ -367,6 +359,7 @@ export function CampaignDetailPage() {
         mode: 'existing' as const,
         phoneNumberId: selectedExistingNumberId,
         friendlyName: numberFriendlyName || undefined,
+        makeDefaultSender: hasEmbeddedLocationContext,
         ...(requiresReassignment ? { confirmReassignment: true } : {}),
       };
     }
@@ -380,19 +373,20 @@ export function CampaignDetailPage() {
       mode: 'buy_new' as const,
       phoneNumber: selectedAvailableNumber,
       friendlyName: numberFriendlyName || undefined,
+      makeDefaultSender: hasEmbeddedLocationContext,
     };
   };
 
   const handleNumberLinkResponse = async (responseData: any, successMessage: string) => {
-    if (responseData?.numberLinkAction?.mode === 'checkout' && responseData.numberLinkAction.checkoutUrl) {
-      window.location.href = responseData.numberLinkAction.checkoutUrl;
-      return;
-    }
-
     await Promise.all([loadCampaign(), loadNumberSetupData()]);
 
     if (responseData?.numberLinkAction?.mode === 'linked') {
-      notify.success(successMessage, 'The campaign and phone number are now linked.');
+      notify.success(
+        successMessage,
+        hasEmbeddedLocationContext
+          ? 'The campaign and phone number are now linked and saved as the default sender.'
+          : 'The campaign and phone number are now linked.'
+      );
       return;
     }
 
@@ -400,8 +394,12 @@ export function CampaignDetailPage() {
       notify.success(
         successMessage,
         responseData.numberLinkAction.previousCampaignName
-          ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName} and linked to this campaign.`
-          : 'The existing number was reassigned and linked to this campaign.'
+          ? hasEmbeddedLocationContext
+            ? `The number was moved from ${responseData.numberLinkAction.previousCampaignName}, linked to this campaign, and saved as the default sender.`
+            : `The number was moved from ${responseData.numberLinkAction.previousCampaignName} and linked to this campaign.`
+          : hasEmbeddedLocationContext
+            ? 'The existing number was reassigned, linked to this campaign, and saved as the default sender.'
+            : 'The existing number was reassigned and linked to this campaign.'
       );
       return;
     }
@@ -424,6 +422,35 @@ export function CampaignDetailPage() {
     notify.success(successMessage, 'The campaign request was saved successfully.');
   };
 
+  const recordNewNumberProvisioningLock = (
+    numberLinkIntent: NumberLinkIntent | undefined | null,
+    responseData: any
+  ): string | null => {
+    if (numberLinkIntent?.mode !== 'buy_new') {
+      return null;
+    }
+
+    const action = responseData?.numberLinkAction;
+    if (!action || !['linked', 'blocked_until_campaign_approved'].includes(action.mode)) {
+      return null;
+    }
+
+    const phoneNumber = typeof action.phoneNumber === 'string'
+      ? action.phoneNumber
+      : numberLinkIntent.phoneNumber;
+    const phoneNumberId = typeof action.phoneNumberId === 'string'
+      ? action.phoneNumberId
+      : undefined;
+
+    recordProvisioningLock({
+      phoneNumber,
+      phoneNumberId,
+      purchasedAt: new Date(),
+    });
+
+    return phoneNumber;
+  };
+
   const handleSubmitForApproval = async () => {
     if (!campaign) return;
 
@@ -437,10 +464,14 @@ export function CampaignDetailPage() {
       const response = await api.submitCampaign(campaign.id, numberLinkIntent ? { numberLinkIntent } : undefined);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
+        const purchasedPhoneNumber = recordNewNumberProvisioningLock(numberLinkIntent, response.data);
         await handleNumberLinkResponse(
           response.data,
           'Campaign submitted'
         );
+        if (purchasedPhoneNumber) {
+          setProvisioningNoticeNumber(purchasedPhoneNumber);
+        }
       }
     } catch (error) {
       console.error('Failed to submit campaign:', error);
@@ -463,10 +494,14 @@ export function CampaignDetailPage() {
       const response = await api.linkCampaignPhoneNumber(campaign.id, numberLinkIntent);
       if (response.success && response.data) {
         setShowSubmitDialog(false);
+        const purchasedPhoneNumber = recordNewNumberProvisioningLock(numberLinkIntent, response.data);
         await handleNumberLinkResponse(
           response.data,
           'Campaign number link updated'
         );
+        if (purchasedPhoneNumber) {
+          setProvisioningNoticeNumber(purchasedPhoneNumber);
+        }
       }
     } catch (error) {
       console.error('Failed to link campaign phone number:', error);
@@ -925,7 +960,7 @@ export function CampaignDetailPage() {
                             ? 'A sender number is linked to this campaign.'
                             : 'A sender number is linked, but SMS/MMS stays blocked until this campaign is approved.'
                           : campaign.numberLinkStatus === 'checkout_required'
-                            ? 'This campaign is waiting on the extra-number Stripe checkout before the new number can be provisioned.'
+                            ? 'This campaign is waiting on wallet billing before the new number can be provisioned.'
                             : 'A number selection is saved for this campaign and will be retried automatically when provider conditions are met.'}
                     </p>
                   </div>
@@ -935,7 +970,7 @@ export function CampaignDetailPage() {
                   <div className="mt-5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                     {campaign.status === 'approved'
                       ? 'No phone numbers are assigned yet. This campaign is ready for the number provisioning step.'
-                      : 'No phone numbers are assigned yet. Number assignment begins after campaign approval.'}
+                      : 'No phone numbers are assigned yet. You can buy or link a sender now; SMS/MMS starts after campaign approval.'}
                   </div>
                 ) : (
                   <div className="mt-5 space-y-3">
@@ -1086,7 +1121,7 @@ export function CampaignDetailPage() {
             <DialogDescription>
               {campaign.status === 'draft'
                 ? 'Submit this campaign to Signalmash and optionally link an existing sender or buy a new 10DLC number.'
-                : 'Link an existing active sender or buy a new 10DLC number for this campaign.'}
+                : 'Link an existing active sender or buy a new 10DLC number for this campaign. SMS/MMS starts after approval if review is still pending.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -1094,10 +1129,10 @@ export function CampaignDetailPage() {
             {subscriptionSummary && (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
                 <p className="font-medium text-slate-950 dark:text-slate-50">
-                  Plan: {subscriptionSummary.subscription.plan || 'No active plan'}
+                  Wallet: ${Number(subscriptionSummary.account.walletBalance ?? 0).toFixed(2)}
                 </p>
                 <p className="mt-1">
-                  Active numbers: {subscriptionSummary.usage.activePhoneNumbers} / {subscriptionSummary.usage.phoneNumbersIncluded}
+                  Tier {subscriptionSummary.account.pricingTierLabel} · Active numbers {subscriptionSummary.usage.activePhoneNumbers}
                 </p>
               </div>
             )}
@@ -1167,7 +1202,11 @@ export function CampaignDetailPage() {
                     <label className="text-sm font-medium">State</label>
                     <Input
                       value={numberSearch.state}
-                      onChange={(e) => setNumberSearch((current) => ({ ...current, state: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2) }))}
+                      onChange={(e) => setNumberSearch((current) => ({
+                        ...current,
+                        state: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2),
+                        areaCode: '',
+                      }))}
                       placeholder="CA"
                     />
                   </div>
@@ -1175,7 +1214,11 @@ export function CampaignDetailPage() {
                     <label className="text-sm font-medium">Area Code</label>
                     <Input
                       value={numberSearch.areaCode}
-                      onChange={(e) => setNumberSearch((current) => ({ ...current, areaCode: e.target.value.replace(/\D/g, '').slice(0, 3) }))}
+                      onChange={(e) => setNumberSearch((current) => ({
+                        ...current,
+                        state: '',
+                        areaCode: e.target.value.replace(/\D/g, '').slice(0, 3),
+                      }))}
                       placeholder="415"
                     />
                   </div>
@@ -1225,7 +1268,9 @@ export function CampaignDetailPage() {
                           </p>
                         </div>
                         <Badge variant={selectedAvailableNumber === number.phoneNumber ? 'success' : 'secondary'}>
-                          {number.monthlyPrice ? `$${number.monthlyPrice.toFixed(2)}/mo` : 'Provider rate'}
+                          {typeof subscriptionSummary?.rates.phoneNumberMonthly === 'number'
+                            ? `$${subscriptionSummary.rates.phoneNumberMonthly.toFixed(2)}/mo`
+                            : 'Wallet pricing applies'}
                         </Badge>
                       </button>
                     ))
@@ -1443,6 +1488,16 @@ export function CampaignDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ProvisioningNoteDialog
+        open={Boolean(provisioningNoticeNumber)}
+        phoneNumber={provisioningNoticeNumber}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setProvisioningNoticeNumber(null);
+          }
+        }}
+      />
     </div>
   );
 }

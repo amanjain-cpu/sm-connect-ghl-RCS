@@ -2,14 +2,17 @@
 // Admin Service
 // ===========================================
 
+import { Prisma, type BillingAccountStatus, type BillingPricingTier } from '@prisma/client';
 import { prisma } from '../config/database.js';
+import { config } from '../config/index.js';
 import { redis } from '../config/redis.js';
-import { encrypt, decrypt, hashPassword, verifyPassword } from '../utils/crypto.js';
+import { encrypt, decrypt, generateUrlSafeToken, hashPassword, verifyPassword } from '../utils/crypto.js';
 import { generateTokens, verifyAdminRefreshToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { integrationService } from './integration.service.js';
-import { subscriptionBillingService } from './subscription-billing.service.js';
+import { walletBillingService } from './wallet-billing.service.js';
+import { createHash } from 'crypto';
 
 // Settings keys
 export const SETTINGS_KEYS = {
@@ -31,6 +34,29 @@ export const SETTINGS_KEYS = {
 
 // Cache TTL (5 minutes)
 const SETTINGS_CACHE_TTL = 300;
+
+type AdminActionContext = {
+  ipAddress?: string;
+  userAgent?: string;
+};
+
+const DEFAULT_ADMIN_INVITE_EXPIRY_HOURS = 48;
+
+function hashInviteToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function toAmount(value: Prisma.Decimal | string | number | null | undefined): number {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  return Number(value);
+}
 
 export class AdminService {
   // ===========================================
@@ -135,6 +161,7 @@ export class AdminService {
         id: admin.id,
         email: admin.email,
         name: admin.name,
+        mustChangePassword: admin.mustChangePassword,
       },
       tokens,
     };
@@ -188,6 +215,416 @@ export class AdminService {
     await prisma.superAdminRefreshToken.deleteMany({
       where: { token: refreshToken },
     });
+  }
+
+  async listAdminUsers(adminId: string) {
+    const [admins, invites] = await Promise.all([
+      prisma.superAdmin.findMany({
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          mustChangePassword: true,
+          lastLoginAt: true,
+          deactivatedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          _count: {
+            select: {
+              refreshTokens: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.superAdminInvite.findMany({
+        where: {
+          acceptedAt: null,
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          expiresAt: true,
+          createdAt: true,
+          createdByAdmin: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    await this.logAuditAction(adminId, 'VIEW_ADMIN_USERS', 'super_admins');
+
+    return { admins, invites };
+  }
+
+  async createAdminInvite(input: {
+    adminId: string;
+    email: string;
+    name?: string;
+    expiresInHours?: number;
+    context?: AdminActionContext;
+  }) {
+    const email = input.email.trim().toLowerCase();
+    const existingAdmin = await prisma.superAdmin.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+
+    if (existingAdmin) {
+      throw new AppError('An admin with this email already exists', 'ADMIN_EXISTS', 409);
+    }
+
+    await prisma.superAdminInvite.updateMany({
+      where: {
+        email,
+        acceptedAt: null,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+      },
+    });
+
+    const token = generateUrlSafeToken(48);
+    const expiresAt = new Date(
+      Date.now() + (input.expiresInHours ?? DEFAULT_ADMIN_INVITE_EXPIRY_HOURS) * 60 * 60 * 1000
+    );
+
+    const invite = await prisma.superAdminInvite.create({
+      data: {
+        email,
+        name: input.name?.trim() || null,
+        tokenHash: hashInviteToken(token),
+        expiresAt,
+        createdByAdminId: input.adminId,
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        expiresAt: true,
+        createdAt: true,
+      },
+    });
+
+    await this.logAuditAction(
+      input.adminId,
+      'CREATE_ADMIN_INVITE',
+      'super_admin_invites',
+      invite.id,
+      {
+        email,
+        expiresAt,
+      },
+      input.context
+    );
+
+    return {
+      invite,
+      token,
+      inviteUrl: `${config.webUrl.replace(/\/$/, '')}/admin/invites/${token}`,
+    };
+  }
+
+  async revokeAdminInvite(input: {
+    adminId: string;
+    inviteId: string;
+    context?: AdminActionContext;
+  }) {
+    const invite = await prisma.superAdminInvite.findUnique({
+      where: { id: input.inviteId },
+    });
+
+    if (!invite) {
+      throw new AppError('Admin invite not found', 'ADMIN_INVITE_NOT_FOUND', 404);
+    }
+
+    if (invite.acceptedAt) {
+      throw new AppError('Accepted admin invites cannot be revoked', 'ADMIN_INVITE_ACCEPTED', 409);
+    }
+
+    const updated = await prisma.superAdminInvite.update({
+      where: { id: invite.id },
+      data: { revokedAt: new Date() },
+      select: {
+        id: true,
+        email: true,
+        revokedAt: true,
+      },
+    });
+
+    await this.logAuditAction(
+      input.adminId,
+      'REVOKE_ADMIN_INVITE',
+      'super_admin_invites',
+      invite.id,
+      { email: invite.email },
+      input.context
+    );
+
+    return updated;
+  }
+
+  async acceptAdminInvite(input: {
+    token: string;
+    password: string;
+    name?: string;
+  }) {
+    const tokenHash = hashInviteToken(input.token);
+    const invite = await prisma.superAdminInvite.findUnique({
+      where: { tokenHash },
+    });
+
+    if (!invite || invite.revokedAt || invite.acceptedAt || invite.expiresAt < new Date()) {
+      throw new AppError('Admin invite is invalid or expired', 'ADMIN_INVITE_INVALID', 400);
+    }
+
+    const existingAdmin = await prisma.superAdmin.findUnique({
+      where: { email: invite.email },
+      select: { id: true },
+    });
+
+    if (existingAdmin) {
+      throw new AppError('An admin with this email already exists', 'ADMIN_EXISTS', 409);
+    }
+
+    const passwordHash = await hashPassword(input.password);
+    const admin = await prisma.$transaction(async (tx) => {
+      const created = await tx.superAdmin.create({
+        data: {
+          email: invite.email,
+          name: input.name?.trim() || invite.name || invite.email,
+          passwordHash,
+          isActive: true,
+          mustChangePassword: false,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          createdAt: true,
+        },
+      });
+
+      await tx.superAdminInvite.update({
+        where: { id: invite.id },
+        data: {
+          acceptedAt: new Date(),
+          acceptedAdminId: created.id,
+        },
+      });
+
+      return created;
+    });
+
+    return admin;
+  }
+
+  async resetAdminPassword(input: {
+    actorAdminId: string;
+    targetAdminId: string;
+    temporaryPassword: string;
+    context?: AdminActionContext;
+  }) {
+    const target = await prisma.superAdmin.findUnique({
+      where: { id: input.targetAdminId },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+      },
+    });
+
+    if (!target) {
+      throw new AppError('Admin not found', 'ADMIN_NOT_FOUND', 404);
+    }
+
+    if (!target.isActive) {
+      throw new AppError('Cannot reset a deactivated admin', 'ADMIN_DEACTIVATED', 400);
+    }
+
+    const passwordHash = await hashPassword(input.temporaryPassword);
+    const admin = await prisma.$transaction(async (tx) => {
+      const updated = await tx.superAdmin.update({
+        where: { id: target.id },
+        data: {
+          passwordHash,
+          mustChangePassword: true,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          mustChangePassword: true,
+          updatedAt: true,
+        },
+      });
+
+      await tx.superAdminRefreshToken.deleteMany({
+        where: { adminId: target.id },
+      });
+
+      return updated;
+    });
+
+    await this.logAuditAction(
+      input.actorAdminId,
+      'RESET_ADMIN_PASSWORD',
+      'super_admins',
+      target.id,
+      {
+        email: target.email,
+        revokedRefreshTokens: true,
+        mustChangePassword: true,
+      },
+      input.context
+    );
+
+    return admin;
+  }
+
+  async deactivateAdmin(input: {
+    actorAdminId: string;
+    targetAdminId: string;
+    context?: AdminActionContext;
+  }) {
+    if (input.actorAdminId === input.targetAdminId) {
+      throw new AppError('Admins cannot deactivate their own account', 'ADMIN_SELF_DEACTIVATE_BLOCKED', 400);
+    }
+
+    const activeAdminCount = await prisma.superAdmin.count({
+      where: { isActive: true },
+    });
+
+    if (activeAdminCount <= 1) {
+      throw new AppError('At least one active admin must remain', 'LAST_ADMIN_DEACTIVATE_BLOCKED', 400);
+    }
+
+    const target = await prisma.superAdmin.findUnique({
+      where: { id: input.targetAdminId },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+      },
+    });
+
+    if (!target) {
+      throw new AppError('Admin not found', 'ADMIN_NOT_FOUND', 404);
+    }
+
+    const admin = await prisma.$transaction(async (tx) => {
+      const updated = await tx.superAdmin.update({
+        where: { id: target.id },
+        data: {
+          isActive: false,
+          deactivatedAt: new Date(),
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          deactivatedAt: true,
+        },
+      });
+
+      await tx.superAdminRefreshToken.deleteMany({
+        where: { adminId: target.id },
+      });
+
+      return updated;
+    });
+
+    await this.logAuditAction(
+      input.actorAdminId,
+      'DEACTIVATE_ADMIN',
+      'super_admins',
+      target.id,
+      {
+        email: target.email,
+        revokedRefreshTokens: true,
+      },
+      input.context
+    );
+
+    return admin;
+  }
+
+  async changeAdminPassword(input: {
+    adminId: string;
+    currentPassword: string;
+    newPassword: string;
+    currentRefreshToken?: string;
+    context?: AdminActionContext;
+  }) {
+    const admin = await prisma.superAdmin.findUnique({
+      where: { id: input.adminId },
+    });
+
+    if (!admin || !admin.isActive) {
+      throw new AppError('Admin account is disabled', 'ADMIN_DISABLED', 403);
+    }
+
+    const isValid = await verifyPassword(input.currentPassword, admin.passwordHash);
+    if (!isValid) {
+      throw new AppError('Current password is incorrect', 'INVALID_CREDENTIALS', 401);
+    }
+
+    const passwordHash = await hashPassword(input.newPassword);
+    const updated = await prisma.$transaction(async (tx) => {
+      const changed = await tx.superAdmin.update({
+        where: { id: admin.id },
+        data: {
+          passwordHash,
+          mustChangePassword: false,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isActive: true,
+          mustChangePassword: true,
+          updatedAt: true,
+        },
+      });
+
+      await tx.superAdminRefreshToken.deleteMany({
+        where: input.currentRefreshToken
+          ? {
+              adminId: admin.id,
+              token: { not: input.currentRefreshToken },
+            }
+          : {
+              adminId: admin.id,
+            },
+      });
+
+      return changed;
+    });
+
+    await this.logAuditAction(
+      input.adminId,
+      'CHANGE_ADMIN_PASSWORD',
+      'super_admins',
+      admin.id,
+      { revokedOtherRefreshTokens: true },
+      input.context
+    );
+
+    return updated;
   }
 
   // ===========================================
@@ -441,10 +878,12 @@ export class AdminService {
         skip,
         take: limit,
         include: {
-          subscription: {
+          billingAccount: {
             select: {
-              plan: true,
               status: true,
+              pricingTier: true,
+              walletBalance: true,
+              suspensionReason: true,
             },
           },
           _count: {
@@ -581,7 +1020,7 @@ export class AdminService {
           orderBy: { createdAt: 'desc' },
           take: 50,
         }),
-        subscriptionBillingService.getSubscriptionSummary(organizationId),
+        walletBillingService.getWalletSummary(organizationId),
       ]);
 
     await this.logAuditAction(adminId, 'VIEW_ORGANIZATION_ONBOARDING', 'organizations', organizationId);
@@ -596,6 +1035,390 @@ export class AdminService {
       subscriptionSummary,
       externalMappings,
       recentProviderOperations,
+    };
+  }
+
+  private async buildOrganizationBillingDetail(organizationId: string) {
+    const organization = await prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        website: true,
+        logoUrl: true,
+        status: true,
+        suspendedAt: true,
+        suspensionReason: true,
+        createdAt: true,
+        updatedAt: true,
+        billingAccount: {
+          select: {
+            id: true,
+            status: true,
+            pricingTier: true,
+            walletBalance: true,
+            stripeCustomerId: true,
+            stripeDefaultPaymentMethodId: true,
+            suspensionReason: true,
+            suspendedAt: true,
+            mrcNextRunAt: true,
+            setupFeeChargedAt: true,
+            updatedAt: true,
+          },
+        },
+        _count: {
+          select: {
+            users: true,
+            brands: true,
+            campaigns: true,
+            phoneNumbers: true,
+            messages: true,
+          },
+        },
+      },
+    });
+
+    if (!organization) {
+      throw new AppError('Organization not found', 'ORGANIZATION_NOT_FOUND', 404);
+    }
+
+    const [walletSummary, recentLedgerEntries, recentCharges, recentBillingEvents, recentAuditLogs] =
+      await Promise.all([
+        walletBillingService.getWalletSummary(organizationId),
+        prisma.billingLedgerEntry.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          include: {
+            message: {
+              select: {
+                id: true,
+                direction: true,
+                type: true,
+                from: true,
+                to: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        }),
+        prisma.billingCharge.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        }),
+        prisma.billingEvent.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          include: {
+            message: {
+              select: {
+                id: true,
+                direction: true,
+                type: true,
+                from: true,
+                to: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+        }),
+        prisma.adminAuditLog.findMany({
+          where: {
+            resource: 'organization_billing',
+            resourceId: organizationId,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+          include: {
+            admin: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+    return {
+      organization: {
+        ...organization,
+        billingAccount: organization.billingAccount
+          ? {
+              id: organization.billingAccount.id,
+              status: organization.billingAccount.status,
+              pricingTier: organization.billingAccount.pricingTier,
+              walletBalance: toAmount(organization.billingAccount.walletBalance),
+              suspensionReason: organization.billingAccount.suspensionReason,
+              suspendedAt: organization.billingAccount.suspendedAt,
+              mrcNextRunAt: organization.billingAccount.mrcNextRunAt,
+              setupFeeChargedAt: organization.billingAccount.setupFeeChargedAt,
+              updatedAt: organization.billingAccount.updatedAt,
+              hasStripeCustomer: Boolean(organization.billingAccount.stripeCustomerId),
+              hasSavedPaymentMethod: Boolean(organization.billingAccount.stripeDefaultPaymentMethodId),
+            }
+          : null,
+      },
+      walletSummary,
+      recentLedgerEntries: recentLedgerEntries.map((entry) => ({
+        ...entry,
+        amount: toAmount(entry.amount),
+        balanceAfter: toAmount(entry.balanceAfter),
+      })),
+      recentCharges: recentCharges.map((charge) => ({
+        ...charge,
+        amount: toAmount(charge.amount),
+      })),
+      recentBillingEvents,
+      recentAuditLogs,
+    };
+  }
+
+  async getOrganizationBilling(
+    adminId: string,
+    organizationId: string,
+    context?: AdminActionContext
+  ) {
+    const detail = await this.buildOrganizationBillingDetail(organizationId);
+
+    await this.logAuditAction(
+      adminId,
+      'VIEW_ORGANIZATION_BILLING',
+      'organization_billing',
+      organizationId,
+      {
+        organizationId,
+      },
+      context
+    );
+
+    return detail;
+  }
+
+  async applyOrganizationWalletAdjustment(input: {
+    adminId: string;
+    adminEmail: string;
+    organizationId: string;
+    type: 'credit' | 'debit';
+    amount: number;
+    reason: string;
+    idempotencyKey?: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    const adjustment = await walletBillingService.applyAdminWalletAdjustment({
+      organizationId: input.organizationId,
+      type: input.type,
+      amount: input.amount,
+      reason: input.reason,
+      adminId: input.adminId,
+      adminEmail: input.adminEmail,
+      idempotencyKey: input.idempotencyKey,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_WALLET_ADJUSTMENT',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        type: input.type,
+        amount: adjustment.amount,
+        reason: input.reason,
+        previousValues: {
+          walletBalance: before.account.walletBalance,
+          billingStatus: before.account.status,
+        },
+        newValues: {
+          walletBalance: adjustment.walletBalance,
+          billingStatus: billing.walletSummary.account.status,
+        },
+        affectedLedgerEntryId: adjustment.ledgerEntry.id,
+        affectedLedgerKey: adjustment.ledgerEntry.ledgerKey,
+        affectedChargeId: adjustment.charge.id,
+        affectedChargeKey: adjustment.charge.chargeKey,
+        idempotentReplay: adjustment.idempotentReplay,
+      },
+      input.context
+    );
+
+    return {
+      adjustment: {
+        ledgerEntry: adjustment.ledgerEntry,
+        charge: adjustment.charge,
+        previousBalance: adjustment.previousBalance,
+        walletBalance: adjustment.walletBalance,
+        amount: adjustment.amount,
+        type: adjustment.type,
+        reason: adjustment.reason,
+        idempotentReplay: adjustment.idempotentReplay,
+      },
+      billing,
+    };
+  }
+
+  async updateOrganizationBillingAccount(input: {
+    adminId: string;
+    organizationId: string;
+    status?: BillingAccountStatus;
+    suspensionReason?: string;
+    pricingTier?: BillingPricingTier;
+    context?: AdminActionContext;
+  }) {
+    const result = await walletBillingService.updateAdminBillingAccount({
+      organizationId: input.organizationId,
+      status: input.status,
+      suspensionReason: input.suspensionReason,
+      pricingTier: input.pricingTier,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_ACCOUNT_UPDATE',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        reason: input.suspensionReason,
+        previousValues: {
+          status: result.previousAccount.status,
+          pricingTier: result.previousAccount.pricingTier,
+          suspensionReason: result.previousAccount.suspensionReason,
+          suspendedAt: result.previousAccount.suspendedAt,
+        },
+        newValues: {
+          status: result.account.status,
+          pricingTier: result.account.pricingTier,
+          suspensionReason: result.account.suspensionReason,
+          suspendedAt: result.account.suspendedAt,
+        },
+      },
+      input.context
+    );
+
+    return {
+      account: result.account,
+      billing,
+    };
+  }
+
+  async createOrganizationBillingPortal(input: {
+    adminId: string;
+    organizationId: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    const portal = await walletBillingService.createBillingPortalSession(input.organizationId, {
+      returnUrl: `${config.webUrl}/admin/organizations`,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_PORTAL_SESSION',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        previousValues: {
+          hasStripeCustomer: before.account.hasStripeCustomer,
+        },
+        newValues: {
+          hasStripeCustomer: billing.walletSummary.account.hasStripeCustomer,
+        },
+        portalSessionCreated: true,
+      },
+      input.context
+    );
+
+    return {
+      portal,
+      billing,
+    };
+  }
+
+  async releaseOrganizationHeldInbound(input: {
+    adminId: string;
+    organizationId: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    const result = await walletBillingService.releaseHeldInboundMessages(input.organizationId);
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_RELEASE_HELD_INBOUND',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        previousValues: {
+          heldInboundCount: before.usage.heldInboundCount,
+          walletBalance: before.account.walletBalance,
+        },
+        newValues: {
+          heldInboundCount: billing.walletSummary.usage.heldInboundCount,
+          walletBalance: billing.walletSummary.account.walletBalance,
+        },
+        result,
+      },
+      input.context
+    );
+
+    return {
+      result,
+      billing,
+    };
+  }
+
+  async processOrganizationMrc(input: {
+    adminId: string;
+    organizationId: string;
+    context?: AdminActionContext;
+  }) {
+    const before = await walletBillingService.getWalletSummary(input.organizationId);
+    await walletBillingService.getOrCreateAccount(input.organizationId);
+    const result = await walletBillingService.processMonthlyRecurringCharges({
+      organizationId: input.organizationId,
+    });
+    const billing = await this.buildOrganizationBillingDetail(input.organizationId);
+
+    await this.logAuditAction(
+      input.adminId,
+      'ADMIN_BILLING_PROCESS_MRC',
+      'organization_billing',
+      input.organizationId,
+      {
+        organizationId: input.organizationId,
+        previousValues: {
+          billingStatus: before.account.status,
+          walletBalance: before.account.walletBalance,
+          mrcNextRunAt: before.account.mrcNextRunAt,
+        },
+        newValues: {
+          billingStatus: billing.walletSummary.account.status,
+          walletBalance: billing.walletSummary.account.walletBalance,
+          mrcNextRunAt: billing.walletSummary.account.mrcNextRunAt,
+        },
+        result,
+      },
+      input.context
+    );
+
+    return {
+      result,
+      billing,
     };
   }
 
