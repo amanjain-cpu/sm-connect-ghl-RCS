@@ -34,3 +34,6 @@ coverage/
 .cache/
 tmp/
 temp/
+
+# Local SimplyRCS sandbox state
+.mock-simplyrcs/
