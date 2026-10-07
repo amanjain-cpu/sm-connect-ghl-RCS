@@ -38,7 +38,26 @@ type IncomingStatusJobData = {
   direction?: string;
 };
 
-type IncomingEventJobData = IncomingInboundJobData | IncomingStatusJobData;
+type RcsInboundJobData = {
+  kind: 'rcs-inbound';
+  rcsMessageId: string;
+  rcsConversationId?: string | null;
+  senderIdId?: string | null;
+  organizationId?: string | null;
+  from: string;
+  body: string;
+  mediaUrls?: string[];
+};
+
+type RcsStatusJobData = {
+  kind: 'rcs-status';
+  rcsMessageId: string;
+  status: 'sent' | 'delivered' | 'read' | 'failed';
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type IncomingEventJobData = IncomingInboundJobData | IncomingStatusJobData | RcsInboundJobData | RcsStatusJobData;
 
 type IncomingEnqueueOptions = {
   jobId?: string;
@@ -79,10 +98,11 @@ function getConnectionMetadata(connection: Awaited<ReturnType<typeof platformSer
 }
 
 async function resolveOrganizationIdFromJobData(data: IncomingEventJobData): Promise<string | undefined> {
+  if (data.kind === 'rcs-inbound' && data.organizationId) return data.organizationId;
   const message = await prisma.message.findFirst({
-    where: {
-      signalmashMessageId: data.signalmashMessageId,
-    },
+    where: data.kind === 'rcs-inbound' || data.kind === 'rcs-status'
+      ? { rcsMessageId: data.rcsMessageId }
+      : { signalmashMessageId: data.signalmashMessageId },
     select: {
       organizationId: true,
     },
@@ -141,6 +161,46 @@ export async function enqueueIncomingStatusEvent(
   );
 }
 
+export async function enqueueRcsInboundEvent(data: Omit<RcsInboundJobData, 'kind'>) {
+  return incomingEventsQueue.add('rcs-inbound', { kind: 'rcs-inbound', ...data }, { jobId: `rcs-inbound-${data.rcsMessageId}` });
+}
+
+export async function enqueueRcsStatusEvent(data: Omit<RcsStatusJobData, 'kind'>) {
+  return incomingEventsQueue.add('rcs-status', { kind: 'rcs-status', ...data }, { jobId: `rcs-status-${data.rcsMessageId}-${data.status}` });
+}
+
+/** Pushes an inbound message into the CRM, parking it in the dead-letter queue when no connection is live. */
+async function syncInboundToCrm(
+  job: { name: string; data: IncomingEventJobData },
+  message: Awaited<ReturnType<typeof messageService.handleInbound>>,
+  options: { mediaUrls?: string[]; complianceAction?: Parameters<typeof inboundMessageSyncService.syncToPlatform>[1] extends infer O ? (O extends { complianceAction?: infer A } ? A : never) : never; externalId: string }
+) {
+  try {
+    await inboundMessageSyncService.syncToPlatform(message, { mediaUrls: options.mediaUrls, complianceAction: options.complianceAction });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'No active platform connection for inbound message') {
+      logger.warn({ organizationId: message.organizationId, externalId: options.externalId }, 'No active platform connection for inbound message');
+      await deadLetterService.record({
+        queueName: INCOMING_QUEUE_NAME,
+        jobName: job.name,
+        jobKey: `deferred-${options.externalId}`,
+        payload: job.data as unknown as Record<string, unknown>,
+        error: 'No active platform connection for inbound message',
+        organizationId: message.organizationId,
+        metadata: { reason: 'connection_unavailable', deferredAt: new Date().toISOString() },
+      });
+      return;
+    }
+    if (isAuthClassScopeMismatchError(error)) {
+      const connections = await platformService.getByOrganization(message.organizationId, 'leadconnector');
+      const connection = connections.find((item) => item.status === 'connected');
+      if (connection) await markConnectionAuthClassError(connection.id, 'inbound', error);
+      throw new UnrecoverableError(error instanceof Error ? error.message : 'Platform auth class scope mismatch');
+    }
+    throw error;
+  }
+}
+
 export function startIncomingEventsWorker() {
   if (incomingEventsWorker) {
     return incomingEventsWorker;
@@ -149,6 +209,48 @@ export function startIncomingEventsWorker() {
   incomingEventsWorker = new Worker<IncomingEventJobData>(
     INCOMING_QUEUE_NAME,
     async (job) => {
+      if (job.data.kind === 'rcs-inbound') {
+        const message = await messageService.handleRcsInbound({
+          rcsMessageId: job.data.rcsMessageId,
+          rcsConversationId: job.data.rcsConversationId,
+          senderIdId: job.data.senderIdId,
+          organizationId: job.data.organizationId,
+          from: job.data.from,
+          body: job.data.body,
+          mediaUrls: job.data.mediaUrls,
+        });
+        const complianceEvent = await complianceService.handleInboundKeyword({
+          organizationId: message.organizationId,
+          from: message.from,
+          body: message.body,
+        });
+        if (message.heldForPayment || !message.visible) {
+          logger.info({ messageId: message.id, organizationId: message.organizationId }, 'Inbound RCS message stored and held from CRM sync pending wallet funding');
+          return message;
+        }
+        await syncInboundToCrm(job, message, { mediaUrls: job.data.mediaUrls, complianceAction: complianceEvent?.action, externalId: job.data.rcsMessageId });
+        return message;
+      }
+
+      if (job.data.kind === 'rcs-status') {
+        const message = await messageService.handleRcsStatusUpdate(job.data.rcsMessageId, job.data.status, job.data.errorCode, job.data.errorMessage);
+        if (!message) throw new UnrecoverableError(`RCS message ${job.data.rcsMessageId} not found`);
+        if (message.platformConnectionId && message.platformMessageId) {
+          const connection = await platformService.getByIdUnsafe(message.platformConnectionId);
+          if (connection.status !== 'connected') return message;
+          try {
+            await platformAdapterRegistry.get('leadconnector').updateMessageStatus?.(toPlatformAdapterConnection(connection), message.platformMessageId, message.status);
+          } catch (error) {
+            if (isAuthClassScopeMismatchError(error)) {
+              await markConnectionAuthClassError(connection.id, 'status', error);
+              throw new UnrecoverableError(error instanceof Error ? error.message : 'Platform auth class scope mismatch');
+            }
+            throw error;
+          }
+        }
+        return message;
+      }
+
       if (job.data.kind === 'signalmash-inbound') {
         const message = await messageService.handleInbound({
           signalmashMessageId: job.data.signalmashMessageId,

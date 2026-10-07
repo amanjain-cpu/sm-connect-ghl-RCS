@@ -50,6 +50,7 @@ const PRICING_TIERS = {
     maxTopUpAmount: 499,
     smsRate: 0.01,
     mmsRate: 0.025,
+    rcsRate: 0.01, // TODO pricing: RCS rate not decided yet; priced as SMS until Ayush confirms.
     campaignMonthlyRate: 10,
     phoneNumberMonthlyRate: 1,
     basicSetupFee: BASIC_SETUP_FEE,
@@ -63,6 +64,7 @@ const PRICING_TIERS = {
     maxTopUpAmount: 1399,
     smsRate: 0.008,
     mmsRate: 0.02,
+    rcsRate: 0.008,
     campaignMonthlyRate: 10,
     phoneNumberMonthlyRate: 0.75,
     basicSetupFee: BASIC_SETUP_FEE,
@@ -76,6 +78,7 @@ const PRICING_TIERS = {
     maxTopUpAmount: null,
     smsRate: 0.007,
     mmsRate: 0.0175,
+    rcsRate: 0.007,
     campaignMonthlyRate: 10,
     phoneNumberMonthlyRate: 0.5,
     basicSetupFee: BASIC_SETUP_FEE,
@@ -91,6 +94,7 @@ const PRICING_TIERS = {
     maxTopUpAmount: number | null;
     smsRate: number;
     mmsRate: number;
+    rcsRate: number;
     campaignMonthlyRate: number;
     phoneNumberMonthlyRate: number;
     basicSetupFee: number;
@@ -173,7 +177,7 @@ type OnboardingProvisioningResult =
 interface MessageBillingEstimate {
   catalogVersion: string;
   pricingTier: BillingPricingTier;
-  unit: 'sms' | 'mms';
+  unit: 'sms' | 'mms' | 'rcs';
   units: number;
   rate: number;
   amount: number;
@@ -313,9 +317,23 @@ function estimateMessageCharge(input: {
   body: string;
   mediaUrls?: string[] | null;
   pricingTier: BillingPricingTier;
+  channel?: 'sms' | 'mms' | 'rcs';
   now?: Date;
 }): MessageBillingEstimate {
   const tier = PRICING_TIERS[input.pricingTier];
+
+  if (input.channel === 'rcs') {
+    // One RCS message is one billable unit regardless of length or media.
+    return {
+      catalogVersion: PRICE_CATALOG_VERSION,
+      pricingTier: input.pricingTier,
+      unit: 'rcs',
+      units: 1,
+      rate: tier.rcsRate,
+      amount: roundLedger(tier.rcsRate),
+      estimatedAt: (input.now ?? new Date()).toISOString(),
+    };
+  }
 
   if (input.mediaUrls && input.mediaUrls.length > 0) {
     return {
@@ -1314,6 +1332,7 @@ export class WalletBillingService {
     organizationId: string;
     body: string;
     mediaUrls?: string[] | null;
+    channel?: 'sms' | 'mms' | 'rcs';
   }) {
     const account = await this.chargeSetupFeeIfNeeded(input.organizationId);
     this.assertAccountActive(account);
@@ -1323,6 +1342,7 @@ export class WalletBillingService {
       body: input.body,
       mediaUrls: input.mediaUrls,
       pricingTier: account.pricingTier,
+      channel: input.channel,
     });
 
     if (toAmount(account.walletBalance) < estimate.amount) {
@@ -1342,6 +1362,12 @@ export class WalletBillingService {
     return estimate;
   }
 
+  /** The charge for a message on a given channel, without any wallet checks (used after a fallback). */
+  async estimateForChannel(input: { organizationId: string; body: string; mediaUrls?: string[] | null; channel: 'sms' | 'mms' | 'rcs' }) {
+    const account = await this.getOrCreateAccount(input.organizationId);
+    return estimateMessageCharge({ body: input.body, mediaUrls: input.mediaUrls, pricingTier: account.pricingTier, channel: input.channel });
+  }
+
   async recordOutboundMessageDebit(message: Message) {
     const account = await this.getOrCreateAccount(message.organizationId);
     const estimate =
@@ -1350,6 +1376,7 @@ export class WalletBillingService {
         body: message.body,
         mediaUrls: Array.isArray(message.mediaUrls) ? message.mediaUrls as string[] : null,
         pricingTier: account.pricingTier,
+        channel: message.deliveryChannel ?? undefined,
       });
 
     return this.debitWallet({
@@ -1358,11 +1385,13 @@ export class WalletBillingService {
       amount: estimate.amount,
       category: 'message_usage',
       description: `Outbound ${estimate.unit.toUpperCase()} accepted by provider`,
-      sourceId: message.signalmashMessageId ?? message.id,
+      sourceId: message.rcsMessageId ?? message.signalmashMessageId ?? message.id,
       messageId: message.id,
       metadata: {
         ...estimate,
         direction: 'outbound',
+        deliveryChannel: message.deliveryChannel ?? estimate.unit,
+        fallbackReason: message.fallbackReason ?? null,
       },
     });
   }

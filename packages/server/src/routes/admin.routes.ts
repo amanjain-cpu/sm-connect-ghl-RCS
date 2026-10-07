@@ -9,6 +9,8 @@ import { adminService, SETTINGS_KEYS } from '../services/admin.service.js';
 import { AppError } from '../utils/errors.js';
 import { verifyAdminAccessToken } from '../utils/jwt.js';
 import { prisma } from '../config/database.js';
+import { config } from '../config/index.js';
+import { simplyRcsService } from '../services/simplyrcs.service.js';
 import { signalmashService } from '../services/signalmash.service.js';
 import { phoneNumberService } from '../services/phoneNumber.service.js';
 import { brandService } from '../services/brand.service.js';
@@ -445,6 +447,52 @@ router.get('/settings/signalmash/diagnostic', requireSuperAdmin, async (req: Adm
           }
         : null,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/settings/simplyrcs/diagnostic', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const latest = await prisma.adminAuditLog.findFirst({
+      where: { action: 'TEST_SIMPLYRCS_CONNECTION', resource: 'simplyrcs_connectivity' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, createdAt: true, details: true },
+    });
+    res.json({ success: true, data: latest ? { id: latest.id, createdAt: latest.createdAt, ...((latest.details as Record<string, unknown> | null) ?? {}) } : null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/settings/simplyrcs/test-connection', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const diagnostic = await simplyRcsService.runConnectionDiagnostic();
+    await adminService.logAuditAction(req.admin!.id, 'TEST_SIMPLYRCS_CONNECTION', 'simplyrcs_connectivity', undefined, diagnostic as unknown as Record<string, unknown>, getAdminContext(req));
+    res.json({ success: true, data: diagnostic });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Registers this server's callback URL with SimplyRCS and stores the signing secret it returns. */
+router.post('/settings/simplyrcs/register-webhook', requireSuperAdmin, async (req: AdminRequest, res: Response, next: NextFunction) => {
+  try {
+    const url = `${config.apiUrl}/api/webhooks/simplyrcs`;
+    const existing = await simplyRcsService.listWebhookEndpoints();
+    const duplicate = existing.find((endpoint) => endpoint.url === url);
+    if (duplicate) {
+      res.json({ success: true, data: { url, endpointId: duplicate.id, alreadyRegistered: true, secretStored: false } });
+      return;
+    }
+    const created = await simplyRcsService.createWebhookEndpoint(url, [
+      'message.received', 'message.status', 'message.delivered', 'message.read', 'message.failed', 'button.clicked', 'contact.opted_out',
+    ]);
+    if (created.secret) {
+      await adminService.setSetting(req.admin!.id, SETTINGS_KEYS.SIMPLYRCS_WEBHOOK_SECRET, created.secret, { description: 'Signing secret of the SimplyRCS webhook endpoint' });
+    }
+    await adminService.logAuditAction(req.admin!.id, 'REGISTER_SIMPLYRCS_WEBHOOK', 'simplyrcs_connectivity', created.id, { url, secretStored: Boolean(created.secret) }, getAdminContext(req));
+    res.status(201).json({ success: true, data: { url, endpointId: created.id, alreadyRegistered: false, secretStored: Boolean(created.secret) } });
   } catch (error) {
     next(error);
   }

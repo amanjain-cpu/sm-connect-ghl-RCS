@@ -40,13 +40,16 @@ import { notify } from '@/stores/notification.store';
 interface Message {
   id: string;
   direction: 'inbound' | 'outbound';
-  type: 'sms' | 'mms';
+  type: 'sms' | 'mms' | 'rcs';
   from: string;
   to: string;
   body: string;
-  status: 'queued' | 'sending' | 'sent' | 'delivered' | 'failed' | 'undelivered' | 'received';
+  status: 'queued' | 'sending' | 'sent' | 'delivered' | 'read' | 'failed' | 'undelivered' | 'received';
   errorMessage: string | null;
   signalmashMessageId: string | null;
+  rcsMessageId?: string | null;
+  deliveryChannel?: 'sms' | 'mms' | 'rcs' | null;
+  fallbackReason?: string | null;
   platformConnectionId: string | null;
   campaignId: string | null;
   createdAt: string;
@@ -79,6 +82,7 @@ const statusConfig = {
   sending: { label: 'Sending', icon: Send, variant: 'warning' as const },
   sent: { label: 'Sent', icon: Send, variant: 'warning' as const },
   delivered: { label: 'Delivered', icon: CheckCircle, variant: 'success' as const },
+  read: { label: 'Read', icon: CheckCircle, variant: 'success' as const },
   failed: { label: 'Failed', icon: XCircle, variant: 'destructive' as const },
   undelivered: { label: 'Undelivered', icon: XCircle, variant: 'destructive' as const },
   received: { label: 'Received', icon: ArrowDownLeft, variant: 'default' as const },
@@ -484,7 +488,10 @@ export function MessagesPage() {
                             <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
                               {isOutbound ? 'To' : 'From'} {formatPhoneNumber(isOutbound ? message.to : message.from)}
                             </span>
-                            <Badge variant="outline">{message.type.toUpperCase()}</Badge>
+                            <Badge variant={message.type === 'rcs' ? 'success' : 'outline'}>{message.type.toUpperCase()}</Badge>
+                            {message.fallbackReason && (
+                              <Badge variant="secondary" title={message.fallbackReason}>SMS fallback: {message.fallbackReason.split(':')[0].replace(/_/g, ' ')}</Badge>
+                            )}
                             <Badge variant={status.variant} className="gap-1">
                               <StatusIcon className="h-3 w-3" />
                               {status.label}
@@ -527,7 +534,7 @@ export function MessagesPage() {
                         <div className="flex justify-between gap-3">
                           <span>Message ID</span>
                           <span className="max-w-[150px] truncate font-medium text-slate-950 dark:text-slate-50">
-                            {message.signalmashMessageId || message.id}
+                            {message.rcsMessageId || message.signalmashMessageId || message.id}
                           </span>
                         </div>
                       </div>
@@ -543,9 +550,9 @@ export function MessagesPage() {
       <Dialog open={showComposeDialog} onOpenChange={setShowComposeDialog}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Send SMS</DialogTitle>
+            <DialogTitle>Send message</DialogTitle>
             <DialogDescription>
-              Send an outbound SMS using an active owned number and, if needed, an approved campaign.
+              Goes out as RCS when your agent is live and the phone supports it; otherwise as SMS from the selected number.
             </DialogDescription>
           </DialogHeader>
 

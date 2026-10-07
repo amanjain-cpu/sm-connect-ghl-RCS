@@ -315,6 +315,14 @@ class AdminApiClient {
     return this.get<{ success: boolean; data: any | null }>('/settings/signalmash/diagnostic');
   }
 
+  async testSimplyRcsConnection() {
+    return this.post<{ success: boolean; data: any }>('/settings/simplyrcs/test-connection', {});
+  }
+
+  async registerSimplyRcsWebhook() {
+    return this.post<{ success: boolean; data: { url: string; endpointId: string; alreadyRegistered: boolean; secretStored: boolean } }>('/settings/simplyrcs/register-webhook', {});
+  }
+
   async testSignalmashConnection(lookups?: { brandId?: string; campaignId?: string }) {
     return this.post<{ success: boolean; data: any }>('/settings/signalmash/test-connection', lookups);
   }

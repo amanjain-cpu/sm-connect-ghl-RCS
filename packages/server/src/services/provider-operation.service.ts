@@ -1,3 +1,4 @@
+import type { MessagingProvider } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database.js';
 import { integrationService } from './integration.service.js';
@@ -6,6 +7,7 @@ interface ProviderOperationInput {
   organizationId: string;
   installationId?: string | null;
   operation: string;
+  provider?: MessagingProvider;
   localResourceType?: string;
   localResourceId?: string;
   externalId?: string | null;
@@ -27,6 +29,7 @@ export class ProviderOperationService {
         organizationId: input.organizationId,
         installationId,
         operation: input.operation,
+        provider: input.provider ?? 'signalmash',
         localResourceType: input.localResourceType,
         localResourceId: input.localResourceId,
         externalId: input.externalId ?? undefined,

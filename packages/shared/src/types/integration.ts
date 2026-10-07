@@ -9,7 +9,10 @@ export type IntegrationPlatform =
   | 'salesforce'
   | 'zoho';
 
-export type MessagingProvider = 'signalmash';
+export type MessagingProvider = 'signalmash' | 'simplyrcs';
+
+/** The network a message travels on. RCS is tried first when the organization has a live agent. */
+export type DeliveryChannel = 'sms' | 'mms' | 'rcs';
 
 export type IntegrationConnectionStatus =
   | 'connected'
@@ -176,23 +179,24 @@ export interface MessagingProviderAdapter {
     metadata?: Record<string, unknown>;
   }): Promise<void>;
 
-  registerBrand(input: Record<string, unknown>): Promise<{
+  // 10DLC registration and number inventory are Signalmash concerns; an RCS-only provider leaves them out.
+  registerBrand?(input: Record<string, unknown>): Promise<{
     externalBrandId: string;
     secondaryBrandId?: string;
     status: string;
     metadata?: Record<string, unknown>;
   }>;
 
-  registerCampaign(input: Record<string, unknown>): Promise<{
+  registerCampaign?(input: Record<string, unknown>): Promise<{
     externalCampaignId: string;
     secondaryCampaignId?: string;
     status: string;
     metadata?: Record<string, unknown>;
   }>;
 
-  searchAvailableNumbers(input: Record<string, unknown>): Promise<AvailablePhoneNumber[]>;
+  searchAvailableNumbers?(input: Record<string, unknown>): Promise<AvailablePhoneNumber[]>;
 
-  buyNumber(input: {
+  buyNumber?(input: {
     phoneNumber: string;
     campaignId?: string;
     metadata?: Record<string, unknown>;

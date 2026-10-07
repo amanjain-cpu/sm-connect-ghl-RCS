@@ -1,0 +1,18 @@
+{
+  "channels": [
+    {
+      "id": "chan_rcs_1",
+      "orgId": "org_mock",
+      "type": "RCS",
+      "provider": "INFOBIP",
+      "status": "ACTIVE",
+      "createdAt": "2026-10-07T13:33:49.725Z"
+    }
+  ],
+  "agents": [],
+  "senderIds": [],
+  "contacts": [],
+  "messages": [],
+  "endpoints": [],
+  "tapCounter": 0
+}

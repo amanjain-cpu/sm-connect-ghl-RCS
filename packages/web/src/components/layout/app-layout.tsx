@@ -217,6 +217,7 @@ export function AppLayout() {
               <div className="ml-[-4px] whitespace-nowrap text-[20px] font-bold leading-none tracking-[-0.015em]">
                 <span className="text-[#2FB267]">Mash</span>
                 <span className="text-[#111827]">Connect</span>
+              <span className="ml-1 text-[11px] font-bold uppercase tracking-[0.12em] text-[#6B7280]">RCS</span>
               </div>
             )}
           </div>

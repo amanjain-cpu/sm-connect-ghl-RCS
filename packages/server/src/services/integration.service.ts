@@ -295,7 +295,8 @@ export class IntegrationService {
   }
 
   async syncMessageMapping(message: Message) {
-    if (!message.signalmashMessageId) {
+    const externalId = message.rcsMessageId ?? message.signalmashMessageId;
+    if (!externalId) {
       return null;
     }
 
@@ -324,13 +325,15 @@ export class IntegrationService {
       localResourceType: 'Message',
       localResourceId: message.id,
       localParentId: message.campaignId ?? undefined,
-      externalId: message.signalmashMessageId,
+      externalId,
       secondaryExternalId: message.platformMessageId ?? undefined,
       status: this.mapMessageStatus(message.status),
+      provider: message.rcsMessageId ? 'simplyrcs' : 'signalmash',
       metadata: {
         direction: message.direction,
         from: message.from,
         to: message.to,
+        deliveryChannel: message.deliveryChannel ?? null,
       },
     });
 
@@ -532,6 +535,9 @@ export class IntegrationService {
       }),
     ]);
 
+    const rcsAgent = await prisma.rcsAgent.findUnique({ where: { organizationId }, select: { status: true } });
+    const rcsAgentStatus = rcsAgent?.status ?? null;
+
     return {
       totalBrands,
       draftBrands,
@@ -546,6 +552,7 @@ export class IntegrationService {
       activeNumbers,
       outboundMessages,
       activePortOrders,
+      rcsAgentStatus,
     };
   }
 
@@ -563,6 +570,7 @@ export class IntegrationService {
     activeNumbers: number;
     outboundMessages: number;
     activePortOrders: number;
+    rcsAgentStatus?: string | null;
   }, providerActivation: {
     activatedAt: string | null;
     source: string | null;
@@ -618,6 +626,7 @@ export class IntegrationService {
       activeNumbers: number;
       outboundMessages: number;
       activePortOrders: number;
+      rcsAgentStatus?: string | null;
     },
     providerActivation: {
       activatedAt: string | null;
@@ -686,6 +695,16 @@ export class IntegrationService {
             : 'Link an active sender number before testing outbound traffic.',
       },
       {
+        key: 'rcs_agent',
+        label: 'RCS agent live',
+        complete: resourceCounts.rcsAgentStatus === 'live',
+        helper: resourceCounts.rcsAgentStatus === 'live'
+          ? 'Customers on RCS-capable phones receive branded messages; others get SMS from the sender number.'
+          : resourceCounts.rcsAgentStatus
+            ? `The RCS agent is ${String(resourceCounts.rcsAgentStatus).replace(/_/g, ' ')}. Messages go out as SMS until it is live.`
+            : 'Optional: register an RCS agent to send branded messages. SMS works without it.',
+      },
+      {
         key: 'traffic_validation',
         label: 'Embedded outbound traffic validated',
         complete: resourceCounts.outboundMessages > 0,
@@ -740,12 +759,14 @@ export class IntegrationService {
     externalId: string;
     secondaryExternalId?: string;
     status: ExternalResourceStatus;
+    provider?: 'signalmash' | 'simplyrcs';
     metadata?: Record<string, unknown>;
   }) {
+    const provider = input.provider ?? 'signalmash';
     return prisma.externalResourceMapping.upsert({
       where: {
         provider_kind_externalId: {
-          provider: 'signalmash',
+          provider,
           kind: input.kind,
           externalId: input.externalId,
         },
