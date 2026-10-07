@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { Header } from '@/components/layout/header';
-
-const SUPPORT_AGENT_ASSET_VERSION = '20260710-enterprise-chat-v3';
 import { PageShell } from '@/components/layout/page-shell';
 import { api } from '@/lib/api';
 
@@ -12,8 +10,6 @@ declare global {
     };
   }
 }
-
-const [supportAgentConfig, setSupportAgentConfig] = useState<{ apiBaseUrl: string; token: string } | null>(null);
 
 const SUPPORT_AGENT_ASSET_VERSION = '20260721-help-agent-only';
 const SUPPORT_WIDGET_READY_TIMEOUT_MS = 5000;
@@ -26,7 +22,7 @@ export function HelpPage() {
   useEffect(() => {
     let cancelled = false;
 
-    const loadSupportAgent = async () => {
+    const mountSupportAgent = async () => {
       try {
         if (supportAgentMountedRef.current) {
           setSupportAgentStatus('ready');
@@ -68,46 +64,22 @@ export function HelpPage() {
         supportAgentMountedRef.current = true;
         setSupportAgentStatus('ready');
       } catch (error) {
-
         console.error('Support agent widget unavailable', error);
-        
         if (!cancelled) {
-          console.error('Support chat failed to initialize', error);
           setSupportAgentStatus('unavailable');
         }
       }
     };
 
-    void loadSupportAgent();
+    void mountSupportAgent();
 
     return () => {
       cancelled = true;
     };
   }, []);
 
-  useEffect(() => {
-    if (supportAgentStatus !== 'ready' || !supportAgentConfig) {
-      return;
-    }
-
-    const mountPoint = mountRef.current;
-    if (!mountPoint || !window.SignalmashSupportWidget) {
-      console.error('Support chat mount point or widget global was unavailable');
-      setSupportAgentStatus('unavailable');
-      return;
-    }
-
-    try {
-      mountPoint.innerHTML = '';
-      window.SignalmashSupportWidget.mount(mountPoint, supportAgentConfig);
-    } catch (error) {
-      console.error('Support chat widget mount failed', error);
-      setSupportAgentStatus('unavailable');
-    }
-  }, [supportAgentConfig, supportAgentStatus]);
-
   return (
-      <div className="flex min-h-screen flex-col bg-slate-50">
+    <div className="flex min-h-screen flex-col bg-slate-50">
       <Header
         title="AI Support Agent"
         subtitle="Ask questions about setup, numbers, campaigns, billing, and delivery."
@@ -136,7 +108,6 @@ export function HelpPage() {
     </div>
   );
 }
-
 
 async function loadSupportAgentAssets(
   assetBaseUrl: string
@@ -206,31 +177,6 @@ function loadScript(src: string): Promise<void> {
       reject(new Error('Support widget script failed to load'));
     };
     document.head.appendChild(script);
-  });
-}
-
-function waitForSupportWidget(): Promise<void> {
-  if (window.SignalmashSupportWidget) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve, reject) => {
-    const startedAt = Date.now();
-    const check = () => {
-      if (window.SignalmashSupportWidget) {
-        resolve();
-        return;
-      }
-
-      if (Date.now() - startedAt > 1500) {
-        reject(new Error('Support widget global was not registered'));
-        return;
-      }
-
-      window.setTimeout(check, 50);
-    };
-
-    check();
   });
 }
 

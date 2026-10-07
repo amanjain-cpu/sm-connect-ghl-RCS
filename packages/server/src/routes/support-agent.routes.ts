@@ -30,8 +30,8 @@ router.get(
 
     const file = req.params.file;
     if (!allowedAssetFiles.has(file)) {
-
       return res.status(404).json({ success: false, error: { message: 'Asset not found' } });
+    }
 
     const response = await fetch(`${trimSlash(config.supportAgentWidgetUrl)}/${file}`);
     if (!response.ok) {
