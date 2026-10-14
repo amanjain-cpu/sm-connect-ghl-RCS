@@ -62,7 +62,7 @@ export class MessageService {
 
   private routingPorts(): RoutingPorts {
     return {
-      getLiveAgent: (organizationId) => rcsAgentService.getLiveAgent(organizationId),
+      getLiveAgent: (organizationId, recipient) => rcsAgentService.getLiveAgent(organizationId, recipient),
       getCachedCapability: async (organizationId, phone) => {
         const row = await prisma.rcsCapability.findUnique({ where: { organizationId_phoneNumber: { organizationId, phoneNumber: phone } } });
         return row ? { isRcsCapable: row.isRcsCapable, rcsContactId: row.rcsContactId, checkedAt: row.checkedAt } : null;

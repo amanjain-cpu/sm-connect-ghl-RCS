@@ -125,6 +125,8 @@ export interface SimplyRcsAgent {
   website?: string;
   privacyUrl?: string;
   termsOfServiceUrl?: string;
+  /** Brand name, or the brand object the dev environment returns. */
+  brand?: string | { brandName?: string };
 }
 
 export interface CreateRcsAgentInput {

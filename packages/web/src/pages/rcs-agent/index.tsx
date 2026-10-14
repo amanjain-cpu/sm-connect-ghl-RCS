@@ -106,6 +106,8 @@ export function RcsAgentPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [testPhone, setTestPhone] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [existingAgents, setExistingAgents] = useState<Array<{ senderName: string; displayName: string | null; status: string | null; hasSenderId: boolean }>>([]);
+  const [existingChoice, setExistingChoice] = useState('');
 
   const form = useForm<AgentForm>({
     resolver: zodResolver(agentSchema),
@@ -138,6 +140,13 @@ export function RcsAgentPage() {
         }
       }
       if (statsResponse?.success) setStats(statsResponse.data);
+      const current = agentResponse.success ? (agentResponse.data?.agent as RcsAgent | null) : null;
+      if (!current || current.status === 'draft' || current.status === 'rejected') {
+        const available = await api.listAvailableRcsAgents().catch(() => null);
+        setExistingAgents(available?.success && available.data ? available.data.filter((item) => item.hasSenderId) : []);
+      } else {
+        setExistingAgents([]);
+      }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load the RCS agent');
     } finally {
@@ -314,6 +323,23 @@ export function RcsAgentPage() {
           </Card>
 
           <div className="space-y-6">
+            {editable && existingAgents.length > 0 && (
+              <Card className="border-primary/30 bg-primary/5 shadow-sm">
+                <CardContent className="p-6">
+                  <h3 className="text-lg font-semibold text-slate-950">Already have an agent?</h3>
+                  <p className="mt-1 text-sm text-slate-600">Agents that exist on your SimplyRCS account can be used here without a new review. Its profile and test devices are pulled in.</p>
+                  <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                    <select value={existingChoice} onChange={(event) => setExistingChoice(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm shadow-sm focus:border-primary focus:ring-2 focus:ring-primary/20">
+                      <option value="">Choose an agent</option>
+                      {existingAgents.map((item) => (
+                        <option key={item.senderName} value={item.senderName}>{item.displayName ? `${item.displayName} (${item.senderName})` : item.senderName}{item.status ? ` – ${item.status.toLowerCase().replace(/_/g, ' ')}` : ''}</option>
+                      ))}
+                    </select>
+                    <Button type="button" isLoading={busy === 'link'} disabled={!existingChoice} onClick={() => run('link', () => api.linkRcsAgent(existingChoice), 'Agent linked', 'Messages to approved test devices now go as RCS; everything else stays SMS until launch.')}>Use this agent</Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
             <Card className="border-slate-200 bg-white shadow-sm">
               <CardContent className="p-6">
                 <div className="flex items-start justify-between gap-3">
@@ -347,7 +373,7 @@ export function RcsAgentPage() {
               <Card className="border-slate-200 bg-white shadow-sm">
                 <CardContent className="p-6">
                   <h3 className="text-lg font-semibold text-slate-950">Test devices</h3>
-                  <p className="mt-1 text-sm text-slate-600">Phones that can receive the agent's messages before launch. Each gets an invite to accept.</p>
+                  <p className="mt-1 text-sm text-slate-600">Phones that can receive the agent's messages before launch. Each gets an invite to accept; approved phones already get RCS from this app.</p>
                   <div className="mt-4 flex gap-2">
                     <Input value={testPhone} onChange={(event) => setTestPhone(event.target.value)} placeholder="+15551234567" leftIcon={<Smartphone className="h-4 w-4" />} />
                     <Button variant="outline" isLoading={busy === 'device'} disabled={!testPhone.trim()} onClick={() => run('device', () => api.addRcsTestDevice(testPhone.trim()), 'Test device invited', 'Accept the invite on the phone, then send a test message.').then(() => setTestPhone(''))}>Invite</Button>

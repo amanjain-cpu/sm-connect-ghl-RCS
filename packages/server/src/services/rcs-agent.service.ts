@@ -9,8 +9,9 @@ import type { Prisma, RcsAgent, RcsAgentStatus } from '@prisma/client';
 import { prisma } from '../config/database.js';
 import { BadRequestError, NotFoundError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { simplyRcsService, type SimplyRcsAgentStatus } from './simplyrcs.service.js';
+import { simplyRcsService } from './simplyrcs.service.js';
 import { providerOperationService } from './provider-operation.service.js';
+import { mapAgentStatus, isApprovedTestDevice } from './rcs-agent-status.js';
 
 export interface RcsAgentInput {
   senderName: string;
@@ -28,18 +29,7 @@ export interface RcsAgentInput {
   termsUrl?: string | null;
 }
 
-/** Maps the provider's agent status to ours. */
-export function mapAgentStatus(status: SimplyRcsAgentStatus | string | null | undefined, current: RcsAgentStatus): RcsAgentStatus {
-  switch (String(status ?? '').toUpperCase()) {
-    case 'READY_FOR_TESTING': return 'ready_for_testing';
-    case 'IN_TESTING': return 'in_testing';
-    case 'PENDING_LAUNCH': case 'LAUNCH_PENDING': return 'pending_launch';
-    case 'LIVE': case 'ACTIVE': return 'live';
-    case 'SUSPENDED': return 'suspended';
-    case 'REJECTED': return 'rejected';
-    default: return current;
-  }
-}
+export { mapAgentStatus, isApprovedTestDevice };
 
 const EDITABLE: RcsAgentStatus[] = ['draft', 'rejected'];
 
@@ -48,11 +38,81 @@ export class RcsAgentService {
     return prisma.rcsAgent.findUnique({ where: { organizationId } });
   }
 
-  /** The agent that may send right now, or null. */
-  async getLiveAgent(organizationId: string): Promise<{ id: string; senderIdId: string } | null> {
+  /**
+   * The agent that may send to this recipient right now, or null. A live agent sends to anyone;
+   * an agent still in testing sends only to phones that accepted a test-device invite, which is
+   * how RCS is verified before launch.
+   */
+  async getLiveAgent(organizationId: string, recipient?: string): Promise<{ id: string; senderIdId: string; testing?: boolean } | null> {
     const agent = await prisma.rcsAgent.findUnique({ where: { organizationId } });
-    if (!agent || agent.status !== 'live' || !agent.simplyrcsSenderIdId) return null;
-    return { id: agent.id, senderIdId: agent.simplyrcsSenderIdId };
+    if (!agent || !agent.simplyrcsSenderIdId) return null;
+    if (agent.status === 'live') return { id: agent.id, senderIdId: agent.simplyrcsSenderIdId };
+    if (recipient && ['ready_for_testing', 'in_testing', 'pending_launch'].includes(agent.status) && isApprovedTestDevice(agent.testDevices, recipient)) {
+      return { id: agent.id, senderIdId: agent.simplyrcsSenderIdId, testing: true };
+    }
+    return null;
+  }
+
+  /**
+   * Uses an agent that already exists on the SimplyRCS account instead of registering a new one
+   * (the dev account has several). Pulls the profile and test devices from the provider.
+   */
+  async linkExisting(organizationId: string, senderName: string): Promise<RcsAgent> {
+    const existing = await prisma.rcsAgent.findUnique({ where: { organizationId } });
+    if (existing && !EDITABLE.includes(existing.status) && existing.senderName !== senderName) {
+      throw new BadRequestError(`This organization already uses agent ${existing.senderName}.`);
+    }
+    const channels = await simplyRcsService.listChannels();
+    const channel = channels.find((item) => item.type === 'RCS' && item.status === 'ACTIVE') ?? channels.find((item) => item.type === 'RCS');
+    if (!channel) throw new BadRequestError('SimplyRCS has no RCS channel on this account.');
+    const remote = await simplyRcsService.getAgent(channel.id, senderName);
+    const senderIds = await simplyRcsService.listSenderIds({ type: 'RCS_AGENT' });
+    const senderId = senderIds.find((item) => item.identifier === senderName) ?? null;
+    if (!senderId) throw new BadRequestError(`Agent ${senderName} has no sender id on SimplyRCS yet.`);
+    const devices = await simplyRcsService.listTestDevices(channel.id, senderName).catch(() => []);
+    const remoteStatus = remote.status ?? remote.senderStatus ?? null;
+    const status = mapAgentStatus(remoteStatus, 'ready_for_testing');
+    const brand = remote.brand && typeof remote.brand === 'object' ? String((remote.brand as { brandName?: string }).brandName ?? '') : String(remote.brand ?? '');
+    const data = {
+      senderName,
+      displayName: remote.displayName ?? senderName,
+      description: remote.description ?? `Linked SimplyRCS agent ${senderName}${brand ? ` (${brand})` : ''}.`,
+      logoUrl: remote.logoUrl ?? '',
+      bannerUrl: remote.bannerUrl ?? '',
+      color: remote.color ?? '#2FB267',
+      billingCategory: remote.billingCategory ?? 'CONVERSATIONAL',
+      useCase: remote.useCase ?? 'MULTI_USE',
+      phone: remote.phone ?? null,
+      email: remote.email ?? null,
+      website: remote.website ?? null,
+      privacyUrl: remote.privacyUrl ?? null,
+      termsUrl: remote.termsOfServiceUrl ?? null,
+      status,
+      simplyrcsChannelId: channel.id,
+      simplyrcsSenderIdId: senderId.id,
+      providerStatus: remoteStatus,
+      providerMessage: null,
+      testDevices: devices as unknown as Prisma.InputJsonValue,
+      submittedAt: existing?.submittedAt ?? new Date(),
+      launchedAt: status === 'live' ? existing?.launchedAt ?? new Date() : existing?.launchedAt ?? null,
+      lastStatusSyncedAt: new Date(),
+      lastSubmissionError: null,
+    };
+    const agent = existing
+      ? await prisma.rcsAgent.update({ where: { id: existing.id }, data })
+      : await prisma.rcsAgent.create({ data: { ...data, organizationId } });
+    await providerOperationService.log({ organizationId, provider: 'simplyrcs', operation: 'link_rcs_agent', localResourceType: 'rcs_agent', localResourceId: agent.id, externalId: senderId.id, status: 'success', responsePayload: { senderName, status: remoteStatus, testDevices: devices.length } });
+    return agent;
+  }
+
+  /** Agents on the account that could be linked, with their provider status. */
+  async listAvailableAgents(): Promise<Array<{ senderName: string; displayName: string | null; status: string | null; hasSenderId: boolean }>> {
+    const channels = await simplyRcsService.listChannels();
+    const channel = channels.find((item) => item.type === 'RCS');
+    if (!channel) return [];
+    const [agents, senderIds] = await Promise.all([simplyRcsService.listAgents(channel.id), simplyRcsService.listSenderIds({ type: 'RCS_AGENT' })]);
+    const withIds = new Set(senderIds.map((item) => item.identifier));
+    return agents.map((agent) => ({ senderName: agent.senderName, displayName: agent.displayName ?? null, status: agent.status ?? agent.senderStatus ?? null, hasSenderId: withIds.has(agent.senderName) }));
   }
 
   async saveDraft(organizationId: string, input: RcsAgentInput): Promise<RcsAgent> {

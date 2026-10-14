@@ -23,6 +23,8 @@ export type FallbackReason =
 export interface LiveAgent {
   id: string;
   senderIdId: string;
+  /** The agent is still in testing and the recipient is an approved test device. */
+  testing?: boolean;
 }
 
 export interface CapabilityRecord {
@@ -32,8 +34,8 @@ export interface CapabilityRecord {
 }
 
 export interface RoutingPorts {
-  /** The organization's agent when it is live, else null. */
-  getLiveAgent(organizationId: string): Promise<LiveAgent | null>;
+  /** The organization's agent when it may send to this recipient (live, or in testing with the recipient as a test device), else null. */
+  getLiveAgent(organizationId: string, recipient: string): Promise<LiveAgent | null>;
   getCachedCapability(organizationId: string, phone: string): Promise<CapabilityRecord | null>;
   /** Asks SimplyRCS; creates the contact there if needed. */
   checkCapability(phone: string): Promise<{ isRcsCapable: boolean; contactId: string; provider?: string }>;
@@ -51,8 +53,11 @@ export async function decideChannel(
 ): Promise<RouteDecision> {
   if (input.rcsEnabled === false) return { channel: 'sms', reason: 'rcs_disabled' };
 
-  const agent = await ports.getLiveAgent(input.organizationId);
+  const agent = await ports.getLiveAgent(input.organizationId, input.to);
   if (!agent) return { channel: 'sms', reason: 'no_live_agent' };
+  // Test devices accepted the agent's invite, so they can receive RCS; the provider refuses
+  // capability checks until a sender is live, so do not ask.
+  if (agent.testing) return { channel: 'rcs', agent, contactId: null };
 
   const now = (ports.now ?? (() => new Date()))();
   const cached = await ports.getCachedCapability(input.organizationId, input.to);

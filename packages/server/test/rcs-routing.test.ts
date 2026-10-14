@@ -26,6 +26,14 @@ test('routes to SMS when the organization has no live agent', async () => {
   assert.deepEqual(decision, { channel: 'sms', reason: 'no_live_agent' });
 });
 
+test('an agent in testing sends RCS to its approved test device without a capability check', async () => {
+  const p = ports({ getLiveAgent: async (_org, recipient) => (recipient === '+15125550100' ? { ...liveAgent, testing: true } : null) });
+  const decision = await decideChannel(p, { organizationId: 'org', to: '+15125550100' });
+  assert.deepEqual(decision, { channel: 'rcs', agent: { ...liveAgent, testing: true }, contactId: null });
+  assert.equal(p.checks.length, 0);
+  assert.deepEqual(await decideChannel(p, { organizationId: 'org', to: '+15125550199' }), { channel: 'sms', reason: 'no_live_agent' });
+});
+
 test('routes to SMS when RCS is switched off for the message', async () => {
   const decision = await decideChannel(ports(), { organizationId: 'org', to: '+15125550100', rcsEnabled: false });
   assert.deepEqual(decision, { channel: 'sms', reason: 'rcs_disabled' });

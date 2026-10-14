@@ -401,6 +401,14 @@ class ApiClient {
     return this.put<any>('/rcs/agent', data);
   }
 
+  async listAvailableRcsAgents() {
+    return this.get<Array<{ senderName: string; displayName: string | null; status: string | null; hasSenderId: boolean }>>('/rcs/agent/available');
+  }
+
+  async linkRcsAgent(senderName: string) {
+    return this.post<any>('/rcs/agent/link', { senderName });
+  }
+
   async submitRcsAgent() {
     return this.post<any>('/rcs/agent/submit', {});
   }

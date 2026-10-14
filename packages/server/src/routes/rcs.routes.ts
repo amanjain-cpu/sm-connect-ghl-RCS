@@ -42,6 +42,16 @@ router.get('/agent', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { agent, providerConfigured: configured } });
 }));
 
+/** Agents already on the SimplyRCS account that this organization could use. */
+router.get('/agent/available', asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await rcsAgentService.listAvailableAgents() });
+}));
+
+router.post('/agent/link', validate({ body: z.object({ senderName: z.string().trim().min(1).max(100) }) }), asyncHandler(async (req, res) => {
+  const agent = await rcsAgentService.linkExisting(req.user!.organizationId, req.body.senderName);
+  res.json({ success: true, data: agent, message: `Linked agent ${agent.senderName}` });
+}));
+
 router.put('/agent', validate({ body: agentSchema }), asyncHandler(async (req, res) => {
   const agent = await rcsAgentService.saveDraft(req.user!.organizationId, req.body);
   res.json({ success: true, data: agent, message: 'RCS agent saved' });
