@@ -388,8 +388,49 @@ class ApiClient {
     return this.get<any[]>(`/messages${query ? `?${query}` : ''}`);
   }
 
-  async sendMessage(data: { from: string; to: string; body: string; campaignId?: string; phoneNumberId?: string }) {
+  async sendMessage(data: { from?: string; to: string; body: string; campaignId?: string; phoneNumberId?: string; preferRcs?: boolean; rcsContent?: Record<string, unknown> | null; messageType?: 'MARKETING' | 'TRANSACTIONAL' | 'SERVICE' }) {
     return this.post<any>('/messages', data);
+  }
+
+  // RCS agent and routing
+  async getRcsAgent() {
+    return this.get<{ agent: any | null; providerConfigured: boolean }>('/rcs/agent');
+  }
+
+  async saveRcsAgent(data: Record<string, unknown>) {
+    return this.put<any>('/rcs/agent', data);
+  }
+
+  async listAvailableRcsAgents() {
+    return this.get<Array<{ senderName: string; displayName: string | null; status: string | null; hasSenderId: boolean }>>('/rcs/agent/available');
+  }
+
+  async linkRcsAgent(senderName: string) {
+    return this.post<any>('/rcs/agent/link', { senderName });
+  }
+
+  async submitRcsAgent() {
+    return this.post<any>('/rcs/agent/submit', {});
+  }
+
+  async refreshRcsAgent() {
+    return this.post<any>('/rcs/agent/refresh', {});
+  }
+
+  async addRcsTestDevice(phoneNumber: string) {
+    return this.post<any>('/rcs/agent/test-devices', { phoneNumber });
+  }
+
+  async launchRcsAgent() {
+    return this.post<any>('/rcs/agent/launch', {});
+  }
+
+  async getRcsCapability(phone: string) {
+    return this.get<{ channel: 'rcs' | 'sms'; reason: string | null; isRcsCapable: boolean | null; checkedAt: string | null }>(`/rcs/capability?phone=${encodeURIComponent(phone)}`);
+  }
+
+  async getRcsStats() {
+    return this.get<any>('/rcs/stats');
   }
 
   async getMessageStats(params?: { campaignId?: string; startDate?: string; endDate?: string }) {

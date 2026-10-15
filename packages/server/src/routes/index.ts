@@ -12,6 +12,7 @@ import { messageRoutes } from './message.routes.js';
 import { phoneNumberRoutes } from './phoneNumber.routes.js';
 import { platformRoutes } from './platform.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { rcsRoutes } from './rcs.routes.js';
 import { billingRoutes } from './billing.routes.js';
 import { portOrderRoutes } from './port-order.routes.js';
 import { operationsRoutes } from './operations.routes.js';
@@ -26,7 +27,7 @@ const router: RouterType = Router();
 router.get('/health', (req, res) => {
   res.json({
     success: true,
-    message: 'Signalmash Connect API is running',
+    message: 'Signalmash Connect RCS API is running',
     timestamp: new Date().toISOString(),
   });
 });
@@ -66,6 +67,7 @@ router.use('/platforms', platformRoutes);
 router.use('/billing', billingRoutes);
 router.use('/operations', operationsRoutes);
 router.use('/support-agent', supportAgentRoutes);
+router.use('/rcs', rcsRoutes);
 router.use('/webhooks', webhookRoutes);
 
 // Admin Routes (separate namespace)

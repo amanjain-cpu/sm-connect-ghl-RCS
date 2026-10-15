@@ -32,6 +32,11 @@ const configSchema = z.object({
   signalmashApiUrl: z.string().url().default('https://api.signalmash.com'),
   signalmashApiKey: z.string().optional(),
 
+  // SimplyRCS (RCS messaging; SMS fallback stays on Signalmash). Runtime settings override these.
+  simplyrcsApiUrl: z.string().url().default('https://simplyrcs.signalmash.com'),
+  simplyrcsApiKey: z.string().optional(),
+  simplyrcsWebhookSecret: z.string().optional(),
+
   // Stripe
   stripeSecretKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
@@ -98,6 +103,9 @@ function loadConfig() {
 
     signalmashApiUrl: process.env['SIGNALMASH_API_URL'],
     signalmashApiKey: process.env['SIGNALMASH_API_KEY'],
+    simplyrcsApiUrl: process.env['SIMPLYRCS_API_URL'],
+    simplyrcsApiKey: process.env['SIMPLYRCS_API_KEY'],
+    simplyrcsWebhookSecret: process.env['SIMPLYRCS_WEBHOOK_SECRET'],
 
     stripeSecretKey: process.env['STRIPE_SECRET_KEY'],
     stripeWebhookSecret: process.env['STRIPE_WEBHOOK_SECRET'],

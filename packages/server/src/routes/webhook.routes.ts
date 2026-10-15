@@ -16,7 +16,9 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
 import type { CrmPlatformAdapter } from '../adapters/crm-platform.adapter.js';
 import { enqueueGhlOutboundMessage } from '../queues/outbound-message.queue.js';
-import { enqueueIncomingInboundEvent, enqueueIncomingStatusEvent } from '../queues/incoming-events.queue.js';
+import { enqueueIncomingInboundEvent, enqueueIncomingStatusEvent, enqueueRcsInboundEvent, enqueueRcsStatusEvent } from '../queues/incoming-events.queue.js';
+import { simplyRcsService, verifySimplyRcsSignature } from '../services/simplyrcs.service.js';
+import { normalizeSimplyRcsWebhook } from '../services/simplyrcs-webhook.service.js';
 import { enqueueCrmOutboundWebhookForExactLocation } from '../services/ghl-outbound-webhook-routing.service.js';
 
 const router: RouterType = Router();
@@ -703,6 +705,52 @@ router.post(
     });
 
     res.json({ success: true });
+  })
+);
+
+/**
+ * SimplyRCS webhooks: inbound RCS messages, button taps, and delivery states.
+ * Signed with HMAC-SHA256 over the raw body (X-Signature); the secret is the one SimplyRCS
+ * returned when the endpoint was registered, stored in runtime settings.
+ */
+router.post(
+  '/simplyrcs',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { webhookSecret } = await simplyRcsService.getConfig();
+    const rawBody = (req as Request & { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+    const signature = req.get('x-signature') ?? req.get('x-simplyrcs-signature');
+    if (webhookSecret) {
+      if (!verifySimplyRcsSignature(rawBody, signature, webhookSecret)) {
+        logger.warn({ hasSignature: Boolean(signature) }, 'Rejected SimplyRCS webhook with a bad signature');
+        res.status(401).json({ success: false, error: { code: 'INVALID_SIGNATURE', message: 'Invalid webhook signature' } });
+        return;
+      }
+    } else if (config.nodeEnv === 'production') {
+      res.status(503).json({ success: false, error: { code: 'WEBHOOK_SECRET_MISSING', message: 'SimplyRCS webhook secret is not configured' } });
+      return;
+    } else {
+      logger.warn('Accepting an unsigned SimplyRCS webhook because no secret is configured (non-production only)');
+    }
+
+    const events = normalizeSimplyRcsWebhook(req.body);
+    await prisma.webhookEvent.create({
+      data: {
+        platform: crmPlatformId,
+        eventType: `simplyrcs.${String((req.body as { event?: string })?.event ?? 'unknown')}`,
+        payload: req.body,
+        headers: redactWebhookHeaders(req.headers) as any,
+      },
+    });
+
+    for (const event of events) {
+      if (event.type === 'inbound') {
+        await enqueueRcsInboundEvent(event.data);
+      } else if (event.type === 'status') {
+        await enqueueRcsStatusEvent(event.data);
+      }
+    }
+
+    res.json({ success: true, accepted: events.length });
   })
 );
 

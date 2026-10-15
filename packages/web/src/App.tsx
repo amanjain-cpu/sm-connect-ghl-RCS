@@ -13,6 +13,7 @@ import { InstallCompletePage } from '@/pages/auth/install-complete';
 import { BillingEntryPage } from '@/pages/billing/entry';
 // App pages
 import { OnboardingPage } from '@/pages/onboarding';
+import { RcsAgentPage } from '@/pages/rcs-agent';
 import { DashboardPage } from '@/pages/dashboard';
 import { BrandsPage } from '@/pages/brands';
 import { NewBrandPage } from '@/pages/brands/new';
@@ -216,6 +217,7 @@ export default function App() {
           <Route path="campaigns" element={<CampaignsPage />} />
           <Route path="campaigns/new" element={<NewCampaignPage />} />
           <Route path="campaigns/:id" element={<CampaignDetailPage />} />
+          <Route path="rcs-agent" element={<RcsAgentPage />} />
           <Route path="phone-numbers" element={<PhoneNumbersPage />} />
           <Route path="messages" element={<MessagesPage />} />
           <Route path="platforms" element={<PlatformsPage />} />

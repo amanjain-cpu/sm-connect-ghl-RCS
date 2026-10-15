@@ -11,6 +11,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Cloudflare quick tunnels are used to show the app inside the CRM during development.
+    allowedHosts: ['.trycloudflare.com', 'localhost'],
     proxy: {
       '/api': {
         target: 'http://localhost:3001',

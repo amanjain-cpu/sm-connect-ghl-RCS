@@ -107,6 +107,21 @@ const SETTING_LABELS: Record<string, { label: string; description: string; place
     description: 'Secret used to verify Signalmash webhook signatures.',
     placeholder: 'Webhook secret',
   },
+  simplyrcs_api_key: {
+    label: 'SimplyRCS API Key',
+    description: 'API key of the SimplyRCS workspace used for RCS messaging (Developer Portal → API Keys).',
+    placeholder: 'Enter your SimplyRCS API key',
+  },
+  simplyrcs_api_url: {
+    label: 'SimplyRCS API URL',
+    description: 'Base URL for SimplyRCS API requests.',
+    placeholder: 'https://simplyrcs.signalmash.com',
+  },
+  simplyrcs_webhook_secret: {
+    label: 'SimplyRCS Webhook Secret',
+    description: 'Signing secret returned when the SimplyRCS webhook endpoint was registered. Filled automatically by "Register webhook".',
+    placeholder: 'Set by Register webhook',
+  },
   stripe_secret_key: {
     label: 'Stripe Secret Key',
     description: 'Secret API key used for Stripe wallet top-ups, saved cards, and automatic MRC charges.',
@@ -171,6 +186,8 @@ export function AdminSettingsPage() {
   const [showValues, setShowValues] = useState<Record<string, boolean>>({});
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [isTestingSimplyRcs, setIsTestingSimplyRcs] = useState(false);
+  const [simplyRcsDiagnostic, setSimplyRcsDiagnostic] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successKey, setSuccessKey] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState<SignalmashDiagnostic | null>(null);
@@ -311,6 +328,39 @@ export function AdminSettingsPage() {
   const existingKeys = settings.map((setting) => setting.key);
   const missingKeys = knownKeys.filter((key) => !existingKeys.includes(key));
 
+  const handleTestSimplyRcs = async () => {
+    setIsTestingSimplyRcs(true);
+    try {
+      const response = await adminApi.testSimplyRcsConnection();
+      if (response.success) {
+        setSimplyRcsDiagnostic(response.data);
+        notify.success(response.data.ok ? 'SimplyRCS connection succeeded' : 'SimplyRCS connection failed', response.data.message);
+      }
+    } catch (testError) {
+      notify.error('Unable to test SimplyRCS connection', testError instanceof Error ? testError.message : 'Request failed');
+    } finally {
+      setIsTestingSimplyRcs(false);
+    }
+  };
+
+  const handleRegisterSimplyRcsWebhook = async () => {
+    setIsTestingSimplyRcs(true);
+    try {
+      const response = await adminApi.registerSimplyRcsWebhook();
+      if (response.success) {
+        notify.success(
+          response.data.alreadyRegistered ? 'Webhook already registered' : 'Webhook registered',
+          response.data.secretStored ? 'The signing secret was stored in runtime settings.' : `SimplyRCS will post to ${response.data.url}.`
+        );
+        await loadSettings();
+      }
+    } catch (registerError) {
+      notify.error('Unable to register the SimplyRCS webhook', registerError instanceof Error ? registerError.message : 'Request failed');
+    } finally {
+      setIsTestingSimplyRcs(false);
+    }
+  };
+
   const handleTestConnection = async () => {
     setIsTestingConnection(true);
     setError(null);
@@ -411,6 +461,30 @@ export function AdminSettingsPage() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="max-w-3xl space-y-2">
               <div className="flex items-center gap-2">
+                <Activity className="h-4 w-4 text-emerald-500" />
+                <h2 className="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">SimplyRCS Connectivity</h2>
+              </div>
+              <p className="text-sm leading-6 text-slate-600 dark:text-slate-400">
+                RCS messaging runs through SimplyRCS. Test the API key, and register this server&apos;s callback URL so delivery receipts and replies arrive.
+              </p>
+              <div className="flex flex-wrap gap-2 pt-2">
+                <Button variant="outline" onClick={handleTestSimplyRcs} isLoading={isTestingSimplyRcs}>Test SimplyRCS Connection</Button>
+                <Button variant="outline" onClick={handleRegisterSimplyRcsWebhook} isLoading={isTestingSimplyRcs}>Register webhook</Button>
+              </div>
+              {simplyRcsDiagnostic && (
+                <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-900">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={simplyRcsDiagnostic.ok ? 'default' : 'destructive'}>{simplyRcsDiagnostic.ok ? 'Reachable' : 'Blocked'}</Badge>
+                    <span className="text-slate-600 dark:text-slate-400">{simplyRcsDiagnostic.message}</span>
+                  </div>
+                  {simplyRcsDiagnostic.ok && (
+                    <p className="mt-2 text-slate-600 dark:text-slate-400">
+                      {simplyRcsDiagnostic.rcsChannels ?? 0} RCS channels · {simplyRcsDiagnostic.rcsAgents ?? 0} agents · {simplyRcsDiagnostic.webhookEndpoints ?? 0} webhook endpoints
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="flex items-center gap-2 pt-6">
                 <Activity className="h-4 w-4 text-sky-500" />
                 <h2 className="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">
                   Signalmash Connectivity

@@ -5,6 +5,7 @@ import {
   Building2,
   Megaphone,
   Phone,
+  Smartphone,
   MessageSquare,
   Plug,
   CreditCard,
@@ -20,6 +21,7 @@ const navigation = [
   { name: 'Onboarding', href: '/onboarding', icon: ListChecks },
   { name: 'Brands', href: '/brands', icon: Building2 },
   { name: 'Campaigns', href: '/campaigns', icon: Megaphone },
+  { name: 'RCS Agent', href: '/rcs-agent', icon: Smartphone },
   { name: 'Phone Numbers', href: '/phone-numbers', icon: Phone },
   { name: 'Messages', href: '/messages', icon: MessageSquare },
   { name: 'Platforms', href: '/platforms', icon: Plug },
@@ -58,6 +60,7 @@ export function Sidebar({ collapsed, onToggle, mobileOnly = false }: SidebarProp
             <div className="text-[18px] font-bold leading-none tracking-[-0.015em]">
               <span className="text-[#2FB267]">Mash</span>
               <span className="text-[#111827]">Connect</span>
+              <span className="ml-1 text-[11px] font-bold uppercase tracking-[0.12em] text-[#6B7280]">RCS</span>
             </div>
           </div>
           <div className="flex h-8 w-8 items-center justify-center rounded-[8px] bg-[#2FB267] text-xs font-bold text-white">

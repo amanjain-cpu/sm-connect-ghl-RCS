@@ -40,13 +40,16 @@ import { notify } from '@/stores/notification.store';
 interface Message {
   id: string;
   direction: 'inbound' | 'outbound';
-  type: 'sms' | 'mms';
+  type: 'sms' | 'mms' | 'rcs';
   from: string;
   to: string;
   body: string;
-  status: 'queued' | 'sending' | 'sent' | 'delivered' | 'failed' | 'undelivered' | 'received';
+  status: 'queued' | 'sending' | 'sent' | 'delivered' | 'read' | 'failed' | 'undelivered' | 'received';
   errorMessage: string | null;
   signalmashMessageId: string | null;
+  rcsMessageId?: string | null;
+  deliveryChannel?: 'sms' | 'mms' | 'rcs' | null;
+  fallbackReason?: string | null;
   platformConnectionId: string | null;
   campaignId: string | null;
   createdAt: string;
@@ -79,6 +82,7 @@ const statusConfig = {
   sending: { label: 'Sending', icon: Send, variant: 'warning' as const },
   sent: { label: 'Sent', icon: Send, variant: 'warning' as const },
   delivered: { label: 'Delivered', icon: CheckCircle, variant: 'success' as const },
+  read: { label: 'Read', icon: CheckCircle, variant: 'success' as const },
   failed: { label: 'Failed', icon: XCircle, variant: 'destructive' as const },
   undelivered: { label: 'Undelivered', icon: XCircle, variant: 'destructive' as const },
   received: { label: 'Received', icon: ArrowDownLeft, variant: 'default' as const },
@@ -110,6 +114,7 @@ export function MessagesPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [senderNumbers, setSenderNumbers] = useState<SenderNumber[]>([]);
   const [campaignOptions, setCampaignOptions] = useState<CampaignOption[]>([]);
+  const [rcsAgent, setRcsAgent] = useState<{ senderName: string; status: string } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -140,10 +145,15 @@ export function MessagesPage() {
 
   const loadComposerOptions = async () => {
     try {
-      const [numbersResponse, campaignsResponse] = await Promise.all([
+      const [numbersResponse, campaignsResponse, agentResponse] = await Promise.all([
         api.getPhoneNumbers({ status: 'active', limit: 100 }),
         api.getCampaigns({ status: 'approved' }),
+        api.getRcsAgent().catch(() => null),
       ]);
+
+      const agent = agentResponse?.success ? agentResponse.data?.agent : null;
+      const rcsSendable = agent && agent.simplyrcsSenderIdId && ['live', 'ready_for_testing', 'in_testing', 'pending_launch'].includes(agent.status);
+      setRcsAgent(rcsSendable ? { senderName: agent.senderName, status: agent.status } : null);
 
       if (numbersResponse.success && numbersResponse.data) {
         setSenderNumbers(numbersResponse.data);
@@ -199,6 +209,12 @@ export function MessagesPage() {
   const hasApprovedCampaigns = campaignOptions.length > 0;
   const hasCampaignAssignedSender = unlockedSenderNumbers.some((number) => number.campaign?.status === 'approved');
   const canRunSmsSend = hasUnlockedSenders && (hasApprovedCampaigns || hasCampaignAssignedSender);
+  // RCS goes out from the agent, so it works before any 10DLC number exists (RCS-capable phones only).
+  const rcsReady = Boolean(rcsAgent);
+  const canCompose = canRunSmsSend || rcsReady;
+  const rcsSenderValue = 'rcs';
+  const rcsFrom = rcsAgent ? `rcs:${rcsAgent.senderName}` : '';
+  const composingRcs = composeForm.phoneNumberId === rcsSenderValue;
   const sendSmsDisabledReason = everySenderLocked
     ? `Available in ${formatProvisioningWait(soonestLockedSenderRemainingMs)} while newly purchased numbers finish provisioning.`
     : !hasActiveSenders
@@ -212,7 +228,7 @@ export function MessagesPage() {
   };
 
   const openComposeDialog = () => {
-    if (!canRunSmsSend) {
+    if (!canCompose) {
       notify.error(
         'Send SMS unavailable',
         sendSmsDisabledReason ?? 'Complete sender and campaign setup before sending SMS.'
@@ -221,10 +237,11 @@ export function MessagesPage() {
     }
 
     const defaultNumber = unlockedSenderNumbers[0];
+    const useRcs = !defaultNumber && rcsReady;
 
     setComposeForm({
-      phoneNumberId: defaultNumber?.id || '',
-      from: defaultNumber?.phoneNumber || '',
+      phoneNumberId: useRcs ? rcsSenderValue : defaultNumber?.id || '',
+      from: useRcs ? rcsFrom : defaultNumber?.phoneNumber || '',
       to: '',
       campaignId: defaultNumber?.campaign?.status === 'approved' ? defaultNumber.campaign.id : '',
       body: '',
@@ -247,8 +264,8 @@ export function MessagesPage() {
 
     try {
       const response = await api.sendMessage({
-        phoneNumberId: composeForm.phoneNumberId || undefined,
-        from: normalizePhoneNumber(composeForm.from),
+        phoneNumberId: composingRcs ? undefined : composeForm.phoneNumberId || undefined,
+        from: composingRcs ? undefined : normalizePhoneNumber(composeForm.from),
         to: normalizePhoneNumber(composeForm.to),
         body: composeForm.body,
         campaignId: composeForm.campaignId || undefined,
@@ -297,7 +314,7 @@ export function MessagesPage() {
         action={{
           label: 'Send SMS',
           onClick: openComposeDialog,
-          disabled: !canRunSmsSend,
+          disabled: !canCompose,
           disabledReason: sendSmsDisabledReason,
           disabledText: everySenderLocked
             ? formatProvisioningCountdown(soonestLockedSenderRemainingMs)
@@ -342,7 +359,7 @@ export function MessagesPage() {
           </div>
         </PageSection>
 
-        {!canRunSmsSend && (
+        {!canCompose && (
           <Card className="border-border bg-accent shadow-card">
             <CardContent className="flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
               <div className="space-y-2">
@@ -391,7 +408,7 @@ export function MessagesPage() {
                 variant="outline"
                 onClick={openComposeDialog}
                 leftIcon={<Send className="h-4 w-4" />}
-                disabled={!canRunSmsSend}
+                disabled={!canCompose}
               >
                 Send SMS
               </Button>
@@ -454,7 +471,7 @@ export function MessagesPage() {
               <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-600 dark:text-slate-400">
                 {searchQuery || statusFilter !== 'all' || directionFilter !== 'all'
                   ? 'Adjust your filters to review a broader set of messages.'
-                  : canRunSmsSend
+                  : canCompose
                     ? 'Messages will appear here once your organization starts sending or receiving traffic.'
                     : 'Finish sender and campaign readiness first, then use Send SMS to generate initial traffic.'}
               </p>
@@ -484,7 +501,10 @@ export function MessagesPage() {
                             <span className="text-sm font-medium text-slate-950 dark:text-slate-50">
                               {isOutbound ? 'To' : 'From'} {formatPhoneNumber(isOutbound ? message.to : message.from)}
                             </span>
-                            <Badge variant="outline">{message.type.toUpperCase()}</Badge>
+                            <Badge variant={message.type === 'rcs' ? 'success' : 'outline'}>{message.type.toUpperCase()}</Badge>
+                            {message.fallbackReason && (
+                              <Badge variant="secondary" title={message.fallbackReason}>SMS fallback: {message.fallbackReason.split(':')[0].replace(/_/g, ' ')}</Badge>
+                            )}
                             <Badge variant={status.variant} className="gap-1">
                               <StatusIcon className="h-3 w-3" />
                               {status.label}
@@ -527,7 +547,7 @@ export function MessagesPage() {
                         <div className="flex justify-between gap-3">
                           <span>Message ID</span>
                           <span className="max-w-[150px] truncate font-medium text-slate-950 dark:text-slate-50">
-                            {message.signalmashMessageId || message.id}
+                            {message.rcsMessageId || message.signalmashMessageId || message.id}
                           </span>
                         </div>
                       </div>
@@ -543,13 +563,13 @@ export function MessagesPage() {
       <Dialog open={showComposeDialog} onOpenChange={setShowComposeDialog}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Send SMS</DialogTitle>
+            <DialogTitle>Send message</DialogTitle>
             <DialogDescription>
-              Send an outbound SMS using an active owned number and, if needed, an approved campaign.
+              Goes out as RCS when your agent is live and the phone supports it; otherwise as SMS from the selected number.
             </DialogDescription>
           </DialogHeader>
 
-          {senderNumbers.length === 0 ? (
+          {senderNumbers.length === 0 && !rcsReady ? (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
               No active phone numbers are available yet. Purchase and activate a number before sending SMS.
             </div>
@@ -562,6 +582,10 @@ export function MessagesPage() {
                     value={composeForm.phoneNumberId}
                     onChange={(e) => {
                       const nextPhoneNumberId = e.target.value;
+                      if (nextPhoneNumberId === rcsSenderValue) {
+                        setComposeForm((current) => ({ ...current, phoneNumberId: rcsSenderValue, from: rcsFrom, campaignId: '' }));
+                        return;
+                      }
                       const selectedNumber = senderNumbers.find((number) => number.id === nextPhoneNumberId);
 
                       setComposeForm((current) => ({
@@ -575,6 +599,9 @@ export function MessagesPage() {
                     }}
                     className="h-11 w-full rounded-xl border border-slate-300 bg-white px-4 text-sm text-slate-950 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-50"
                   >
+                    {rcsReady && (
+                      <option value={rcsSenderValue}>RCS agent - {rcsAgent?.senderName} (RCS-capable phones only)</option>
+                    )}
                     {senderNumbers.map((number) => {
                       const provisioningState = senderProvisioningState.get(number.id);
                       const remainingMs = provisioningState?.remainingMs ?? 0;
@@ -654,9 +681,9 @@ export function MessagesPage() {
             <Button
               onClick={handleSendMessage}
               isLoading={isSending}
-              disabled={!canRunSmsSend || selectedSenderLocked || !composeForm.from || !composeForm.to || !composeForm.body.trim()}
+              disabled={!canCompose || selectedSenderLocked || !composeForm.from || !composeForm.to || !composeForm.body.trim()}
             >
-              Send SMS
+              {composingRcs ? 'Send RCS' : 'Send SMS'}
             </Button>
           </DialogFooter>
         </DialogContent>

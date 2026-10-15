@@ -19,6 +19,9 @@ export const SETTINGS_KEYS = {
   SIGNALMASH_API_KEY: 'signalmash_api_key',
   SIGNALMASH_API_URL: 'signalmash_api_url',
   SIGNALMASH_WEBHOOK_SECRET: 'signalmash_webhook_secret',
+  SIMPLYRCS_API_KEY: 'simplyrcs_api_key',
+  SIMPLYRCS_API_URL: 'simplyrcs_api_url',
+  SIMPLYRCS_WEBHOOK_SECRET: 'simplyrcs_webhook_secret',
   STRIPE_SECRET_KEY: 'stripe_secret_key',
   STRIPE_WEBHOOK_SECRET: 'stripe_webhook_secret',
   STRIPE_PRICE_STARTER_MONTHLY: 'stripe_price_starter_monthly',
@@ -806,7 +809,7 @@ export class AdminService {
       },
       {
         key: SETTINGS_KEYS.APP_NAME,
-        value: 'SignalMash Connect',
+        value: 'SignalMash Connect RCS',
         description: 'Application display name',
         isEncrypted: false,
       },
@@ -1487,6 +1490,8 @@ export class AdminService {
     const sensitiveKeys = [
       SETTINGS_KEYS.SIGNALMASH_API_KEY,
       SETTINGS_KEYS.SIGNALMASH_WEBHOOK_SECRET,
+      SETTINGS_KEYS.SIMPLYRCS_API_KEY,
+      SETTINGS_KEYS.SIMPLYRCS_WEBHOOK_SECRET,
       SETTINGS_KEYS.STRIPE_SECRET_KEY,
       SETTINGS_KEYS.STRIPE_WEBHOOK_SECRET,
       SETTINGS_KEYS.GHL_APP_CLIENT_SECRET,

@@ -50,6 +50,8 @@ model Organization {
   providerOperationLogs ProviderOperationLog[]
 
   @@map("organizations")
+  rcsAgent        RcsAgent?
+  rcsCapabilities RcsCapability[]
 }
 
 enum OrganizationStatus {
@@ -369,6 +371,7 @@ enum PlatformStatus {
 
 enum MessagingProvider {
   signalmash
+  simplyrcs
 }
 
 enum IntegrationLifecycleState {
@@ -897,12 +900,20 @@ model Message {
 
   // External IDs
   signalmashMessageId    String? @unique @map("signalmash_message_id")
+  rcsMessageId           String? @unique @map("rcs_message_id")
+  rcsConversationId      String? @map("rcs_conversation_id")
   platformMessageId      String? @map("platform_message_id")
   platformConversationId String? @map("platform_conversation_id")
+
+  // Routing: the channel the message was delivered on, and why RCS was not used when it was requested.
+  deliveryChannel DeliveryChannel? @map("delivery_channel")
+  fallbackReason  String?          @map("fallback_reason")
+  rcsContent      Json?            @map("rcs_content")
 
   // Timestamps
   sentAt      DateTime? @map("sent_at")
   deliveredAt DateTime? @map("delivered_at")
+  readAt      DateTime? @map("read_at")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
@@ -926,7 +937,65 @@ model Message {
   @@index([campaignId])
   @@index([status])
   @@index([createdAt])
+  @@index([rcsConversationId])
   @@map("messages")
+}
+
+/// The organization's RCS sender: a Google-verified business profile registered through SimplyRCS.
+/// One agent per organization in this version. Messages fall back to the Signalmash SMS number
+/// while the agent is not live or the recipient's phone cannot receive RCS.
+model RcsAgent {
+  id          String         @id @default(uuid())
+  status      RcsAgentStatus @default(draft)
+  senderName  String         @map("sender_name")
+  displayName String         @map("display_name")
+  description String
+  logoUrl     String         @map("logo_url")
+  bannerUrl   String         @map("banner_url")
+  color       String
+  billingCategory String     @default("CONVERSATIONAL") @map("billing_category")
+  useCase     String         @default("MULTI_USE") @map("use_case")
+  phone       String?
+  email       String?
+  website     String?
+  privacyUrl  String?        @map("privacy_url")
+  termsUrl    String?        @map("terms_url")
+
+  // SimplyRCS identifiers
+  simplyrcsChannelId  String? @map("simplyrcs_channel_id")
+  simplyrcsSenderIdId String? @unique @map("simplyrcs_sender_id_id")
+  providerStatus      String? @map("provider_status")
+  providerMessage     String? @map("provider_message")
+  testDevices         Json?   @map("test_devices")
+  submittedAt         DateTime? @map("submitted_at")
+  launchedAt          DateTime? @map("launched_at")
+  lastStatusSyncedAt  DateTime? @map("last_status_synced_at")
+  lastSubmissionError String?   @map("last_submission_error")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organizationId String       @unique @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("rcs_agents")
+}
+
+/// Cached answer to "can this phone receive RCS?", refreshed after `checkedAt` ages out.
+model RcsCapability {
+  id            String   @id @default(uuid())
+  phoneNumber   String   @map("phone_number")
+  isRcsCapable  Boolean  @map("is_rcs_capable")
+  rcsContactId  String?  @map("rcs_contact_id")
+  provider      String?
+  checkedAt     DateTime @default(now()) @map("checked_at")
+
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, phoneNumber])
+  @@index([checkedAt])
+  @@map("rcs_capabilities")
 }
 
 enum MessageDirection {
@@ -937,6 +1006,25 @@ enum MessageDirection {
 enum MessageType {
   sms
   mms
+  rcs
+}
+
+/// Which network actually carried the message: RCS through SimplyRCS, or SMS/MMS through Signalmash.
+enum DeliveryChannel {
+  sms
+  mms
+  rcs
+}
+
+enum RcsAgentStatus {
+  draft
+  submitted
+  ready_for_testing
+  in_testing
+  pending_launch
+  live
+  suspended
+  rejected
 }
 
 enum MessageStatus {
@@ -944,6 +1032,7 @@ enum MessageStatus {
   sending
   sent
   delivered
+  read
   failed
   undelivered
   received
