@@ -117,6 +117,8 @@ export async function sendWithFallback(
     rcsContent?: RcsContent | null;
     idempotencyKey: string;
     messageType?: 'MARKETING' | 'TRANSACTIONAL' | 'SERVICE';
+    /** False when the message has no SMS sender (sent from the RCS agent alone): an RCS rejection then fails the message. */
+    smsFallbackAvailable?: boolean;
   }
 ): Promise<SendOutcome> {
   const smsChannel = input.mediaUrls && input.mediaUrls.length > 0 ? 'mms' : 'sms';
@@ -125,7 +127,10 @@ export async function sendWithFallback(
     return { channel: smsChannel, signalmashMessageId: result.messageId ?? null, fallbackReason, detail };
   };
 
-  if (input.decision.channel === 'sms') return viaSms(input.decision.reason, input.decision.detail);
+  if (input.decision.channel === 'sms') {
+    if (input.smsFallbackAvailable === false) throw new Error('This message has no SMS sender and the recipient cannot receive RCS');
+    return viaSms(input.decision.reason, input.decision.detail);
+  }
 
   try {
     const result = await ports.sendRcs({
@@ -138,7 +143,7 @@ export async function sendWithFallback(
     });
     return { channel: 'rcs', rcsMessageId: result.messageId, rcsConversationId: result.conversationId, fallbackReason: null };
   } catch (error) {
-    if (error instanceof SimplyRcsRejectedError) {
+    if (error instanceof SimplyRcsRejectedError && input.smsFallbackAvailable !== false) {
       return viaSms('rcs_rejected', error.message);
     }
     throw error;

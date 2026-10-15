@@ -17,9 +17,13 @@ const router: RouterType = Router();
 const sendMessageSchema = z.object({
   campaignId: z.string().uuid().optional(),
   phoneNumberId: z.string().uuid().optional(),
-  from: phoneSchema,
+  // Optional: without a number the message goes out from the RCS agent (RCS-capable recipients only).
+  from: phoneSchema.optional(),
   to: phoneSchema,
   body: z.string().min(1, 'Message body is required').max(1600),
+  preferRcs: z.boolean().optional(),
+  messageType: z.enum(['MARKETING', 'TRANSACTIONAL', 'SERVICE']).optional(),
+  rcsContent: z.record(z.unknown()).nullable().optional(),
   mediaUrls: z.array(z.string().url()).max(10).optional(),
 });
 

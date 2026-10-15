@@ -388,7 +388,7 @@ class ApiClient {
     return this.get<any[]>(`/messages${query ? `?${query}` : ''}`);
   }
 
-  async sendMessage(data: { from: string; to: string; body: string; campaignId?: string; phoneNumberId?: string; preferRcs?: boolean; rcsContent?: Record<string, unknown> | null; messageType?: 'MARKETING' | 'TRANSACTIONAL' | 'SERVICE' }) {
+  async sendMessage(data: { from?: string; to: string; body: string; campaignId?: string; phoneNumberId?: string; preferRcs?: boolean; rcsContent?: Record<string, unknown> | null; messageType?: 'MARKETING' | 'TRANSACTIONAL' | 'SERVICE' }) {
     return this.post<any>('/messages', data);
   }
 

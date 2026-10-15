@@ -107,6 +107,13 @@ test('does not send twice when the RCS outcome is uncertain', async () => {
   assert.deepEqual(p.calls, ['rcs']);
 });
 
+test('a message sent from the RCS agent alone fails on rejection instead of falling back to SMS', async () => {
+  const p = sendPorts({ rcs: 'reject' });
+  await assert.rejects(sendWithFallback(p, { ...base, smsFallbackAvailable: false, decision: { channel: 'rcs', agent: liveAgent, contactId: 'ct_1' } }), /does not support RCS/);
+  assert.deepEqual(p.calls, ['rcs']);
+  await assert.rejects(sendWithFallback(p, { ...base, smsFallbackAvailable: false, decision: { channel: 'sms', reason: 'no_live_agent' } }), /no SMS sender/);
+});
+
 test('sends straight to SMS, keeping the reason, when the decision was SMS', async () => {
   const p = sendPorts({});
   const outcome = await sendWithFallback(p, { ...base, decision: { channel: 'sms', reason: 'no_live_agent' } });

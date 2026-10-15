@@ -15,7 +15,7 @@ import { walletBillingService } from './wallet-billing.service.js';
 import { evaluateInstallationSenderPolicy } from './message-installation-routing.service.js';
 import { simplyRcsService, type RcsContent } from './simplyrcs.service.js';
 import { rcsAgentService } from './rcs-agent.service.js';
-import { decideChannel, sendWithFallback, type RoutingPorts, type SendPorts, type SendOutcome } from './rcs-routing.service.js';
+import { decideChannel, sendWithFallback, type RoutingPorts, type SendPorts, type SendOutcome , type RouteDecision } from './rcs-routing.service.js';
 
 interface SendMessageInput {
   organizationId: string;
@@ -25,7 +25,8 @@ interface SendMessageInput {
   phoneNumberId?: string;
   platformMessageId?: string;
   platformConversationId?: string;
-  from: string;
+  /** Sender number. Optional when the recipient can receive RCS: the message then goes out from the RCS agent. */
+  from?: string;
   to: string;
   body: string;
   mediaUrls?: string[];
@@ -410,6 +411,47 @@ export class MessageService {
   }
 
   /**
+   * Sender for this message. SMS needs an active 10DLC number on an approved campaign. RCS goes
+   * out from the organization's agent, so it works before any number exists; such a message
+   * cannot fall back to SMS.
+   */
+  private async resolveSenderContext(input: {
+    organizationId: string;
+    from?: string | null;
+    phoneNumberId?: string;
+    campaignId?: string;
+    installationId?: string | null;
+    decision: RouteDecision;
+  }): Promise<{ formattedFrom: string; phoneNumberId: string | null; campaignId: string | null; smsFallbackAvailable: boolean }> {
+    const from = input.from?.trim() ?? '';
+    const hasNumber = from.length > 0 && !from.startsWith('rcs:');
+    if (hasNumber) {
+      try {
+        const context = await this.resolveApprovedSenderContext({
+          organizationId: input.organizationId,
+          from,
+          phoneNumberId: input.phoneNumberId,
+          campaignId: input.campaignId,
+          installationId: input.installationId,
+        });
+        return { ...context, smsFallbackAvailable: true };
+      } catch (error) {
+        if (input.decision.channel !== 'rcs') throw error;
+      }
+    } else if (input.decision.channel !== 'rcs') {
+      const reason = input.decision.channel === 'sms' ? input.decision.reason : null;
+      throw new BadRequestError(
+        reason
+          ? `This recipient gets SMS (${reason.replace(/_/g, ' ')}), which needs an active sender number on an approved campaign.`
+          : 'Choose an active sender number.'
+      );
+    }
+    const agent = await rcsAgentService.getForOrganization(input.organizationId);
+    if (!agent) throw new BadRequestError('No RCS agent is set up for this organization.');
+    return { formattedFrom: `rcs:${agent.senderName}`, phoneNumberId: null, campaignId: null, smsFallbackAvailable: false };
+  }
+
+  /**
    * Send an outbound message
    */
   async send(input: SendMessageInput): Promise<Message> {
@@ -440,15 +482,16 @@ export class MessageService {
       installationId,
     });
 
-    const senderContext = await this.resolveApprovedSenderContext({
+    const decision = await decideChannel(this.routingPorts(), { organizationId, to: formattedTo, rcsEnabled: input.preferRcs !== false });
+
+    const senderContext = await this.resolveSenderContext({
       organizationId,
       from,
       phoneNumberId,
       campaignId,
       installationId: platformContext.installationId,
+      decision,
     });
-
-    const decision = await decideChannel(this.routingPorts(), { organizationId, to: formattedTo, rcsEnabled: input.preferRcs !== false });
 
     const billingEstimate = await walletBillingService.assertCanSendMessage({
       organizationId,
@@ -495,6 +538,7 @@ export class MessageService {
         rcsContent: input.rcsContent ?? null,
         idempotencyKey: `msg:${message.id}`,
         messageType: input.messageType,
+        smsFallbackAvailable: senderContext.smsFallbackAvailable,
       });
 
       // A fallback changes what is billed
@@ -560,6 +604,9 @@ export class MessageService {
       return existing;
     }
 
+    if (!input.from) {
+      throw new BadRequestError('A sender number is required for queued messages');
+    }
     const formattedFrom = formatPhoneE164(input.from);
     const formattedTo = formatPhoneE164(input.to);
 
@@ -575,7 +622,7 @@ export class MessageService {
 
     const senderContext = await this.resolveApprovedSenderContext({
       organizationId: input.organizationId,
-      from: input.from,
+      from: formattedFrom,
       phoneNumberId: input.phoneNumberId,
       campaignId: input.campaignId,
       installationId: platformContext.installationId,
@@ -623,16 +670,17 @@ export class MessageService {
         platformConnectionId: message.platformConnectionId,
       });
 
-      const senderContext = await this.resolveApprovedSenderContext({
+      const mediaUrls = Array.isArray(message.mediaUrls) ? message.mediaUrls as string[] : undefined;
+      const decision = await decideChannel(this.routingPorts(), { organizationId: message.organizationId, to: message.to });
+
+      const senderContext = await this.resolveSenderContext({
         organizationId: message.organizationId,
         from: message.from,
         phoneNumberId: message.phoneNumberId ?? undefined,
         campaignId: message.campaignId ?? undefined,
         installationId: platformContext.installationId,
+        decision,
       });
-
-      const mediaUrls = Array.isArray(message.mediaUrls) ? message.mediaUrls as string[] : undefined;
-      const decision = await decideChannel(this.routingPorts(), { organizationId: message.organizationId, to: message.to });
 
       const billingEstimate = await walletBillingService.assertCanSendMessage({
         organizationId: message.organizationId,
@@ -660,6 +708,7 @@ export class MessageService {
         mediaUrls,
         rcsContent: (message.rcsContent as RcsContent | null) ?? null,
         idempotencyKey: `msg:${message.id}`,
+        smsFallbackAvailable: senderContext.smsFallbackAvailable,
       });
 
       const finalEstimate = outcome.channel === (decision.channel === 'rcs' ? 'rcs' : billingEstimate.unit)
